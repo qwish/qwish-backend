@@ -98,10 +98,16 @@ func (h *Handler) ReportQuestion(w http.ResponseWriter, r *http.Request) {
 		Reason      string `json:"reason"`
 		Description string `json:"description"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Reason == "" {
+		middleware.BadRequest(w, "reason is required")
+		return
+	}
 	quizID := chi.URLParam(r, "quizId")
 	qID := chi.URLParam(r, "questionId")
-	h.svc.SubmitReport(r.Context(), middleware.GetUserID(r), quizID, &qID, req.Reason, req.Description)
+	if err := h.svc.SubmitReport(r.Context(), middleware.GetUserID(r), quizID, &qID, req.Reason, req.Description); err != nil {
+		middleware.InternalError(w)
+		return
+	}
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "thanks — we'll review this"})
 }
 

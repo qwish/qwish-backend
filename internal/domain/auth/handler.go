@@ -51,7 +51,13 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.svc.CreateUser(r.Context(), authResp.User.ID, req.FullName, req.Email, role, instID)
+	uid := authResp.UserID()
+	if uid == "" {
+		middleware.Error(w, http.StatusUnprocessableEntity, "EMAIL_CONFIRMATION_REQUIRED", "please confirm your email before continuing")
+		return
+	}
+
+	user, err := h.svc.CreateUser(r.Context(), uid, req.FullName, req.Email, role, instID)
 	if err != nil {
 		middleware.InternalError(w)
 		return

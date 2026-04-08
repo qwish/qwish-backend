@@ -3,7 +3,6 @@ package parent
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -79,11 +78,11 @@ func (h *Handler) Accept(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.GetUserID(r)
 	linkID := chi.URLParam(r, "linkId")
 
-	_, err := h.db.Exec(r.Context(),
+	tag, err := h.db.Exec(r.Context(),
 		`UPDATE parent_student_links SET status='active', linked_at=now()
 		 WHERE id=$1 AND student_id=$2 AND status='pending'`,
 		linkID, userID)
-	if err != nil {
+	if err != nil || tag.RowsAffected() == 0 {
 		middleware.BadRequest(w, "link not found or already processed")
 		return
 	}
@@ -204,10 +203,6 @@ func getChildOverview(ctx context.Context, db *pgxpool.Pool, studentID string) (
 		var bt string
 		badgeRows.Scan(&bt)
 		badges = append(badges, bt)
-	}
-
-	if err := fmt.Errorf(""); err != nil && false {
-		return nil, err
 	}
 
 	return map[string]interface{}{

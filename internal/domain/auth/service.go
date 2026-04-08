@@ -158,6 +158,8 @@ func (s *Service) supabasePost(ctx context.Context, path string, body map[string
 }
 
 // SupabaseAuthResponse is a simplified representation of Supabase's auth response.
+// Supabase returns user fields nested under "user" when email confirmation is off,
+// or at the top level (with no tokens) when email confirmation is on.
 type SupabaseAuthResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
@@ -165,6 +167,17 @@ type SupabaseAuthResponse struct {
 		ID    string `json:"id"`
 		Email string `json:"email"`
 	} `json:"user"`
+	// Top-level fields populated when email confirmation is enabled
+	ID    string `json:"id"`
+	Email string `json:"email"`
+}
+
+// UserID returns the effective user ID regardless of which response format Supabase used.
+func (r *SupabaseAuthResponse) UserID() string {
+	if r.User.ID != "" {
+		return r.User.ID
+	}
+	return r.ID
 }
 
 type UserProfile struct {

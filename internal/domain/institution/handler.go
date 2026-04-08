@@ -1,6 +1,8 @@
 package institution
 
 import (
+	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -671,17 +673,23 @@ func (h *Handler) StudentPerformanceReport(w http.ResponseWriter, r *http.Reques
 	middleware.JSON(w, http.StatusOK, result)
 }
 
-// Helper: log institution-level audit entries
-func logAudit(ctx interface{ Value(interface{}) interface{} }, db *pgxpool.Pool, adminID, action, targetType, targetID, reason string) {
-	// We need the real context; using a workaround
+// logAudit writes an institution-level audit entry.
+func logAudit(ctx context.Context, db *pgxpool.Pool, adminID, action, targetType, targetID, reason string) {
+	var adminName, adminRole string
+	db.QueryRow(ctx, `SELECT display_name, role FROM users WHERE id=$1`, adminID).Scan(&adminName, &adminRole)
+	db.Exec(ctx,
+		`INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, reason)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		adminID, adminName, adminRole, action, targetType, targetID, reason)
 }
 
 func generateCode(n int) string {
 	const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, n)
+	rb := make([]byte, n)
+	rand.Read(rb)
 	for i := range b {
-		b[i] = letters[time.Now().UnixNano()%int64(len(letters))]
-		time.Sleep(1)
+		b[i] = letters[int(rb[i])%len(letters)]
 	}
 	return string(b)
 }

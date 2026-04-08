@@ -4,10 +4,12 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/qwish/backend/internal/config"
 	"github.com/qwish/backend/internal/db"
@@ -34,6 +36,8 @@ func main() {
 	cfg := config.Load()
 	pool := db.Connect(cfg.DatabaseURL)
 	defer pool.Close()
+
+	db.RunMigrations(pool)
 
 	// Services
 	authSvc := auth.NewService(pool, cfg)
@@ -67,9 +71,17 @@ func main() {
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.Timeout(30 * time.Second))
+	allowedOrigins := buildOriginSet(cfg.AllowedOrigins)
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
+			origin := req.Header.Get("Origin")
+			if allowedOrigins == nil {
+				// wildcard: allow all
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			} else if origin != "" && allowedOrigins[origin] {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 			if req.Method == http.MethodOptions {
@@ -304,7 +316,7 @@ func main() {
 
 	// Optionally run in-process cron on Render (no separate worker)
 	if cfg.AppEnv == "production" {
-		go runInProcessCron(sched)
+		go runInProcessCron(pool, sched)
 	}
 
 	if err := srv.ListenAndServe(); err != nil {
@@ -312,8 +324,45 @@ func main() {
 	}
 }
 
+// buildOriginSet parses a comma-separated ALLOWED_ORIGINS value.
+// Returns nil when the value is "*" (wildcard).
+func buildOriginSet(raw string) map[string]bool {
+	if raw == "" || raw == "*" {
+		return nil
+	}
+	set := map[string]bool{}
+	for _, o := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(o); trimmed != "" {
+			set[trimmed] = true
+		}
+	}
+	return set
+}
+
 // runInProcessCron runs scheduled jobs using Go tickers (alternative to external cron triggers).
-func runInProcessCron(sched *scheduler.Scheduler) {
+// It acquires a PostgreSQL advisory lock so only one instance runs cron when scaled horizontally.
+func runInProcessCron(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
+	ctx := context.Background()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		log.Printf("[cron] failed to acquire db connection: %v", err)
+		return
+	}
+	// Advisory lock key — unique fixed integer for this service's cron scheduler.
+	// The lock is held for the lifetime of conn (i.e. the process).
+	const lockKey = 7654321
+	var acquired bool
+	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey).Scan(&acquired); err != nil {
+		log.Printf("[cron] advisory lock query failed: %v", err)
+		conn.Release()
+		return
+	}
+	if !acquired {
+		log.Println("[cron] another instance holds the scheduler lock — skipping in-process cron")
+		conn.Release()
+		return
+	}
+	// conn intentionally not released: the advisory lock is tied to this session.
 	log.Println("[cron] in-process scheduler started")
 
 	// Close expired quizzes every hour

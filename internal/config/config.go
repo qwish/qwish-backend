@@ -21,6 +21,7 @@ type Config struct {
 	R2PublicURL        string
 	ResendAPIKey       string
 	CronSecret         string
+	AllowedOrigins     string
 }
 
 func Load() *Config {
@@ -42,6 +43,7 @@ func Load() *Config {
 		R2PublicURL:        getEnv("R2_PUBLIC_URL", ""),
 		ResendAPIKey:       getEnv("RESEND_API_KEY", ""),
 		CronSecret:         getEnv("CRON_SECRET", ""),
+		AllowedOrigins:     getEnv("ALLOWED_ORIGINS", "*"),
 	}
 }
 

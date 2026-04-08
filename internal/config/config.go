@@ -1,0 +1,61 @@
+package config
+
+import (
+	"log"
+	"os"
+
+	"github.com/joho/godotenv"
+)
+
+type Config struct {
+	Port               string
+	AppEnv             string
+	DatabaseURL        string
+	SupabaseURL        string
+	SupabaseServiceKey string
+	SupabaseJWTSecret  string
+	R2AccountID        string
+	R2AccessKeyID      string
+	R2SecretAccessKey  string
+	R2BucketName       string
+	R2PublicURL        string
+	ResendAPIKey       string
+	CronSecret         string
+}
+
+func Load() *Config {
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, reading from environment")
+	}
+
+	return &Config{
+		Port:               getEnv("PORT", "8080"),
+		AppEnv:             getEnv("APP_ENV", "development"),
+		DatabaseURL:        mustEnv("DATABASE_URL"),
+		SupabaseURL:        mustEnv("SUPABASE_URL"),
+		SupabaseServiceKey: mustEnv("SUPABASE_SERVICE_ROLE_KEY"),
+		SupabaseJWTSecret:  mustEnv("SUPABASE_JWT_SECRET"),
+		R2AccountID:        getEnv("R2_ACCOUNT_ID", ""),
+		R2AccessKeyID:      getEnv("R2_ACCESS_KEY_ID", ""),
+		R2SecretAccessKey:  getEnv("R2_SECRET_ACCESS_KEY", ""),
+		R2BucketName:       getEnv("R2_BUCKET_NAME", "quizapp-media"),
+		R2PublicURL:        getEnv("R2_PUBLIC_URL", ""),
+		ResendAPIKey:       getEnv("RESEND_API_KEY", ""),
+		CronSecret:         getEnv("CRON_SECRET", ""),
+	}
+}
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func mustEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		log.Fatalf("required environment variable %s is not set", key)
+	}
+	return v
+}

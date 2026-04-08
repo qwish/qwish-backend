@@ -1,0 +1,412 @@
+package attempt
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/domain/quiz"
+	"github.com/qwish/backend/internal/domain/scoring"
+	"github.com/qwish/backend/internal/domain/streak"
+)
+
+type Service struct {
+	db        *pgxpool.Pool
+	quizSvc   *quiz.Service
+	streakSvc *streak.Service
+}
+
+func NewService(db *pgxpool.Pool, quizSvc *quiz.Service, streakSvc *streak.Service) *Service {
+	return &Service{db: db, quizSvc: quizSvc, streakSvc: streakSvc}
+}
+
+type StartAttemptResp struct {
+	AttemptID string                      `json:"attempt_id"`
+	QuizID    string                      `json:"quiz_id"`
+	Questions []quiz.QuestionForStudent   `json:"questions"`
+}
+
+type AnswerReq struct {
+	QuestionID      string          `json:"question_id"`
+	Answer          json.RawMessage `json:"answer"`
+	TimeTakenMs     int             `json:"time_taken_ms"`
+	ConfidenceLevel string          `json:"confidence_level"`
+	CluesUsed       int             `json:"clues_used"`
+	ComboLevel      int             `json:"combo_level"`
+}
+
+type AnswerResp struct {
+	IsCorrect     bool            `json:"is_correct"`
+	CorrectAnswer json.RawMessage `json:"correct_answer"`
+	PointsEarned  int64           `json:"points_earned"`
+	ComboLevel    int             `json:"combo_level"`
+}
+
+type CompleteResp struct {
+	AttemptID          string                   `json:"attempt_id"`
+	ScorePct           float64                  `json:"score_pct"`
+	PerformanceBadge   string                   `json:"performance_badge"`
+	PointsDelta        int64                    `json:"points_delta"`
+	TotalCorrect       int                      `json:"total_correct"`
+	TotalQuestions     int                      `json:"total_questions"`
+	StreakBonusAwarded int64                    `json:"streak_bonus_awarded"`
+	BadgesAwarded      []string                 `json:"badges_awarded"`
+	QuestionBreakdown  []QuestionBreakdownItem  `json:"question_breakdown"`
+}
+
+type QuestionBreakdownItem struct {
+	Position        int             `json:"position"`
+	QuestionSnippet string          `json:"question_snippet"`
+	StudentAnswer   json.RawMessage `json:"student_answer"`
+	CorrectAnswer   json.RawMessage `json:"correct_answer"`
+	IsCorrect       bool            `json:"is_correct"`
+	Points          int64           `json:"points"`
+}
+
+func (s *Service) Start(ctx context.Context, userID, quizID string) (*StartAttemptResp, error) {
+	// Validate quiz exists and is published
+	q, err := s.quizSvc.GetByID(ctx, quizID)
+	if err != nil || q.Status != "published" {
+		return nil, fmt.Errorf("quiz not available")
+	}
+
+	// P&W: one attempt only
+	if q.Type == "play_and_win" {
+		var existing int
+		s.db.QueryRow(ctx,
+			`SELECT COUNT(*) FROM quiz_attempts WHERE quiz_id=$1 AND user_id=$2 AND status='completed'`,
+			quizID, userID,
+		).Scan(&existing)
+		if existing > 0 {
+			return nil, fmt.Errorf("you have already attempted this quiz")
+		}
+	}
+
+	// Load and snapshot point economy config
+	cfg, err := scoring.LoadConfig(ctx, s.db)
+	if err != nil {
+		return nil, err
+	}
+	cfgJSON, _ := cfg.JSON()
+
+	// Create attempt
+	var attemptID string
+	err = s.db.QueryRow(ctx,
+		`INSERT INTO quiz_attempts (quiz_id, user_id, status, total_questions, point_config_snapshot)
+		 VALUES ($1,$2,'in_progress',$3,$4)
+		 RETURNING id`,
+		quizID, userID, q.QuestionCount, cfgJSON,
+	).Scan(&attemptID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update last_active_at
+	s.db.Exec(ctx, `UPDATE users SET last_active_at=now() WHERE id=$1`, userID)
+
+	questions, err := s.quizSvc.GetQuestionsForStudent(ctx, quizID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &StartAttemptResp{AttemptID: attemptID, QuizID: quizID, Questions: questions}, nil
+}
+
+func (s *Service) SubmitAnswer(ctx context.Context, userID, attemptID string, req AnswerReq) (*AnswerResp, error) {
+	// Verify attempt belongs to user and is in_progress
+	var quizID string
+	var cfgSnapshot json.RawMessage
+	var qType string
+	err := s.db.QueryRow(ctx,
+		`SELECT quiz_id, point_config_snapshot FROM quiz_attempts WHERE id=$1 AND user_id=$2 AND status='in_progress'`,
+		attemptID, userID,
+	).Scan(&quizID, &cfgSnapshot)
+	if err != nil {
+		return nil, fmt.Errorf("attempt not found or not in progress")
+	}
+
+	// Load config from snapshot
+	cfg, err := scoring.ConfigFromSnapshot(cfgSnapshot)
+	if err != nil {
+		cfg, _ = scoring.LoadConfig(ctx, s.db)
+	}
+
+	// Get question details
+	var correctAnswer json.RawMessage
+	err = s.db.QueryRow(ctx,
+		`SELECT type, correct_answer FROM questions WHERE id=$1 AND quiz_id=$2`,
+		req.QuestionID, quizID,
+	).Scan(&qType, &correctAnswer)
+	if err != nil {
+		return nil, fmt.Errorf("question not found")
+	}
+
+	resp := scoring.QuestionResponse{
+		QuestionID:      req.QuestionID,
+		QuestionType:    qType,
+		CorrectAnswer:   correctAnswer,
+		StudentAnswer:   req.Answer,
+		ConfidenceLevel: req.ConfidenceLevel,
+		CluesUsed:       req.CluesUsed,
+		ComboLevel:      req.ComboLevel,
+	}
+	isCorrect, pts := scoring.ScoreQuestion(resp, cfg)
+
+	// Upsert response
+	s.db.Exec(ctx,
+		`INSERT INTO question_responses (attempt_id, question_id, answer, is_correct, time_taken_ms, clues_used, confidence_level, combo_level, points_earned)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		 ON CONFLICT (attempt_id, question_id) DO UPDATE
+		 SET answer=$3, is_correct=$4, time_taken_ms=$5, clues_used=$6, confidence_level=$7, combo_level=$8, points_earned=$9`,
+		attemptID, req.QuestionID, req.Answer, isCorrect, req.TimeTakenMs, req.CluesUsed, req.ConfidenceLevel, req.ComboLevel, pts)
+
+	return &AnswerResp{
+		IsCorrect:     isCorrect,
+		CorrectAnswer: correctAnswer,
+		PointsEarned:  pts,
+		ComboLevel:    req.ComboLevel + 1,
+	}, nil
+}
+
+// Add unique constraint needed for ON CONFLICT — handled in migration.
+// migrations/002_constraints.sql: ALTER TABLE question_responses ADD UNIQUE (attempt_id, question_id);
+
+func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*CompleteResp, error) {
+	// Load attempt
+	var quizID string
+	var cfgSnapshot json.RawMessage
+	var totalQuestions int
+	err := s.db.QueryRow(ctx,
+		`SELECT quiz_id, point_config_snapshot, total_questions FROM quiz_attempts WHERE id=$1 AND user_id=$2 AND status='in_progress'`,
+		attemptID, userID,
+	).Scan(&quizID, &cfgSnapshot, &totalQuestions)
+	if err != nil {
+		return nil, fmt.Errorf("attempt not found or already completed")
+	}
+
+	cfg, _ := scoring.ConfigFromSnapshot(cfgSnapshot)
+	if cfg == nil {
+		cfg, _ = scoring.LoadConfig(ctx, s.db)
+	}
+
+	// Load institution multiplier
+	var instMultiplier float64 = 1.0
+	s.db.QueryRow(ctx,
+		`SELECT i.point_multiplier FROM users u JOIN institutions i ON i.id=u.institution_id WHERE u.id=$1`, userID,
+	).Scan(&instMultiplier)
+
+	// Load all question responses
+	rows, err := s.db.Query(ctx,
+		`SELECT qr.question_id, q.type, q.correct_answer, qr.answer, qr.confidence_level, qr.clues_used, qr.combo_level, qr.points_earned,
+		        q.position, q.prompt, qr.is_correct
+		 FROM question_responses qr
+		 JOIN questions q ON q.id = qr.question_id
+		 WHERE qr.attempt_id=$1
+		 ORDER BY q.position`, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rawPoints int64
+	var totalCorrect int
+	var breakdown []QuestionBreakdownItem
+
+	for rows.Next() {
+		var qid, qtype, confLevel *string
+		var correctAns, studentAns json.RawMessage
+		var cluesUsed, comboLevel, position int
+		var prompt string
+		var isCorrect bool
+		var ptsEarned int64
+
+		rows.Scan(&qid, &qtype, &correctAns, &studentAns, &confLevel, &cluesUsed, &comboLevel, &ptsEarned, &position, &prompt, &isCorrect)
+
+		rawPoints += ptsEarned
+		if isCorrect {
+			totalCorrect++
+		}
+
+		snippet := prompt
+		if len(snippet) > 80 {
+			snippet = snippet[:80] + "..."
+		}
+		breakdown = append(breakdown, QuestionBreakdownItem{
+			Position:        position,
+			QuestionSnippet: snippet,
+			StudentAnswer:   studentAns,
+			CorrectAnswer:   correctAns,
+			IsCorrect:       isCorrect,
+			Points:          ptsEarned,
+		})
+	}
+
+	// Score percentage
+	scorePct := 0.0
+	if totalQuestions > 0 {
+		scorePct = float64(totalCorrect) / float64(totalQuestions) * 100
+	}
+
+	finalPoints := scoring.CalculateFinalScore(totalCorrect, totalQuestions, rawPoints, scorePct, cfg, instMultiplier)
+
+	// Performance badge
+	badge := "needs_work"
+	if scorePct >= 75 {
+		badge = "excellent"
+	} else if scorePct >= 50 {
+		badge = "good"
+	}
+
+	// Update attempt
+	s.db.Exec(ctx,
+		`UPDATE quiz_attempts SET status='completed', score_pct=$1, points_delta=$2, total_correct=$3, total_questions=$4, completed_at=now()
+		 WHERE id=$5`,
+		scorePct, finalPoints, totalCorrect, totalQuestions, attemptID)
+
+	// Update user points (floor at 0)
+	var currentBalance int64
+	s.db.QueryRow(ctx, `SELECT total_points FROM users WHERE id=$1`, userID).Scan(&currentBalance)
+	newBalance := currentBalance + finalPoints
+	if newBalance < 0 {
+		finalPoints = -currentBalance
+		newBalance = 0
+	}
+	s.db.Exec(ctx, `UPDATE users SET total_points=$1, updated_at=now() WHERE id=$2`, newBalance, userID)
+
+	// Insert ledger entry
+	expiresAt := time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0)
+	s.db.Exec(ctx,
+		`INSERT INTO points_ledger (user_id, amount, reason, reference_id, balance_after, expires_at)
+		 VALUES ($1,$2,'quiz_attempt',$3,$4,$5)`,
+		userID, finalPoints, attemptID, newBalance, expiresAt)
+
+	// Update streak and get bonus
+	streakBonus, _ := s.streakSvc.RecordCompletion(ctx, userID, cfg)
+	if streakBonus > 0 {
+		newBalance += streakBonus
+		s.db.Exec(ctx, `UPDATE users SET total_points=$1, updated_at=now() WHERE id=$2`, newBalance, userID)
+		streakExpiry := time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0)
+		s.db.Exec(ctx,
+			`INSERT INTO points_ledger (user_id, amount, reason, balance_after, expires_at)
+			 VALUES ($1,$2,'streak_bonus',$3,$4)`,
+			userID, streakBonus, newBalance, streakExpiry)
+	}
+
+	// Check and award badges
+	awarded := s.checkBadges(ctx, userID, quizID, scorePct, totalCorrect, totalQuestions, attemptID)
+
+	if breakdown == nil {
+		breakdown = []QuestionBreakdownItem{}
+	}
+	if awarded == nil {
+		awarded = []string{}
+	}
+
+	return &CompleteResp{
+		AttemptID:          attemptID,
+		ScorePct:           scorePct,
+		PerformanceBadge:   badge,
+		PointsDelta:        finalPoints,
+		TotalCorrect:       totalCorrect,
+		TotalQuestions:     totalQuestions,
+		StreakBonusAwarded: streakBonus,
+		BadgesAwarded:      awarded,
+		QuestionBreakdown:  breakdown,
+	}, nil
+}
+
+func (s *Service) GetResult(ctx context.Context, userID, attemptID string) (map[string]interface{}, error) {
+	var result map[string]interface{}
+	var scorePct float64
+	var pointsDelta int64
+	var totalCorrect, totalQuestions int
+	var status string
+	var completedAt *time.Time
+	var quizID string
+
+	err := s.db.QueryRow(ctx,
+		`SELECT quiz_id, status, COALESCE(score_pct,0), COALESCE(points_delta,0), COALESCE(total_correct,0), COALESCE(total_questions,0), completed_at
+		 FROM quiz_attempts WHERE id=$1 AND user_id=$2`,
+		attemptID, userID,
+	).Scan(&quizID, &status, &scorePct, &pointsDelta, &totalCorrect, &totalQuestions, &completedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	result = map[string]interface{}{
+		"attempt_id":       attemptID,
+		"quiz_id":          quizID,
+		"status":           status,
+		"score_pct":        scorePct,
+		"points_delta":     pointsDelta,
+		"total_correct":    totalCorrect,
+		"total_questions":  totalQuestions,
+		"completed_at":     completedAt,
+	}
+	return result, nil
+}
+
+// checkBadges awards applicable badges after a quiz completion.
+func (s *Service) checkBadges(ctx context.Context, userID, quizID string, scorePct float64, correct, total int, attemptID string) []string {
+	var awarded []string
+	awardBadge := func(bt string) {
+		_, err := s.db.Exec(ctx,
+			`INSERT INTO badges (user_id, badge_type) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+			userID, bt)
+		if err == nil {
+			awarded = append(awarded, bt)
+		}
+	}
+
+	// first_quiz
+	var quizCount int
+	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed'`, userID).Scan(&quizCount)
+	if quizCount == 1 {
+		awardBadge("first_quiz")
+	}
+
+	// perfect_score
+	if scorePct == 100 {
+		awardBadge("perfect_score")
+	}
+
+	// explorer: one of each of the 7 question types
+	var typeCount int
+	s.db.QueryRow(ctx,
+		`SELECT COUNT(DISTINCT q.type) FROM question_responses qr
+		 JOIN questions q ON q.id=qr.question_id
+		 JOIN quiz_attempts qa ON qa.id=qr.attempt_id
+		 WHERE qa.user_id=$1 AND qa.status='completed'`, userID,
+	).Scan(&typeCount)
+	if typeCount >= 7 {
+		awardBadge("explorer")
+	}
+
+	// speed_demon: speed_chain with combo >=3
+	var maxCombo int
+	s.db.QueryRow(ctx,
+		`SELECT COALESCE(MAX(combo_level),0) FROM question_responses qr
+		 JOIN questions q ON q.id=qr.question_id
+		 WHERE qr.attempt_id=$1 AND q.type='speed_chain'`, attemptID,
+	).Scan(&maxCombo)
+	if maxCombo >= 3 {
+		awardBadge("speed_demon")
+	}
+
+	// sharp_mind: 100% on confidence_based, all very_confident correct
+	var confTotal, confCorrect, veryConfCorrect int
+	s.db.QueryRow(ctx,
+		`SELECT COUNT(*), SUM(CASE WHEN qr.is_correct THEN 1 ELSE 0 END),
+		        SUM(CASE WHEN qr.confidence_level='very_confident' AND qr.is_correct THEN 1 ELSE 0 END)
+		 FROM question_responses qr
+		 JOIN questions q ON q.id=qr.question_id
+		 WHERE qr.attempt_id=$1 AND q.type='confidence_based'`, attemptID,
+	).Scan(&confTotal, &confCorrect, &veryConfCorrect)
+	if confTotal > 0 && confCorrect == confTotal && veryConfCorrect == confTotal {
+		awardBadge("sharp_mind")
+	}
+
+	return awarded
+}

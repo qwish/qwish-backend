@@ -27,15 +27,22 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
-	if req.FullName == "" || req.Email == "" || req.Password == "" || req.ReferralCode == "" {
-		middleware.BadRequest(w, "full_name, email, password, and referral_code are required")
+	if req.FullName == "" || req.Email == "" || req.Password == "" {
+		middleware.BadRequest(w, "full_name, email, and password are required")
 		return
 	}
 
-	instID, role, err := h.svc.FindInstitutionByReferralCode(r.Context(), req.ReferralCode)
-	if err != nil {
-		middleware.BadRequest(w, "invalid or inactive referral code")
-		return
+	var instID *string
+	role := "student"
+
+	if req.ReferralCode != "" {
+		id, assignedRole, err := h.svc.FindInstitutionByReferralCode(r.Context(), req.ReferralCode)
+		if err != nil {
+			middleware.BadRequest(w, "invalid or inactive referral code")
+			return
+		}
+		instID = &id
+		role = assignedRole
 	}
 
 	authResp, err := h.svc.SupabaseSignUp(r.Context(), req.Email, req.Password)
@@ -50,7 +57,11 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	instName := h.svc.GetInstitutionName(r.Context(), instID)
+	var instData interface{}
+	if instID != nil {
+		instName := h.svc.GetInstitutionName(r.Context(), *instID)
+		instData = map[string]string{"id": *instID, "name": instName}
+	}
 
 	middleware.JSON(w, http.StatusCreated, map[string]interface{}{
 		"user": map[string]interface{}{
@@ -59,7 +70,7 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 			"display_name": user.DisplayName,
 			"email":        user.Email,
 			"role":         user.Role,
-			"institution":  map[string]string{"id": instID, "name": instName},
+			"institution":  instData,
 		},
 		"access_token":  authResp.AccessToken,
 		"refresh_token": authResp.RefreshToken,

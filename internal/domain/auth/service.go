@@ -84,7 +84,7 @@ func (s *Service) FindInstitutionByReferralCode(ctx context.Context, code string
 }
 
 // CreateUser inserts a new user into the users table.
-func (s *Service) CreateUser(ctx context.Context, supabaseUID, fullName, email, role, institutionID string) (UserProfile, error) {
+func (s *Service) CreateUser(ctx context.Context, supabaseUID, fullName, email, role string, institutionID *string) (UserProfile, error) {
 	var u UserProfile
 	err := s.db.QueryRow(ctx,
 		`INSERT INTO users (supabase_uid, full_name, display_name, email, role, institution_id)

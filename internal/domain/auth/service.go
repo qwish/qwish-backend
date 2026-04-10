@@ -22,19 +22,35 @@ func NewService(db *pgxpool.Pool, cfg *config.Config) *Service {
 	return &Service{db: db, cfg: cfg}
 }
 
-// SupabaseSignUp creates a user in Supabase Auth and returns the uid + tokens.
-func (s *Service) SupabaseSignUp(ctx context.Context, email, password string) (*SupabaseAuthResponse, error) {
-	return s.supabasePost(ctx, "/auth/v1/signup", map[string]string{
-		"email":    email,
-		"password": password,
-	})
+// SupabaseSendOTP sends a magic-link / OTP email via Supabase.
+func (s *Service) SupabaseSendOTP(ctx context.Context, email string) error {
+	b, _ := json.Marshal(map[string]string{"email": email})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		s.cfg.SupabaseURL+"/auth/v1/otp", bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("apikey", s.cfg.SupabaseServiceKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase error %d: %s", resp.StatusCode, string(raw))
+	}
+	return nil
 }
 
-// SupabaseLogin authenticates with Supabase and returns tokens.
-func (s *Service) SupabaseLogin(ctx context.Context, email, password string) (*SupabaseAuthResponse, error) {
-	return s.supabasePost(ctx, "/auth/v1/token?grant_type=password", map[string]string{
-		"email":    email,
-		"password": password,
+// SupabaseVerifyOTP verifies the 6-digit OTP and returns tokens.
+func (s *Service) SupabaseVerifyOTP(ctx context.Context, email, token string) (*SupabaseAuthResponse, error) {
+	return s.supabasePost(ctx, "/auth/v1/verify", map[string]string{
+		"type":  "email",
+		"email": email,
+		"token": token,
 	})
 }
 
@@ -62,8 +78,39 @@ func (s *Service) SupabaseLogout(ctx context.Context, accessToken string) error 
 	return nil
 }
 
+// GetUserBySupabaseUID returns the local user record for a Supabase UID, if it exists.
+func (s *Service) GetUserBySupabaseUID(ctx context.Context, uid string) (*UserProfile, error) {
+	var u UserProfile
+	err := s.db.QueryRow(ctx,
+		`SELECT id, full_name, display_name, email, role, institution_id, status, total_points, current_streak, longest_streak, member_since
+		 FROM users WHERE supabase_uid = $1 AND deleted_at IS NULL`,
+		uid,
+	).Scan(&u.ID, &u.FullName, &u.DisplayName, &u.Email, &u.Role,
+		&u.InstitutionID, &u.Status, &u.TotalPoints, &u.CurrentStreak, &u.LongestStreak, &u.MemberSince)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+// CreateUser inserts a new user into the users table.
+func (s *Service) CreateUser(ctx context.Context, supabaseUID, fullName, email, role string, institutionID *string) (UserProfile, error) {
+	var u UserProfile
+	err := s.db.QueryRow(ctx,
+		`INSERT INTO users (supabase_uid, full_name, display_name, email, role, institution_id)
+		 VALUES ($1, $2, $2, $3, $4, $5)
+		 RETURNING id, full_name, display_name, email, role, institution_id, status, total_points, current_streak, longest_streak, member_since`,
+		supabaseUID, fullName, email, role, institutionID,
+	).Scan(&u.ID, &u.FullName, &u.DisplayName, &u.Email, &u.Role,
+		&u.InstitutionID, &u.Status, &u.TotalPoints, &u.CurrentStreak, &u.LongestStreak, &u.MemberSince)
+	if err != nil {
+		return u, err
+	}
+	s.db.Exec(ctx, `INSERT INTO streaks (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, u.ID)
+	return u, nil
+}
+
 // FindInstitutionByReferralCode looks up an institution by student or teacher code.
-// Returns (institutionID, role, error).
 func (s *Service) FindInstitutionByReferralCode(ctx context.Context, code string) (string, string, error) {
 	var instID, role string
 	err := s.db.QueryRow(ctx,
@@ -83,32 +130,14 @@ func (s *Service) FindInstitutionByReferralCode(ctx context.Context, code string
 	return "", "", fmt.Errorf("invalid referral code")
 }
 
-// CreateUser inserts a new user into the users table.
-func (s *Service) CreateUser(ctx context.Context, supabaseUID, fullName, email, role string, institutionID *string) (UserProfile, error) {
-	var u UserProfile
-	err := s.db.QueryRow(ctx,
-		`INSERT INTO users (supabase_uid, full_name, display_name, email, role, institution_id)
-		 VALUES ($1, $2, $2, $3, $4, $5)
-		 RETURNING id, full_name, display_name, email, role, institution_id, status, total_points, current_streak, longest_streak, member_since`,
-		supabaseUID, fullName, email, role, institutionID,
-	).Scan(&u.ID, &u.FullName, &u.DisplayName, &u.Email, &u.Role,
-		&u.InstitutionID, &u.Status, &u.TotalPoints, &u.CurrentStreak, &u.LongestStreak, &u.MemberSince)
-	if err != nil {
-		return u, err
-	}
-	// Create streak record
-	s.db.Exec(ctx, `INSERT INTO streaks (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, u.ID)
-	return u, nil
-}
-
-// GetInstitutionName returns just the institution name for signup confirmation.
+// GetInstitutionName returns the institution name for a given ID.
 func (s *Service) GetInstitutionName(ctx context.Context, id string) string {
 	var name string
 	s.db.QueryRow(ctx, `SELECT name FROM institutions WHERE id = $1`, id).Scan(&name)
 	return name
 }
 
-// UpdateUserInstitution switches a user's institution.
+// UpdateUserInstitution switches a user's institution via referral code.
 func (s *Service) UpdateUserInstitution(ctx context.Context, userID, code string) error {
 	instID, role, err := s.FindInstitutionByReferralCode(ctx, code)
 	if err != nil {
@@ -117,15 +146,6 @@ func (s *Service) UpdateUserInstitution(ctx context.Context, userID, code string
 	_, err = s.db.Exec(ctx,
 		`UPDATE users SET institution_id = $1, role = $2, updated_at = now() WHERE id = $3`,
 		instID, role, userID)
-	return err
-}
-
-// StoreForgotPasswordOTP stores a 6-digit OTP with 15-minute expiry.
-// We reuse Supabase's built-in OTP reset flow.
-func (s *Service) SendPasswordResetOTP(ctx context.Context, email string) error {
-	_, err := s.supabasePost(ctx, "/auth/v1/recover", map[string]string{
-		"email": email,
-	})
 	return err
 }
 
@@ -157,9 +177,7 @@ func (s *Service) supabasePost(ctx context.Context, path string, body map[string
 	return &result, nil
 }
 
-// SupabaseAuthResponse is a simplified representation of Supabase's auth response.
-// Supabase returns user fields nested under "user" when email confirmation is off,
-// or at the top level (with no tokens) when email confirmation is on.
+// SupabaseAuthResponse represents Supabase's auth response.
 type SupabaseAuthResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
@@ -167,17 +185,6 @@ type SupabaseAuthResponse struct {
 		ID    string `json:"id"`
 		Email string `json:"email"`
 	} `json:"user"`
-	// Top-level fields populated when email confirmation is enabled
-	ID    string `json:"id"`
-	Email string `json:"email"`
-}
-
-// UserID returns the effective user ID regardless of which response format Supabase used.
-func (r *SupabaseAuthResponse) UserID() string {
-	if r.User.ID != "" {
-		return r.User.ID
-	}
-	return r.ID
 }
 
 type UserProfile struct {

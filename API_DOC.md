@@ -14,7 +14,7 @@ All protected endpoints require a **Supabase JWT** in the `Authorization` header
 Authorization: Bearer <access_token>
 ```
 
-Tokens are obtained via `/auth/login` or `/auth/signup`.
+Tokens are obtained via `/auth/verify-otp`.
 
 ---
 
@@ -22,13 +22,19 @@ Tokens are obtained via `/auth/login` or `/auth/signup`.
 
 ### Success (single object)
 ```json
-{ ...fields... }
+{
+  "success": true,
+  "data": { ...fields... },
+  "error": null
+}
 ```
 
 ### Success (paginated list)
 ```json
 {
+  "success": true,
   "data": [ ...items... ],
+  "error": null,
   "meta": { "page": 1, "limit": 20, "total": 123 }
 }
 ```
@@ -36,8 +42,12 @@ Tokens are obtained via `/auth/login` or `/auth/signup`.
 ### Error
 ```json
 {
-  "error": "ERROR_CODE",
-  "message": "Human-readable description"
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "Human-readable description"
+  }
 }
 ```
 
@@ -61,7 +71,7 @@ Tokens are obtained via `/auth/login` or `/auth/signup`.
 
 | Query Param | Default | Max |
 |-------------|---------|-----|
-| `page` | 1 | - |
+| `page` | 1 | — |
 | `limit` | 20 | 50 (100 for leaderboard) |
 
 ---
@@ -89,7 +99,7 @@ Tokens are obtained via `/auth/login` or `/auth/signup`.
 | `unstoppable` | 30-day streak reached |
 | `top_10` | Ranked top 10 in institution |
 | `perfect_score` | 100% correct answers on a quiz |
-| `speed_demon` | `speed_chain` question with combo >= 3 |
+| `speed_demon` | `speed_chain` question with combo ≥ 3 |
 | `sharp_mind` | 100% on `confidence_based` questions, all answered as `very_confident` |
 | `explorer` | Answered at least one question of each of the 7 question types (across all attempts) |
 
@@ -105,7 +115,7 @@ Points are calculated per-question at answer submission time, then a final score
 |------|---------|-------|
 | `multiple_choice`, `eliminate_wrong`, `puzzle` | `base_points` | 0 |
 | `speed_chain` | `base_points × (1 + combo_step × combo_level)` | 0 |
-| `clue_reveal` | `base_points × (2 - deduction × clues_used)`, min `base × 0.5` | 0 |
+| `clue_reveal` | `base_points × (2 − deduction × clues_used)`, min `base × 0.5` | 0 |
 | `confidence_based` | `base_points × confidence_multiplier` | May be negative if `very_confident` and wrong |
 | `arrange_order` | `base_points` | 0 |
 
@@ -124,7 +134,7 @@ After all answers are submitted:
 - **Score ≥ 75%** → add performance bonus (default: +20% of base points for correct answers)
 - **Score 50–74%** → no adjustment
 - **Score < 50%** → deduction (default: −50% of base points for correct answers)
-- Final points are then multiplied by the institution's `point_multiplier`
+- Final points are multiplied by the institution's `point_multiplier`
 - Points cannot drop below 0 (floored at current balance)
 
 ### Default Point Economy Config
@@ -157,27 +167,70 @@ After all answers are submitted:
 
 # 1. Auth
 
-## POST `/auth/signup`
+## POST `/auth/send-otp`
 **Auth required:** No
+
+Sends a 6-digit OTP to the given email address. Always returns success to prevent email enumeration.
+
+### Request Body
+```json
+{ "email": "alice@example.com" }
+```
+
+### Response `200`
+```json
+{ "message": "if that email is valid, an OTP has been sent" }
+```
+
+### Errors
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `BAD_REQUEST` | Missing `email` |
+
+---
+
+## POST `/auth/verify-otp`
+**Auth required:** No
+
+Verifies the OTP. Handles both **login** (returning user) and **signup** (new user) in a single call.
+
+- If the user already exists → returns `is_new_user: false`
+- If the user is new → creates the account and returns `is_new_user: true` (`full_name` is required in this case)
 
 ### Request Body
 ```json
 {
-  "full_name":     "Alice Smith",
   "email":         "alice@example.com",
-  "password":      "SecurePass123!",
-  "referral_code": "INST-STU-ABC1"
+  "otp":           "123456",
+  "full_name":     "Alice Smith",
+  "referral_code": "SINST-ABC"
 }
 ```
 
 | Field | Required | Notes |
 |-------|----------|-------|
-| `full_name` | Yes | |
 | `email` | Yes | |
-| `password` | Yes | |
-| `referral_code` | No | If omitted, user is created without an institution. The referral code determines the `role` (`student` or `teacher`). |
+| `otp` | Yes | 6-digit code from email |
+| `full_name` | **New users only** | Required on first login; ignored for returning users |
+| `referral_code` | No | Determines institution and role (`student` or `teacher`). Only applied on first login. |
 
-### Response `201`
+### Response `200` — Returning user
+```json
+{
+  "user": {
+    "id":           "uuid",
+    "full_name":    "Alice Smith",
+    "display_name": "Alice Smith",
+    "email":        "alice@example.com",
+    "role":         "student"
+  },
+  "access_token":  "eyJ...",
+  "refresh_token": "eyJ...",
+  "is_new_user":   false
+}
+```
+
+### Response `201` — New user
 ```json
 {
   "user": {
@@ -189,7 +242,8 @@ After all answers are submitted:
     "institution":  { "id": "uuid", "name": "Springfield Academy" }
   },
   "access_token":  "eyJ...",
-  "refresh_token": "eyJ..."
+  "refresh_token": "eyJ...",
+  "is_new_user":   true
 }
 ```
 
@@ -198,38 +252,10 @@ After all answers are submitted:
 ### Errors
 | Status | Code | Meaning |
 |--------|------|---------|
-| 400 | - | Missing `full_name`, `email`, or `password` |
-| 400 | - | Invalid or inactive referral code |
-| 409 | `EMAIL_IN_USE` | Email already registered |
-
----
-
-## POST `/auth/login`
-**Auth required:** No
-
-### Request Body
-```json
-{
-  "email":    "alice@example.com",
-  "password": "SecurePass123!"
-}
-```
-
-Both fields required.
-
-### Response `200`
-```json
-{
-  "access_token":  "eyJ...",
-  "refresh_token": "eyJ..."
-}
-```
-
-### Errors
-| Status | Code | Meaning |
-|--------|------|---------|
-| 400 | - | Missing email or password |
-| 401 | `INVALID_CREDENTIALS` | Wrong email or password |
+| 400 | `BAD_REQUEST` | Missing `email` or `otp` |
+| 400 | `BAD_REQUEST` | New user but `full_name` is missing |
+| 400 | `BAD_REQUEST` | Invalid or inactive referral code |
+| 401 | `INVALID_OTP` | OTP is wrong or expired |
 
 ---
 
@@ -252,32 +278,15 @@ Both fields required.
 ### Errors
 | Status | Code | Meaning |
 |--------|------|---------|
-| 400 | - | Missing `refresh_token` |
+| 400 | `BAD_REQUEST` | Missing `refresh_token` |
 | 401 | `INVALID_TOKEN` | Expired or invalid token |
-
----
-
-## POST `/auth/forgot-password`
-**Auth required:** No
-
-Triggers a Supabase OTP/reset email. Always returns success to prevent email enumeration.
-
-### Request Body
-```json
-{ "email": "alice@example.com" }
-```
-
-### Response `200`
-```json
-{ "message": "if that email is registered, a reset link has been sent" }
-```
 
 ---
 
 ## POST `/auth/logout`
 **Auth required:** Yes
 
-Invalidates the current access token via Supabase.
+Invalidates the current session token in Supabase.
 
 ### Response `200`
 ```json
@@ -289,11 +298,11 @@ Invalidates the current access token via Supabase.
 ## PATCH `/auth/referral-code`
 **Auth required:** Yes
 
-Switch the authenticated user to a different institution using a new referral code.
+Links the authenticated user to an institution using a referral code. Updates both `institution_id` and `role`.
 
 ### Request Body
 ```json
-{ "referral_code": "NEW-INST-CODE" }
+{ "referral_code": "SINST-ABC" }
 ```
 
 ### Response `200`
@@ -302,26 +311,25 @@ Switch the authenticated user to a different institution using a new referral co
 ```
 
 ### Errors
-| Status | Meaning |
-|--------|---------|
-| 400 | Missing `referral_code` or code is invalid/inactive |
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `BAD_REQUEST` | Missing or invalid referral code |
 
 ---
 
-# 2. Users (Self)
-
-**Auth required:** Yes for all.
+# 2. Users
 
 ## GET `/users/me`
+**Auth required:** Yes
 
-Returns the full profile of the authenticated user.
+Returns the authenticated user's full profile.
 
 ### Response `200`
 ```json
 {
   "id":             "uuid",
   "full_name":      "Alice Smith",
-  "display_name":   "Alice",
+  "display_name":   "Alice Smith",
   "email":          "alice@example.com",
   "role":           "student",
   "institution_id": "uuid",
@@ -330,18 +338,16 @@ Returns the full profile of the authenticated user.
   "total_points":   1250,
   "current_streak": 5,
   "longest_streak": 12,
-  "member_since":   "2024-01-15T00:00:00Z",
-  "last_active_at": "2026-04-07T10:30:00Z"
+  "member_since":   "2024-01-15T00:00:00Z"
 }
 ```
-
-> `institution` and `institution_id` are omitted if the user has no institution. `last_active_at` is updated each time an attempt is started.
 
 ---
 
 ## PATCH `/users/me`
+**Auth required:** Yes
 
-Update the authenticated user's profile. Only `display_name` is currently editable.
+Updates the authenticated user's profile. Currently supports updating `display_name`.
 
 ### Request Body
 ```json
@@ -349,13 +355,14 @@ Update the authenticated user's profile. Only `display_name` is currently editab
 ```
 
 ### Response `200`
-Same shape as `GET /users/me`.
+Returns the updated profile (same shape as `GET /users/me`).
 
 ---
 
 ## DELETE `/users/me`
+**Auth required:** Yes
 
-Soft-deletes and anonymizes the account. Sets `status = 'deleted'`, clears `full_name`, `display_name`, and `email`.
+Soft-deletes the authenticated user's account (GDPR-compliant anonymisation).
 
 ### Response `200`
 ```json
@@ -365,6 +372,7 @@ Soft-deletes and anonymizes the account. Sets `status = 'deleted'`, clears `full
 ---
 
 ## GET `/users/me/stats`
+**Auth required:** Yes
 
 ### Response `200`
 ```json
@@ -380,58 +388,45 @@ Soft-deletes and anonymizes the account. Sets `status = 'deleted'`, clears `full
 ---
 
 ## GET `/users/me/badges`
+**Auth required:** Yes
 
-Returns all 8 badge types, with earned status for each.
+Returns all badge types with earned status.
 
-### Response `200` (array, always 8 items)
+### Response `200`
 ```json
 [
-  { "badge_type": "first_quiz",    "earned": true,  "earned_at": "2024-01-16T09:00:00Z" },
-  { "badge_type": "on_a_roll",     "earned": false, "earned_at": null },
-  { "badge_type": "unstoppable",   "earned": false, "earned_at": null },
-  { "badge_type": "top_10",        "earned": false, "earned_at": null },
-  { "badge_type": "perfect_score", "earned": false, "earned_at": null },
-  { "badge_type": "speed_demon",   "earned": false, "earned_at": null },
-  { "badge_type": "sharp_mind",    "earned": false, "earned_at": null },
-  { "badge_type": "explorer",      "earned": false, "earned_at": null }
+  { "badge_type": "first_quiz",    "earned": true,  "earned_at": "2024-01-16T10:00:00Z" },
+  { "badge_type": "perfect_score", "earned": false }
 ]
 ```
-
-> `earned_at` is `null` (field omitted) when `earned` is `false`.
 
 ---
 
 ## GET `/users/me/attempts`
-
-Completed attempts only, newest first.
+**Auth required:** Yes
 
 ### Query Params
-| Param | Default | Max |
-|-------|---------|-----|
-| `page` | 1 | - |
-| `limit` | 20 | 50 |
+`page`, `limit`
 
-### Response `200`
+### Response `200` (paginated)
 ```json
-{
-  "data": [
-    {
-      "id":           "uuid",
-      "quiz_id":      "uuid",
-      "quiz_title":   "Algebra Basics",
-      "score_pct":    85.0,
-      "points_delta": 120,
-      "status":       "completed",
-      "completed_at": "2026-04-07T10:00:00Z"
-    }
-  ],
-  "meta": { "page": 1, "limit": 20, "total": 34 }
-}
+[
+  {
+    "id":           "uuid",
+    "quiz_id":      "uuid",
+    "quiz_title":   "Biology Chapter 3",
+    "score_pct":    85.0,
+    "points_delta": 120,
+    "status":       "completed",
+    "completed_at": "2024-03-01T14:22:00Z"
+  }
+]
 ```
 
 ---
 
 ## GET `/users/me/points`
+**Auth required:** Yes
 
 ### Response `200`
 ```json
@@ -439,162 +434,119 @@ Completed attempts only, newest first.
   "total_points": 1250,
   "expiring_soon": {
     "amount":     200,
-    "expires_at": "2026-05-01T00:00:00Z"
+    "expires_at": "2024-04-01T00:00:00Z"
   }
 }
 ```
 
-> `expiring_soon` is `null` if no points expire within the next 30 days.
+> `expiring_soon` is `null` if no points expire within 30 days.
 
 ---
 
 ## GET `/users/me/points/ledger`
+**Auth required:** Yes
 
-Full transaction history, newest first.
+### Query Params
+`page`, `limit`
 
-### Query Params: `page`, `limit`
-
-### Response `200`
+### Response `200` (paginated)
 ```json
-{
-  "data": [
-    {
-      "id":            "uuid",
-      "amount":        120,
-      "reason":        "quiz_attempt",
-      "reference_id":  "attempt-uuid",
-      "balance_after": 1250,
-      "expires_at":    "2026-10-07T00:00:00Z",
-      "created_at":    "2026-04-07T10:00:00Z"
-    }
-  ],
-  "meta": { "page": 1, "limit": 20, "total": 50 }
-}
+[
+  {
+    "id":            "uuid",
+    "amount":        120,
+    "reason":        "quiz_attempt",
+    "reference_id":  "attempt-uuid",
+    "balance_after": 1250,
+    "expires_at":    "2024-09-01T00:00:00Z",
+    "created_at":    "2024-03-01T14:22:00Z"
+  }
+]
 ```
-
-**`reason` values:** `quiz_attempt` · `streak_bonus` · `admin_adjustment` · `expiry`
-
-> `amount` can be negative (deduction or expiry). `reference_id` is the attempt UUID for `quiz_attempt` entries, otherwise omitted.
 
 ---
 
 ## GET `/users/me/streak`
+**Auth required:** Yes
 
 ### Response `200`
 ```json
 {
-  "current_streak":        5,
-  "longest_streak":        12,
-  "grace_window_active":   false,
-  "next_milestone":        7,
-  "progress_to_milestone": 5
+  "current_streak":  5,
+  "longest_streak":  12,
+  "last_activity":   "2024-03-01T00:00:00Z",
+  "grace_active":    false,
+  "grace_expires_at": null,
+  "next_milestone":  7,
+  "next_milestone_bonus": 50
 }
 ```
-
-**Streak Milestones:** 7 days · 15 days · 30 days
-
-> `next_milestone` returns `30` once the user has passed all milestones.
-> `progress_to_milestone` equals `current_streak`.
 
 ---
 
 ## GET `/users/{userId}/profile`
+**Auth required:** Yes
 
-Public profile view — safe to display to other users.
+Returns a public profile (no email or sensitive data).
 
 ### Response `200`
 ```json
 {
-  "id":                "uuid",
-  "display_name":      "Alice",
-  "institution":       "Springfield Academy",
-  "total_points":      1250,
-  "current_streak":    5,
-  "longest_streak":    12,
+  "id":               "uuid",
+  "display_name":     "Alice Smith",
+  "institution":      "Springfield Academy",
+  "total_points":     1250,
+  "current_streak":   5,
+  "longest_streak":   12,
   "quizzes_completed": 34,
-  "badges":            ["first_quiz", "on_a_roll"]
+  "badges":           ["first_quiz", "perfect_score"]
 }
 ```
-
-> `institution` is an empty string if the user has no institution. `badges` is an array of only the earned badge type strings (not all 8).
-
-### Errors
-| Status | Meaning |
-|--------|---------|
-| 404 | User not found or inactive |
 
 ---
 
 # 3. Quizzes
 
-**Auth required:** Yes for all.
-
 ## GET `/quizzes`
-
-Browse published quizzes for the authenticated user's institution.
+**Auth required:** Yes (student / teacher / institution_admin)
 
 ### Query Params
-| Param | Values | Description |
-|-------|--------|-------------|
-| `type` | `practice` \| `play_and_win` \| `assignment` | Filter by quiz type |
-| `saved` | `true` | Only return bookmarked quizzes |
-| `page` | integer | Default 1 |
-| `limit` | integer | Default 20, max 50 |
+| Param | Description |
+|-------|-------------|
+| `type` | Filter by quiz type (`practice`, `play_and_win`) |
+| `saved` | `true` to return only saved quizzes |
+| `page`, `limit` | Pagination |
 
-### Response `200`
+### Response `200` (paginated)
 ```json
-{
-  "data": [
-    {
-      "id":             "uuid",
-      "institution_id": "uuid",
-      "created_by":     "uuid",
-      "teacher_name":   "Mr. Johnson",
-      "title":          "Algebra Basics",
-      "description":    "Covers linear equations",
-      "type":           "practice",
-      "visibility":     "institution",
-      "status":         "published",
-      "question_count": 10,
-      "ends_at":        null,
-      "published_at":   "2026-03-01T08:00:00Z",
-      "group_id":       null,
-      "created_at":     "2026-02-28T12:00:00Z"
-    }
-  ],
-  "meta": { "page": 1, "limit": 20, "total": 45 }
-}
+[
+  {
+    "id":             "uuid",
+    "title":          "Biology Chapter 3",
+    "description":    "Cell division and genetics",
+    "type":           "practice",
+    "status":         "published",
+    "question_count": 10,
+    "is_saved":       false,
+    "created_by":     "uuid",
+    "published_at":   "2024-02-01T00:00:00Z"
+  }
+]
 ```
-
-**Quiz `status` values:** `draft` · `pending_approval` · `published` · `rejected` · `closed`
-
-> Only `published` quizzes appear in this listing. Results are ordered by `published_at` descending.
 
 ---
 
 ## GET `/quizzes/{quizId}`
+**Auth required:** Yes
 
-### Response `200`
-Same as list item, plus:
-```json
-{
-  "rejection_reason": null,
-  "question_types":   ["multiple_choice", "speed_chain"]
-}
-```
-
-> `question_types` lists the distinct question types present in the quiz.
-
-### Errors
-| Status | Meaning |
-|--------|---------|
-| 404 | Quiz not found |
+Returns quiz details including all questions (with options, correct answers hidden for students during attempts).
 
 ---
 
 ## POST `/quizzes/{quizId}/save`
+**Auth required:** Yes
 
-Bookmark a quiz. Idempotent.
+Saves a quiz to the user's saved list.
 
 ### Response `200`
 ```json
@@ -604,8 +556,9 @@ Bookmark a quiz. Idempotent.
 ---
 
 ## DELETE `/quizzes/{quizId}/save`
+**Auth required:** Yes
 
-Remove bookmark.
+Removes a quiz from the user's saved list.
 
 ### Response `200`
 ```json
@@ -615,34 +568,29 @@ Remove bookmark.
 ---
 
 ## GET `/quizzes/{quizId}/share`
-
-Get a deep-link for sharing the quiz.
+**Auth required:** Yes
 
 ### Response `200`
 ```json
-{ "deep_link": "quizapp://quiz/<quizId>" }
+{ "deep_link": "quizapp://quiz/uuid" }
 ```
 
 ---
 
 ## POST `/quizzes/{quizId}/reports`
+**Auth required:** Yes
 
-Report a quiz for review.
+Reports a quiz.
 
 ### Request Body
 ```json
 {
   "reason":      "inappropriate_content",
-  "description": "Optional extra context"
+  "description": "Optional extra detail"
 }
 ```
 
-| Field | Required |
-|-------|----------|
-| `reason` | Yes |
-| `description` | No |
-
-> Reports are auto-escalated to `priority: "high"` when 3 or more open reports exist for the same quiz.
+`reason` is required.
 
 ### Response `200`
 ```json
@@ -652,20 +600,33 @@ Report a quiz for review.
 ---
 
 ## POST `/quizzes/{quizId}/questions/{questionId}/reports`
+**Auth required:** Yes
 
-Report a specific question within a quiz. Same request body as quiz report. Always returns `200`.
+Reports a specific question.
+
+### Request Body
+```json
+{
+  "reason":      "wrong_answer",
+  "description": "Optional extra detail"
+}
+```
+
+`reason` is required.
+
+### Response `200`
+```json
+{ "message": "thanks — we'll review this" }
+```
 
 ---
 
 # 4. Attempts
 
-**Auth required:** Yes for all.
-
 ## POST `/quizzes/{quizId}/attempts`
+**Auth required:** Yes
 
-Start a new attempt. Returns questions without correct answers.
-
-> **`play_and_win` quizzes allow only ONE completed attempt per user.** Returns `400` if the user already completed one.
+Starts a new quiz attempt. For `play_and_win` quizzes, only one attempt is allowed per user.
 
 ### Response `201`
 ```json
@@ -674,39 +635,34 @@ Start a new attempt. Returns questions without correct answers.
   "quiz_id":    "uuid",
   "questions": [
     {
-      "id":                 "uuid",
-      "quiz_id":            "uuid",
-      "position":           1,
-      "type":               "multiple_choice",
-      "prompt":             "What is 2 + 2?",
-      "media_url":          null,
-      "options":            ["3", "4", "5", "6"],
-      "time_limit_seconds": 30,
-      "clues":              null
+      "id":       "uuid",
+      "position": 1,
+      "type":     "multiple_choice",
+      "prompt":   "What is the powerhouse of the cell?",
+      "options":  ["Nucleus", "Mitochondria", "Ribosome", "Golgi body"]
     }
   ]
 }
 ```
 
-> `correct_answer` is **never** included in this response. `options` is an empty array `[]` for question types that don't use them. `clues` is `null` unless the question type is `clue_reveal`.
-
 ### Errors
-| Status | Meaning |
-|--------|---------|
-| 400 | Quiz not found, not published, or already completed (`play_and_win`) |
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `BAD_REQUEST` | Quiz not available or already attempted (play_and_win) |
 
 ---
 
 ## POST `/attempts/{attemptId}/answers`
+**Auth required:** Yes
 
-Submit one answer. Can be called multiple times per question (upserts — last answer wins).
+Submits an answer for one question. Can be called multiple times per question (last answer wins).
 
 ### Request Body
 ```json
 {
   "question_id":      "uuid",
-  "answer":           "4",
-  "time_taken_ms":    8500,
+  "answer":           "Mitochondria",
+  "time_taken_ms":    4200,
   "confidence_level": "very_confident",
   "clues_used":       0,
   "combo_level":      2
@@ -716,47 +672,28 @@ Submit one answer. Can be called multiple times per question (upserts — last a
 | Field | Required | Notes |
 |-------|----------|-------|
 | `question_id` | Yes | |
-| `answer` | Yes | See format by type below |
+| `answer` | Yes | Format depends on question type |
 | `time_taken_ms` | No | Milliseconds taken to answer |
-| `confidence_level` | No | Required for `confidence_based` questions: `very_confident` \| `pretty_sure` \| `not_sure` |
-| `clues_used` | No | Number of clues revealed (for `clue_reveal` questions) |
-| `combo_level` | No | Current combo streak (for `speed_chain` questions) |
-
-**`answer` format by question type:**
-| Type | Format | Example |
-|------|--------|---------|
-| `multiple_choice` | String | `"4"` |
-| `confidence_based` | String | `"photosynthesis"` |
-| `eliminate_wrong` | String | `"correct option"` |
-| `puzzle` | String | `"correct option"` |
-| `speed_chain` | String | `"correct option"` |
-| `arrange_order` | JSON array of strings | `["first","second","third"]` |
-| `clue_reveal` | String | `"answer text"` |
+| `confidence_level` | No | `very_confident`, `pretty_sure`, `not_sure` — used for `confidence_based` type |
+| `clues_used` | No | Number of clues revealed — used for `clue_reveal` type |
+| `combo_level` | No | Current combo — used for `speed_chain` type |
 
 ### Response `200`
 ```json
 {
   "is_correct":     true,
-  "correct_answer": "4",
-  "points_earned":  25,
+  "correct_answer": "Mitochondria",
+  "points_earned":  15,
   "combo_level":    3
 }
 ```
 
-> `combo_level` in the response is the submitted `combo_level + 1`, to be used as the next question's `combo_level`. `correct_answer` reflects the stored value in its native JSON format.
-
-### Errors
-| Status | Meaning |
-|--------|---------|
-| 400 | Missing `question_id`, attempt not found, attempt not in-progress, or question not found |
-
 ---
 
 ## POST `/attempts/{attemptId}/complete`
+**Auth required:** Yes
 
-Finalize the attempt. Awards points, updates streak, grants badges.
-
-> Must be called after submitting answers. Unanswered questions count as wrong (0 points).
+Finalises the attempt, calculates score, awards points and badges, updates streak.
 
 ### Response `200`
 ```json
@@ -764,43 +701,32 @@ Finalize the attempt. Awards points, updates streak, grants badges.
   "attempt_id":           "uuid",
   "score_pct":            80.0,
   "performance_badge":    "excellent",
-  "points_delta":         200,
+  "points_delta":         144,
   "total_correct":        8,
   "total_questions":      10,
-  "streak_bonus_awarded": 50,
+  "streak_bonus_awarded": 0,
   "badges_awarded":       ["first_quiz"],
   "question_breakdown": [
     {
-      "position":          1,
-      "question_snippet":  "What is 2 + 2?",
-      "student_answer":    "4",
-      "correct_answer":    "4",
-      "is_correct":        true,
-      "points":            25
+      "position":         1,
+      "question_snippet": "What is the powerhouse of the cell?",
+      "student_answer":   "Mitochondria",
+      "correct_answer":   "Mitochondria",
+      "is_correct":       true,
+      "points":           15
     }
   ]
 }
 ```
 
-**`performance_badge` values:**
-| Value | Threshold |
-|-------|-----------|
-| `excellent` | Score ≥ 75% |
-| `good` | Score 50–74% |
-| `needs_work` | Score < 50% |
-
-> `streak_bonus_awarded` is `0` if no milestone was hit. `badges_awarded` is an empty array `[]` if no new badges were earned. `question_snippet` is truncated to 80 characters.
-
-### Errors
-| Status | Meaning |
-|--------|---------|
-| 400 | Attempt not found or already completed |
+> `performance_badge`: `excellent` (≥75%), `good` (50–74%), `needs_work` (<50%)
 
 ---
 
 ## GET `/attempts/{attemptId}`
+**Auth required:** Yes
 
-Get the result of a completed (or in-progress) attempt.
+Returns the result of a completed attempt.
 
 ### Response `200`
 ```json
@@ -809,136 +735,103 @@ Get the result of a completed (or in-progress) attempt.
   "quiz_id":         "uuid",
   "status":          "completed",
   "score_pct":       80.0,
-  "points_delta":    200,
+  "points_delta":    144,
   "total_correct":   8,
   "total_questions": 10,
-  "completed_at":    "2026-04-07T10:05:00Z"
+  "completed_at":    "2024-03-01T14:22:00Z"
 }
 ```
-
-> `completed_at` is `null` for in-progress attempts.
-
-### Errors
-| Status | Meaning |
-|--------|---------|
-| 404 | Attempt not found or belongs to another user |
 
 ---
 
 # 5. Leaderboard
 
-**Auth required:** Yes
-
 ## GET `/leaderboard`
+**Auth required:** Yes
 
 ### Query Params
 | Param | Values | Default |
 |-------|--------|---------|
-| `scope` | `institution` \| `global` | `institution` |
-| `page` | integer | 1 |
-| `limit` | integer, max 100 | 50 |
+| `scope` | `institution`, `global` | `institution` |
+| `page`, `limit` | — | page=1, limit=50 |
 
-### Response `200`
+### Response `200` (paginated)
 ```json
 {
-  "data": {
-    "scope":     "institution",
-    "my_rank":   7,
-    "my_points": 1250,
-    "entries": [
-      {
-        "rank":           1,
-        "user_id":        "uuid",
-        "display_name":   "TopStudent",
-        "total_points":   5000,
-        "current_streak": 15
-      }
-    ]
-  },
-  "meta": { "page": 1, "limit": 50, "total": 120 }
+  "scope":     "institution",
+  "my_rank":   3,
+  "my_points": 1250,
+  "entries": [
+    {
+      "rank":           1,
+      "user_id":        "uuid",
+      "display_name":   "Bob Jones",
+      "total_points":   2100,
+      "current_streak": 9
+    }
+  ]
 }
 ```
-
-> Only users with `status = 'active'` and `role IN ('student', 'teacher')` appear on the leaderboard. `my_rank` is calculated as the number of users with more points + 1.
 
 ---
 
 # 6. Topic Requests
 
-**Auth required:** Yes
-
 ## POST `/topic-requests`
-
-Submit a topic request to teachers/institution.
+**Auth required:** Yes (student)
 
 ### Request Body
 ```json
 {
-  "topic":       "Quadratic Equations",
-  "subject":     "Mathematics",
-  "description": "Specifically vertex form"
+  "topic":       "Photosynthesis",
+  "subject":     "Biology",
+  "description": "I'd like more questions on the Calvin cycle"
 }
 ```
 
-| Field | Required |
-|-------|----------|
-| `topic` | Yes |
-| `subject` | No |
-| `description` | No |
+`topic` is required.
 
 ### Response `201`
 ```json
 {
   "id":          "uuid",
   "student_id":  "uuid",
-  "topic":       "Quadratic Equations",
-  "subject":     "Mathematics",
-  "description": "Specifically vertex form",
+  "topic":       "Photosynthesis",
+  "subject":     "Biology",
+  "description": "I'd like more questions on the Calvin cycle",
   "status":      "pending",
-  "assigned_to": null,
-  "created_at":  "2026-04-08T09:00:00Z"
+  "created_at":  "2024-03-01T00:00:00Z"
 }
 ```
-
-**`status` values:** `pending` · `in_progress` · `done` · `rejected`
 
 ---
 
 ## GET `/topic-requests/mine`
-
-All topic requests submitted by the authenticated student.
+**Auth required:** Yes (student)
 
 ### Response `200`
-Array of `TopicRequest` objects (same shape as `POST` response).
+Array of topic requests (same shape as above).
 
 ---
 
 # 7. Parent
 
-**Auth required:** Yes for all.
-
-**Flow:** Student generates code → shares with parent → parent links → student accepts.
-
 ## POST `/parent/link-invite`
-**Role:** `student` only
+**Auth required:** Yes (student only)
 
-Generates an 8-character invite code.
+Generates a short invite code the student shares with their parent.
 
 ### Response `200`
 ```json
 { "invite_code": "a1b2c3d4" }
 ```
 
-### Errors
-| Status | Meaning |
-|--------|---------|
-| 403 | Authenticated user is not a student |
-
 ---
 
 ## POST `/parent/link`
+**Auth required:** Yes (parent)
 
-Parent submits an invite code to initiate a link request.
+Submits the invite code. Creates a pending link waiting for student acceptance.
 
 ### Request Body
 ```json
@@ -954,15 +847,16 @@ Parent submits an invite code to initiate a link request.
 ```
 
 ### Errors
-| Status | Meaning |
-|--------|---------|
-| 400 | Missing `invite_code` |
-| 404 | Invite code not found or already used |
+| Status | Code | Meaning |
+|--------|------|---------|
+| 404 | `NOT_FOUND` | Invite code not found or already used |
 
 ---
 
 ## POST `/parent/link/{linkId}/accept`
-**Role:** `student` (must be the student who generated the code)
+**Auth required:** Yes (student)
+
+Student accepts the parent link request.
 
 ### Response `200`
 ```json
@@ -970,15 +864,16 @@ Parent submits an invite code to initiate a link request.
 ```
 
 ### Errors
-| Status | Meaning |
-|--------|---------|
-| 400 | Link not found or already processed |
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `BAD_REQUEST` | Link not found or already processed |
 
 ---
 
 ## DELETE `/parent/link/{linkId}`
+**Auth required:** Yes (student or parent)
 
-Either party (parent or student) can revoke an active link. Sets status to `revoked`.
+Revokes an active parent-student link.
 
 ### Response `200`
 ```json
@@ -988,16 +883,15 @@ Either party (parent or student) can revoke an active link. Sets status to `revo
 ---
 
 ## GET `/parent/children`
+**Auth required:** Yes (parent)
 
-Lists all actively linked children for the authenticated parent.
-
-### Response `200` (array)
+### Response `200`
 ```json
 [
   {
     "id":             "uuid",
-    "display_name":   "Bob Smith",
-    "total_points":   400,
+    "display_name":   "Charlie Smith",
+    "total_points":   800,
     "current_streak": 3
   }
 ]
@@ -1006,277 +900,189 @@ Lists all actively linked children for the authenticated parent.
 ---
 
 ## GET `/parent/children/{studentId}/overview`
-
-Detailed view of a linked child. The parent must have an active link with the student.
+**Auth required:** Yes (parent — must have an active link to this student)
 
 ### Response `200`
 ```json
 {
-  "student_id":      "uuid",
-  "display_name":    "Bob Smith",
-  "total_points":    400,
-  "current_streak":  3,
-  "quizzes_taken":   12,
-  "average_score":   68.5,
+  "student_id":     "uuid",
+  "display_name":   "Charlie Smith",
+  "total_points":   800,
+  "current_streak": 3,
+  "quizzes_taken":  22,
+  "average_score":  68.5,
   "recent_attempts": [
     {
       "id":           "uuid",
-      "quiz_title":   "Algebra Basics",
-      "score_pct":    75.0,
-      "points_delta": 90,
-      "completed_at": "2026-04-07T10:00:00Z"
+      "quiz_title":   "Math Basics",
+      "score_pct":    90.0,
+      "points_delta": 108,
+      "completed_at": "2024-03-01T14:00:00Z"
     }
   ],
-  "badges": ["first_quiz", "on_a_roll"]
+  "badges": ["first_quiz", "perfect_score"]
 }
 ```
-
-> `recent_attempts` returns the last 5 completed attempts. `badges` contains only earned badge type strings.
-
-### Errors
-| Status | Meaning |
-|--------|---------|
-| 403 | No active link between this parent and the student |
 
 ---
 
 # 8. Upload
 
-**Auth required:** Yes | **Role:** `teacher`, `super_admin`, or `moderator`
-
 ## POST `/upload/image`
-
+**Auth required:** Yes (teacher, super_admin, moderator)
 **Content-Type:** `multipart/form-data`
 
-### Request Fields
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `file` | file | Yes | JPEG, PNG, or WebP; max 5 MB |
-| `prefix` | string | No | Storage folder (default: `quiz-images`) |
+### Form Fields
+| Field | Required | Notes |
+|-------|----------|-------|
+| `file` | Yes | JPEG, PNG, or WebP — max 5 MB |
+| `prefix` | No | Storage path prefix, default `quiz-images` |
 
 ### Response `201`
 ```json
 { "url": "https://media.yourdomain.com/quiz-images/uuid.jpg" }
 ```
 
+### Errors
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `BAD_REQUEST` | File missing, too large, or unsupported format |
+
 ---
 
-# 9. Teacher Routes
+# 9. Teacher
 
-**Auth required:** Yes | **Role:** `teacher`
+All routes require role `teacher`.
 
 ## GET `/teacher/quizzes`
-
-Lists all quizzes created by the authenticated teacher.
+**Auth required:** Yes (teacher)
 
 ### Query Params
 | Param | Description |
 |-------|-------------|
-| `status` | Filter by status: `draft` \| `pending_approval` \| `published` \| `rejected` \| `closed` |
-| `page` | Default 1 |
-| `limit` | Default 20, max 50 |
+| `status` | Filter by status (`draft`, `pending_approval`, `published`, `rejected`) |
+| `page`, `limit` | Pagination |
 
-### Response `200`
-Paginated quiz list (same shape as `GET /quizzes`). Results ordered by `created_at` descending.
+### Response `200` (paginated)
+Array of quiz objects belonging to the authenticated teacher.
 
 ---
 
 ## POST `/teacher/quizzes`
-
-Create a new quiz. Starts in `draft` status.
+**Auth required:** Yes (teacher)
 
 ### Request Body
 ```json
 {
-  "title":       "Algebra Basics",
-  "description": "Covers ch.1-3",
+  "title":       "Biology Chapter 3",
+  "description": "Cell division and genetics",
   "type":        "practice",
   "visibility":  "institution",
-  "group_id":    null,
-  "ends_at":     null
+  "time_limit":  30,
+  "expires_at":  "2024-06-01T00:00:00Z"
 }
 ```
 
-| Field | Required | Values / Notes |
-|-------|----------|----------------|
-| `title` | Yes | |
-| `description` | No | |
-| `type` | No | `practice` \| `play_and_win` \| `assignment` |
-| `visibility` | No | `institution` (default) \| `public` |
-| `group_id` | No | UUID of a class group to restrict access |
-| `ends_at` | No | ISO 8601 datetime; quiz auto-closes after this time |
+`title` is required. `visibility` defaults to `institution`.
 
 ### Response `201`
-Quiz object with `status: "draft"`.
+Quiz object.
 
 ---
 
 ## PATCH `/teacher/quizzes/{quizId}`
+**Auth required:** Yes (teacher — own quizzes only)
 
-Update a quiz. Must be the quiz owner. Quiz must be in `draft` status.
-
-Same body fields as `POST /teacher/quizzes` (all optional).
+Same body shape as POST. Only provided fields are updated.
 
 ### Response `200`
 Updated quiz object.
 
-### Errors
-| Status | Meaning |
-|--------|---------|
-| 500 | Not owner or quiz is not in `draft` status |
-
 ---
 
 ## POST `/teacher/quizzes/{quizId}/questions`
-
-Add a question to a quiz. Must be the quiz owner.
+**Auth required:** Yes (teacher — own quizzes only)
 
 ### Request Body
 ```json
 {
-  "position":           1,
-  "type":               "multiple_choice",
-  "prompt":             "What is 2 + 2?",
-  "media_url":          null,
-  "options":            ["3", "4", "5", "6"],
-  "correct_answer":     "4",
-  "time_limit_seconds": 30,
-  "clues":              null
+  "prompt":         "What is the powerhouse of the cell?",
+  "type":           "multiple_choice",
+  "options":        ["Nucleus", "Mitochondria", "Ribosome", "Golgi body"],
+  "correct_answer": "Mitochondria",
+  "position":       1,
+  "points":         10,
+  "time_limit":     20
 }
 ```
 
-| Field | Required | Notes |
-|-------|----------|-------|
-| `prompt` | Yes | |
-| `type` | Yes | See Question Types table |
-| `position` | No | Display order |
-| `media_url` | No | URL to an image (use `/upload/image` first) |
-| `options` | No | Array of strings. Defaults to `[]` if omitted |
-| `correct_answer` | No | See format by type below |
-| `time_limit_seconds` | No | Defaults to 15 |
-| `clues` | No | For `clue_reveal` type only |
-
-**`correct_answer` format by question type:**
-| Type | Format |
-|------|--------|
-| `multiple_choice`, `confidence_based`, `eliminate_wrong`, `puzzle`, `speed_chain`, `clue_reveal` | `"string"` |
-| `arrange_order` | `["item1","item2","item3"]` |
+`prompt` and `type` are required.
 
 ### Response `201`
-Full question object including `id`, `quiz_id`, all submitted fields.
-
-> Adding a question automatically increments the quiz's `question_count`.
-
-### Errors
-| Status | Meaning |
-|--------|---------|
-| 400 | Missing `prompt` or `type` |
-| 403 | Not the quiz owner |
+Question object.
 
 ---
 
 ## PATCH `/teacher/quizzes/{quizId}/questions/{questionId}`
+**Auth required:** Yes (teacher — own quizzes only)
 
-Update a question. Must be the quiz owner.
-
-Same body as `POST /teacher/quizzes/{quizId}/questions` (all fields optional).
+Same body shape as POST.
 
 ### Response `200`
 ```json
 { "message": "question updated" }
 ```
 
-### Errors
-| Status | Meaning |
-|--------|---------|
-| 403 | Not the quiz owner |
-
 ---
 
 ## DELETE `/teacher/quizzes/{quizId}/questions/{questionId}`
-
-Delete a question. Must be the quiz owner. Automatically decrements `question_count`.
+**Auth required:** Yes (teacher — own quizzes only)
 
 ### Response `200`
 ```json
 { "message": "question deleted" }
 ```
 
-### Errors
-| Status | Meaning |
-|--------|---------|
-| 403 | Not the quiz owner |
-
 ---
 
 ## POST `/teacher/quizzes/{quizId}/publish`
+**Auth required:** Yes (teacher — own quizzes only)
 
-Publish a quiz. Must be the quiz owner and quiz must have at least 1 question.
-
-- `visibility: institution` → status becomes `published` immediately
-- `visibility: public` → status becomes `pending_approval` (requires moderator/admin review)
-
-Can also re-publish a `rejected` quiz.
+Submits the quiz for admin approval (`pending_approval`). If already published, closes it (`closed`).
 
 ### Response `200`
 ```json
-{ "status": "published" }
+{ "status": "pending_approval" }
 ```
 
 ### Errors
-| Status | Meaning |
-|--------|---------|
-| 400 | Quiz has no questions, not the owner, or quiz is not in `draft`/`rejected` status |
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `BAD_REQUEST` | Quiz has no questions or other validation failure |
 
 ---
 
 ## GET `/teacher/quizzes/{quizId}/results`
-
-Analytics for a quiz. Must be the quiz owner.
+**Auth required:** Yes (teacher — own quizzes only)
 
 ### Response `200`
-```json
-{
-  "total_attempts":  45,
-  "completion_rate": 88.9,
-  "average_score":   71.2,
-  "question_count":  10,
-  "per_question": [
-    {
-      "question_id":      "uuid",
-      "position":         1,
-      "prompt":           "What is 2 + 2?",
-      "total_responses":  40,
-      "correct_count":    38,
-      "accuracy_pct":     95.0
-    }
-  ]
-}
-```
-
-> `completion_rate` = completed attempts / all started attempts × 100.
-
-### Errors
-| Status | Meaning |
-|--------|---------|
-| 404 | Quiz not found or not the owner |
+Aggregated attempt results for the quiz.
 
 ---
 
 ## GET `/teacher/topic-requests`
+**Auth required:** Yes (teacher)
 
-Topic requests within the teacher's institution.
+### Query Params
+`status`, `page`, `limit`
 
-### Query Params: `status`, `page`, `limit`
-
-### Response `200`
-Paginated array of `TopicRequest` objects.
+### Response `200` (paginated)
+Array of topic requests from students in the same institution.
 
 ---
 
 ## PATCH `/teacher/topic-requests/{requestId}`
-
-Update a topic request status or assignment.
+**Auth required:** Yes (teacher)
 
 ### Request Body
 ```json
@@ -1293,15 +1099,11 @@ Update a topic request status or assignment.
 
 ---
 
-# 10. Institution Admin Routes
+# 10. Institution Admin
 
-**Auth required:** Yes | **Role:** `institution_admin`
-
-All endpoints under `/institution/`.
+All routes require role `institution_admin`.
 
 ## GET `/institution/overview`
-
-Dashboard stats for the admin's institution.
 
 ### Response `200`
 ```json
@@ -1309,244 +1111,727 @@ Dashboard stats for the admin's institution.
   "total_students":  120,
   "active_students": 45,
   "total_teachers":  8,
-  "total_quizzes":   30,
-  "average_score":   72.3,
-  "top_student":     { "name": "Alice Smith", "points": 5000 },
-  "activity_chart":  [
-    { "day": "2026-04-01", "count": 12 }
-  ],
-  "top_quizzes": [
-    { "id": "uuid", "title": "Algebra Basics", "completions": 45 }
+  "total_quizzes":   34,
+  "average_score":   71.2,
+  "top_student":     { "name": "Bob", "points": 3200 },
+  "activity_chart":  [{ "day": "2024-03-01", "count": 12 }],
+  "top_quizzes":     [{ "id": "uuid", "title": "Biology Ch3", "completions": 89 }]
+}
+```
+
+---
+
+## GET `/institution/students`
+### Query Params
+| Param | Description |
+|-------|-------------|
+| `search` | Name or email search |
+| `status` | `active`, `suspended` |
+| `group_id` | Filter by group |
+| `sort` | `total_points`, `average_score`, `last_active` |
+| `page`, `limit` | Pagination |
+
+### Response `200` (paginated)
+Array of student rows with `id`, `display_name`, `email`, `total_points`, `current_streak`, `last_active_at`, `status`, `average_score`.
+
+---
+
+## GET `/institution/students/{userId}`
+Returns detailed student profile with quiz history and group memberships.
+
+---
+
+## PATCH `/institution/students/{userId}/status`
+### Request Body
+```json
+{ "action": "suspend", "reason": "Academic misconduct" }
+```
+`action`: `suspend` or `reactivate`
+
+### Response `200`
+```json
+{ "status": "suspended" }
+```
+
+---
+
+## GET `/institution/teachers`
+### Query Params
+`page`, `limit`
+
+### Response `200` (paginated)
+Array of teacher rows with `id`, `display_name`, `email`, `last_active_at`, `status`, `quiz_count`, `attempt_count`.
+
+---
+
+## GET `/institution/teachers/{userId}`
+Returns teacher profile with quiz and attempt stats.
+
+---
+
+## PATCH `/institution/teachers/{userId}/status`
+Same shape as student status update.
+
+---
+
+## DELETE `/institution/teachers/{userId}`
+Removes the teacher from the institution (does not delete their account).
+
+### Response `200`
+```json
+{ "message": "teacher removed from institution" }
+```
+
+---
+
+## GET `/institution/groups`
+### Response `200`
+Array of groups with `id`, `name`, `description`, `invite_code`, `archived_at`, `created_at`.
+
+---
+
+## POST `/institution/groups`
+### Request Body
+```json
+{ "name": "Class 10A", "description": "Optional" }
+```
+
+### Response `201`
+```json
+{ "id": "uuid", "name": "Class 10A", "invite_code": "ABCD1234", "created_at": "..." }
+```
+
+---
+
+## GET `/institution/groups/{groupId}`
+### Response `200`
+```json
+{
+  "id":            "uuid",
+  "name":          "Class 10A",
+  "student_count": 28,
+  "average_score": 74.5
+}
+```
+
+---
+
+## PATCH `/institution/groups/{groupId}`
+### Request Body
+```json
+{ "name": "Class 10B", "description": "Updated description" }
+```
+
+### Response `200`
+```json
+{ "message": "group updated" }
+```
+
+---
+
+## DELETE `/institution/groups/{groupId}`
+Archives the group.
+
+### Response `200`
+```json
+{ "message": "group archived" }
+```
+
+---
+
+## POST `/institution/groups/{groupId}/students`
+### Request Body
+```json
+{ "user_id": "uuid" }
+```
+
+### Response `200`
+```json
+{ "message": "student added to group" }
+```
+
+---
+
+## DELETE `/institution/groups/{groupId}/students/{userId}`
+### Response `200`
+```json
+{ "message": "student removed from group" }
+```
+
+---
+
+## POST `/institution/groups/{groupId}/teachers`
+### Request Body
+```json
+{ "user_id": "uuid" }
+```
+
+### Response `200`
+```json
+{ "message": "teacher assigned to group" }
+```
+
+---
+
+## GET `/institution/reports/student-performance`
+### Query Params
+| Param | Description |
+|-------|-------------|
+| `group_id` | Filter by group |
+| `date_from`, `date_to` | Date range filter |
+
+### Response `200`
+Array of student performance rows with `id`, `display_name`, `total_points`, `current_streak`, `quizzes_taken`, `average_score`.
+
+---
+
+## GET `/institution/settings`
+### Response `200`
+```json
+{
+  "name":                  "Springfield Academy",
+  "type":                  "school",
+  "timezone":              "America/Chicago",
+  "student_referral_code": "SINST-ABC",
+  "teacher_referral_code": "TINST-XYZ",
+  "point_rules": {
+    "point_multiplier":      1.0,
+    "streak_grace_enabled":  true,
+    "play_win_score_hidden": false,
+    "point_expiry_months":   6
+  }
+}
+```
+
+---
+
+## PATCH `/institution/settings`
+### Request Body
+```json
+{ "name": "New Name", "timezone": "Europe/London", "type": "university" }
+```
+
+### Response `200`
+```json
+{ "message": "settings updated" }
+```
+
+---
+
+## PATCH `/institution/settings/point-rules`
+### Request Body
+```json
+{
+  "point_multiplier":      1.5,
+  "streak_grace_enabled":  true,
+  "play_win_score_hidden": false,
+  "point_expiry_months":   12
+}
+```
+
+All fields optional — only provided fields are updated.
+
+### Response `200`
+```json
+{ "message": "point rules updated" }
+```
+
+---
+
+## GET `/institution/audit-log`
+### Query Params
+`page`, `limit`
+
+### Response `200` (paginated)
+Array of audit entries scoped to this institution and its users.
+
+---
+
+## GET `/institution/quizzes`
+Same as `GET /quizzes` — lists published quizzes for the institution.
+
+---
+
+## GET `/institution/quizzes/{quizId}`
+Same as `GET /quizzes/{quizId}`.
+
+---
+
+## GET `/institution/topic-requests`
+Same as `GET /teacher/topic-requests`.
+
+---
+
+## PATCH `/institution/topic-requests/{requestId}`
+Same as `PATCH /teacher/topic-requests/{requestId}`.
+
+---
+
+# 11. Super Admin
+
+Base path: `/admin`
+**Auth required:** Yes — roles `super_admin`, `moderator`, or `support_agent` (specific endpoints noted below)
+
+---
+
+## GET `/admin/overview`
+**Roles:** all admin
+
+### Response `200`
+```json
+{
+  "total_users":       5200,
+  "active_users_week": 340,
+  "institutions":      { "pending": 3, "verified": 47, "suspended": 1 },
+  "quizzes":           { "published": 210, "pending": 8, "reported": 2 },
+  "attempts_today":    124,
+  "attempts_week":     890,
+  "avg_score_week":    69.3,
+  "points_week":       45000,
+  "points_all_time":   1200000
+}
+```
+
+---
+
+## GET `/admin/activity-feed`
+**Roles:** all admin
+### Query Params
+`type` — filter by action type
+
+### Response `200`
+Array of recent audit log events.
+
+---
+
+## GET `/admin/institutions`
+**Roles:** all admin
+### Query Params
+`search`, `status`, `type`, `page`, `limit`
+
+### Response `200` (paginated)
+Array with `id`, `name`, `type`, `status`, `contact_email`, `verified_at`, `created_at`.
+
+---
+
+## GET `/admin/institutions/queue`
+**Roles:** all admin
+
+Returns pending institutions awaiting approval.
+
+### Response `200`
+Array with `id`, `name`, `type`, `contact_email`, `submitted_at`.
+
+---
+
+## GET `/admin/institutions/{institutionId}`
+**Roles:** all admin
+
+### Response `200`
+```json
+{
+  "id":                    "uuid",
+  "name":                  "Springfield Academy",
+  "type":                  "school",
+  "status":                "verified",
+  "contact_email":         "admin@springfield.edu",
+  "student_referral_code": "SINST-ABC",
+  "teacher_referral_code": "TINST-XYZ",
+  "verified_at":           "2024-01-10T00:00:00Z",
+  "student_count":         120,
+  "teacher_count":         8,
+  "quiz_count":            34
+}
+```
+
+---
+
+## POST `/admin/institutions/{institutionId}/approve`
+**Roles:** super_admin only
+
+Approves the institution and generates referral codes.
+
+### Response `200`
+```json
+{
+  "message":               "institution approved",
+  "student_referral_code": "SINST-ABC",
+  "teacher_referral_code": "TINST-XYZ"
+}
+```
+
+---
+
+## POST `/admin/institutions/{institutionId}/reject`
+**Roles:** super_admin only
+
+### Request Body
+```json
+{ "reason": "Incomplete documentation" }
+```
+
+### Response `200`
+```json
+{ "message": "institution rejected" }
+```
+
+---
+
+## POST `/admin/institutions/{institutionId}/suspend`
+**Roles:** super_admin only
+
+### Request Body
+```json
+{ "reason": "Policy violation" }
+```
+
+### Response `200`
+```json
+{ "message": "institution suspended" }
+```
+
+---
+
+## POST `/admin/institutions/{institutionId}/reactivate`
+**Roles:** super_admin only
+
+### Response `200`
+```json
+{ "message": "institution reactivated" }
+```
+
+---
+
+## POST `/admin/institutions/{institutionId}/reset-referral-codes`
+**Roles:** super_admin only
+
+### Response `200`
+```json
+{
+  "student_referral_code": "SINST-NEW",
+  "teacher_referral_code": "TINST-NEW"
+}
+```
+
+---
+
+## GET `/admin/users`
+**Roles:** all admin
+### Query Params
+`search`, `role`, `status`, `institution_id`, `page`, `limit`
+
+### Response `200` (paginated)
+Array with `id`, `display_name`, `email`, `role`, `institution`, `status`, `last_active_at`, `total_points`, `current_streak`.
+
+---
+
+## GET `/admin/users/{userId}`
+**Roles:** all admin
+
+### Response `200`
+```json
+{
+  "id":             "uuid",
+  "display_name":   "Alice Smith",
+  "email":          "alice@example.com",
+  "role":           "student",
+  "status":         "active",
+  "institution":    "Springfield Academy",
+  "total_points":   1250,
+  "current_streak": 5,
+  "member_since":   "2024-01-15T00:00:00Z",
+  "last_active_at": "2024-03-01T14:00:00Z",
+  "recent_attempts": [
+    { "id": "uuid", "quiz_title": "Biology Ch3", "score_pct": 85.0, "completed_at": "..." }
   ]
 }
 ```
 
-> `active_students` = distinct students who completed a quiz in the last 7 days. `average_score` = average over the current calendar month. `activity_chart` = quizzes completed per day over the last 30 days (up to 30 entries). `top_quizzes` = up to 5 quizzes by completion count.
+---
+
+## PATCH `/admin/users/{userId}/suspend`
+**Roles:** all admin
+
+### Request Body
+```json
+{ "reason": "Abuse of platform" }
+```
+
+### Response `200`
+```json
+{ "message": "user suspended" }
+```
 
 ---
 
-## Students
+## PATCH `/admin/users/{userId}/reactivate`
+**Roles:** all admin
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/institution/students` | Paginated student list (`page`, `limit`) |
-| GET | `/institution/students/{userId}` | Student detail |
-| PATCH | `/institution/students/{userId}/status` | Update status: `{ "status": "active" \| "suspended" }` |
-
----
-
-## Teachers
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/institution/teachers` | Paginated teacher list (`page`, `limit`) |
-| GET | `/institution/teachers/{userId}` | Teacher detail |
-| PATCH | `/institution/teachers/{userId}/status` | Update status |
-| DELETE | `/institution/teachers/{userId}` | Remove teacher from institution |
+### Response `200`
+```json
+{ "message": "user reactivated" }
+```
 
 ---
 
-## Groups (Classes)
+## DELETE `/admin/users/{userId}`
+**Roles:** super_admin only
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/institution/groups` | All groups |
-| POST | `/institution/groups` | Create group: `{ "name": "...", "description": "..." }` |
-| GET | `/institution/groups/{groupId}` | Group detail |
-| PATCH | `/institution/groups/{groupId}` | Update group name/description |
-| DELETE | `/institution/groups/{groupId}` | Archive group |
-| POST | `/institution/groups/{groupId}/students` | Add student: `{ "user_id": "uuid" }` |
-| DELETE | `/institution/groups/{groupId}/students/{userId}` | Remove student from group |
-| POST | `/institution/groups/{groupId}/teachers` | Add teacher: `{ "user_id": "uuid" }` |
+GDPR soft-delete — anonymises name and email.
+
+### Response `200`
+```json
+{ "message": "user deleted" }
+```
 
 ---
 
-## Quizzes
+## POST `/admin/users/{userId}/points`
+**Roles:** super_admin only
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/institution/quizzes` | Browse published quizzes (same as `GET /quizzes`) |
-| GET | `/institution/quizzes/{quizId}` | Quiz detail |
+### Request Body
+```json
+{ "amount": 500, "reason": "Competition winner bonus" }
+```
 
----
+`amount` may be negative to deduct points. Balance is floored at 0.
 
-## Topic Requests
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/institution/topic-requests` | All topic requests (`status`, `page`, `limit`) |
-| PATCH | `/institution/topic-requests/{requestId}` | Update status/assignment |
-
----
-
-## Reports & Settings
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/institution/reports/student-performance` | Aggregated student performance report |
-| GET | `/institution/settings` | Institution settings |
-| PATCH | `/institution/settings` | Update settings (e.g. timezone, name) |
-| PATCH | `/institution/settings/point-rules` | Update institution point multiplier |
-| GET | `/institution/audit-log` | Admin action audit log for this institution |
+### Response `200`
+```json
+{ "new_balance": 1750, "adjustment": 500 }
+```
 
 ---
 
-# 11. Super Admin Routes
+## POST `/admin/users/{userId}/impersonate`
+**Roles:** all admin
 
-**Auth required:** Yes | **Role:** `super_admin`, `moderator`, or `support_agent`
-
-All endpoints under `/admin/`. Role restrictions are noted per endpoint.
+### Response `200`
+```json
+{ "session_id": "uuid", "message": "impersonation session started" }
+```
 
 ---
 
-## Overview & Activity
+## POST `/admin/impersonation/{sessionId}/end`
+**Roles:** all admin
 
-| Method | Path | Role | Description |
-|--------|------|------|-------------|
-| GET | `/admin/overview` | all | Platform-wide metrics |
-| GET | `/admin/activity-feed` | all | Recent admin actions (last 50); optional `?type=<action_type>` filter |
+### Response `200`
+```json
+{ "message": "impersonation ended" }
+```
 
-### `GET /admin/overview` Response `200`
+---
+
+## GET `/admin/quizzes/moderation-queue`
+**Roles:** all admin
+
+### Response `200`
+Array with `id`, `title`, `teacher`, `institution`, `question_count`, `submitted_at`.
+
+---
+
+## POST `/admin/quizzes/{quizId}/approve`
+**Roles:** super_admin, moderator
+
+### Response `200`
+```json
+{ "message": "quiz approved" }
+```
+
+---
+
+## POST `/admin/quizzes/{quizId}/reject`
+**Roles:** super_admin, moderator
+
+### Request Body
+```json
+{ "reason": "Incorrect answers detected" }
+```
+
+### Response `200`
+```json
+{ "message": "quiz rejected" }
+```
+
+---
+
+## POST `/admin/quizzes/{quizId}/unpublish`
+**Roles:** super_admin only
+
+### Request Body
+```json
+{ "reason": "Policy violation" }
+```
+
+### Response `200`
+```json
+{ "message": "quiz unpublished" }
+```
+
+---
+
+## GET `/admin/reports`
+**Roles:** all admin
+### Query Params
+`status` (`open`, `resolved`), `priority`, `page`, `limit`
+
+### Response `200` (paginated)
+Array with `id`, `reporter`, `quiz_title`, `reason`, `status`, `priority`, `created_at`.
+
+---
+
+## POST `/admin/reports/{reportId}/resolve`
+**Roles:** all admin
+
+### Request Body
+```json
+{ "resolution": "remove_quiz" }
+```
+
+If `resolution` is `remove_quiz`, the associated quiz is automatically unpublished.
+
+### Response `200`
+```json
+{ "message": "report resolved" }
+```
+
+---
+
+## GET `/admin/point-economy`
+**Roles:** super_admin only
+
+### Response `200`
+Array of config entries with `key`, `value`, `description`, `updated_at`.
+
+---
+
+## PATCH `/admin/point-economy/{key}`
+**Roles:** super_admin only
+
+### Request Body
+```json
+{ "value": 15 }
+```
+
+### Response `200`
+```json
+{ "message": "config updated" }
+```
+
+---
+
+## POST `/admin/announcements`
+**Roles:** super_admin, moderator
+
+### Request Body
 ```json
 {
-  "total_users":       5000,
-  "active_users_week": 1200,
-  "institutions": {
-    "pending":   3,
-    "verified":  45,
-    "suspended": 2
-  },
-  "quizzes": {
-    "published": 300,
-    "pending":   12,
-    "reported":  5
-  },
-  "attempts_today":  450,
-  "attempts_week":   3200,
-  "avg_score_week":  71.5,
-  "points_week":     128000,
-  "points_all_time": 2500000
+  "title":          "Platform Update",
+  "body":           "We've added new question types!",
+  "cta_label":      "Learn More",
+  "cta_url":        "https://...",
+  "delivery_types": ["in_app"],
+  "audience":       "all",
+  "institution_id": null,
+  "scheduled_at":   "2024-04-01T09:00:00Z"
 }
 ```
 
-### `GET /admin/activity-feed` Response `200` (array)
+`title` and `body` are required. `delivery_types` can include `in_app` and/or `email`.
+
+### Response `201`
 ```json
-[
-  {
-    "id":          "uuid",
-    "timestamp":   "2026-04-08T09:00:00Z",
-    "admin_name":  "Super Admin",
-    "action_type": "approve_institution",
-    "target_type": "institution",
-    "target_id":   "uuid"
-  }
-]
+{ "id": "uuid", "status": "scheduled" }
 ```
 
 ---
 
-## Institutions
+## GET `/admin/audit-log`
+**Roles:** super_admin only
+### Query Params
+`admin_name`, `action_type`, `target_type`, `page`, `limit`
 
-| Method | Path | Role | Description |
-|--------|------|------|-------------|
-| GET | `/admin/institutions` | all | Paginated list; query: `search`, `status`, `type`, `page`, `limit` |
-| GET | `/admin/institutions/queue` | all | Pending approval queue |
-| GET | `/admin/institutions/{institutionId}` | all | Institution detail |
-| POST | `/admin/institutions/{institutionId}/approve` | `super_admin` | Approve institution |
-| POST | `/admin/institutions/{institutionId}/reject` | `super_admin` | Reject: `{ "reason": "..." }` |
-| POST | `/admin/institutions/{institutionId}/suspend` | `super_admin` | Suspend institution |
-| POST | `/admin/institutions/{institutionId}/reactivate` | `super_admin` | Reactivate suspended institution |
-| POST | `/admin/institutions/{institutionId}/reset-referral-codes` | `super_admin` | Regenerate all referral codes |
+### Response `200` (paginated)
+Array of full audit entries with `id`, `timestamp`, `admin_name`, `admin_role`, `action_type`, `target_type`, `target_id`, `reason`, `old_value`, `new_value`.
 
 ---
 
-## Users
+## GET `/admin/admin-accounts`
+**Roles:** super_admin only
 
-| Method | Path | Role | Description |
-|--------|------|------|-------------|
-| GET | `/admin/users` | all | All users; supports pagination |
-| GET | `/admin/users/{userId}` | all | User detail |
-| PATCH | `/admin/users/{userId}/suspend` | all | Suspend user |
-| PATCH | `/admin/users/{userId}/reactivate` | all | Reactivate suspended user |
-| DELETE | `/admin/users/{userId}` | `super_admin` | Permanently delete user |
-| POST | `/admin/users/{userId}/points` | `super_admin` | Adjust points: `{ "amount": 100, "reason": "admin_adjustment" }` |
-| POST | `/admin/users/{userId}/impersonate` | all | Start impersonation session; returns `{ "session_id": "uuid", "access_token": "eyJ..." }` |
-| POST | `/admin/impersonation/{sessionId}/end` | all | End impersonation session |
+### Response `200`
+Array with `id`, `name`, `email`, `role`, `status`, `created_at`.
 
 ---
 
-## Quiz Moderation
+## POST `/admin/admin-accounts`
+**Roles:** super_admin only
 
-| Method | Path | Role | Description |
-|--------|------|------|-------------|
-| GET | `/admin/quizzes/moderation-queue` | all | Quizzes with `status: pending_approval` |
-| POST | `/admin/quizzes/{quizId}/approve` | `super_admin`, `moderator` | Approve quiz → `published` |
-| POST | `/admin/quizzes/{quizId}/reject` | `super_admin`, `moderator` | Reject: `{ "reason": "..." }` → `rejected` |
-| POST | `/admin/quizzes/{quizId}/unpublish` | `super_admin` | Unpublish quiz → `closed` |
+### Request Body
+```json
+{ "name": "Jane Mod", "email": "jane@qwish.com", "role": "moderator" }
+```
 
----
-
-## Content Reports
-
-| Method | Path | Role | Description |
-|--------|------|------|-------------|
-| GET | `/admin/reports` | all | Open content reports |
-| POST | `/admin/reports/{reportId}/resolve` | all | Mark report resolved |
+### Response `201`
+```json
+{ "id": "uuid", "message": "admin account created, invite sent" }
+```
 
 ---
 
-## Point Economy
+## PATCH `/admin/admin-accounts/{adminId}`
+**Roles:** super_admin only
 
-| Method | Path | Role | Description |
-|--------|------|------|-------------|
-| GET | `/admin/point-economy` | `super_admin` | All config key-value pairs |
-| PATCH | `/admin/point-economy/{key}` | `super_admin` | Update single config: `{ "value": 15 }` |
+Cannot modify your own account.
 
-**Configurable keys:** `base_points_per_question` · `performance_bonus_pct_75` · `deduction_pct_below_50` · `streak_bonus_7_day` · `streak_bonus_15_day` · `streak_bonus_30_day` · `combo_multiplier_step` · `clue_reveal_deduction_per_clue` · `points_expiry_months` · `confidence_multiplier_table`
+### Request Body
+```json
+{ "role": "support_agent", "status": "active" }
+```
 
----
+All fields optional.
 
-## Announcements
-
-| Method | Path | Role | Description |
-|--------|------|------|-------------|
-| POST | `/admin/announcements` | all | Broadcast: `{ "title": "...", "message": "...", "scope": "global" \| "institution" }` |
-
----
-
-## Audit Log & Admin Accounts
-
-| Method | Path | Role | Description |
-|--------|------|------|-------------|
-| GET | `/admin/audit-log` | `super_admin` | Full platform audit log |
-| GET | `/admin/admin-accounts` | `super_admin` | List all admin accounts |
-| POST | `/admin/admin-accounts` | `super_admin` | Create admin: `{ "email": "...", "full_name": "...", "role": "moderator" \| "support_agent" }` |
-| PATCH | `/admin/admin-accounts/{adminId}` | `super_admin` | Update admin account |
-| DELETE | `/admin/admin-accounts/{adminId}` | `super_admin` | Delete admin account |
+### Response `200`
+```json
+{ "message": "admin account updated" }
+```
 
 ---
 
-# 12. Internal Cron Endpoints
+## DELETE `/admin/admin-accounts/{adminId}`
+**Roles:** super_admin only
 
-**Auth required:** `X-Cron-Secret` header matching server config (not a JWT)
+Cannot delete your own account.
 
-These endpoints are called by the scheduler (automatically in production via in-process goroutines, or externally via HTTP).
+### Response `200`
+```json
+{ "message": "admin account deleted" }
+```
 
-| Method | Path | Description | Schedule |
-|--------|------|-------------|----------|
-| POST | `/internal/cron/expire-points` | Expire points past their `expires_at` date; inserts negative ledger entries | Nightly at 00:00 UTC |
-| POST | `/internal/cron/reset-streaks` | Activate grace windows and reset broken streaks | Daily at 00:05 UTC |
-| POST | `/internal/cron/snapshot-leaderboard` | Save weekly leaderboard snapshot | Every Monday at 00:01 UTC |
-| POST | `/internal/cron/close-expired-quizzes` | Set status to `closed` for quizzes past `ends_at` | Hourly |
+---
 
-### Response `200` (all)
+# 12. Internal Cron
+
+All cron endpoints require the `X-Cron-Secret` header matching the `CRON_SECRET` environment variable.
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `POST` | `/internal/cron/expire-points` | Deactivates expired point ledger entries |
+| `POST` | `/internal/cron/reset-streaks` | Resets missed streaks at 00:05 UTC |
+| `POST` | `/internal/cron/snapshot-leaderboard` | Snapshots weekly leaderboard rankings |
+| `POST` | `/internal/cron/close-expired-quizzes` | Closes quizzes past their `expires_at` |
+
+All return:
 ```json
 { "message": "done" }
 ```
 
+> In production, these jobs also run automatically in-process via Go tickers — external cron triggers are optional.
+
 ---
 
-# 13. Health Check
+# 13. Health
 
 ## GET `/health`
 **Auth required:** No
@@ -1555,63 +1840,3 @@ These endpoints are called by the scheduler (automatically in production via in-
 ```json
 { "status": "ok" }
 ```
-
----
-
-# Error Reference
-
-| Status | Code | Cause |
-|--------|------|-------|
-| 400 | - | Missing required field, validation failure, or business rule violation |
-| 401 | `INVALID_CREDENTIALS` | Wrong email or password |
-| 401 | `INVALID_TOKEN` | Expired or invalid refresh token |
-| 403 | - | Insufficient role or resource ownership mismatch |
-| 404 | - | Resource not found |
-| 409 | `EMAIL_IN_USE` | Duplicate email on signup |
-| 500 | - | Unexpected server error |
-
----
-
-# Frontend Integration Tips
-
-## Token Refresh Pattern
-```
-API Request → 401 → POST /auth/refresh → store new tokens → retry original request
-```
-
-## Quiz Attempt Lifecycle
-```
-POST /quizzes/{id}/attempts              → attempt_id + questions (no correct answers)
-  for each question:
-    POST /attempts/{id}/answers          → is_correct + points_earned + next combo_level
-POST /attempts/{id}/complete             → final score + badges_awarded + question_breakdown
-```
-
-## Combo Level (speed_chain)
-```
-Start with combo_level = 0
-After each correct answer: next combo_level = response.combo_level
-After a wrong answer: reset combo_level = 0
-```
-
-## Confidence Level (confidence_based)
-```
-Send confidence_level with each confidence_based question answer.
-Values: "very_confident" | "pretty_sure" | "not_sure"
-Omitting defaults to "not_sure" multiplier.
-```
-
-## Pagination
-```dart
-// Dart / Flutter example
-final res = await http.get(Uri.parse('$base/quizzes?page=1&limit=20'));
-final body = jsonDecode(res.body);
-final items = body['data'] as List;
-final meta = body['meta'];  // { page, limit, total }
-final hasMore = meta['page'] * meta['limit'] < meta['total'];
-```
-
-## CORS
-The server allows origins configured via `ALLOWED_ORIGINS` env var (comma-separated). Set to `*` for wildcard.
-Allowed methods: `GET, POST, PATCH, DELETE, OPTIONS`.
-Allowed headers: `Authorization, Content-Type`.

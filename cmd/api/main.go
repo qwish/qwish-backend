@@ -103,10 +103,9 @@ func main() {
 
 		// ------ AUTH (public) ------
 		r.Route("/auth", func(r chi.Router) {
-			r.Post("/signup", authH.Signup)
-			r.Post("/login", authH.Login)
+			r.Post("/send-otp", authH.SendOTP)
+			r.Post("/verify-otp", authH.VerifyOTP)
 			r.Post("/refresh", authH.Refresh)
-			r.Post("/forgot-password", authH.ForgotPassword)
 
 			// Protected auth routes
 			r.Group(func(r chi.Router) {

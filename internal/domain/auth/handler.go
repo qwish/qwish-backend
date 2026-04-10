@@ -15,26 +15,80 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
-// POST /api/v1/auth/signup
-func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
+// POST /api/v1/auth/send-otp
+// Sends a 6-digit OTP to the given email. Always returns success to prevent enumeration.
+func (h *Handler) SendOTP(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		FullName     string `json:"full_name"`
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
+		middleware.BadRequest(w, "email is required")
+		return
+	}
+	// Fire and forget — don't expose whether the email exists
+	h.svc.SupabaseSendOTP(r.Context(), req.Email)
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "if that email is valid, an OTP has been sent"})
+}
+
+// POST /api/v1/auth/verify-otp
+// Verifies the OTP. Creates the user record on first login (signup).
+// Body: { email, otp, full_name?, referral_code? }
+// full_name is required only for first-time users.
+func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
+	var req struct {
 		Email        string `json:"email"`
-		Password     string `json:"password"`
+		OTP          string `json:"otp"`
+		FullName     string `json:"full_name"`
 		ReferralCode string `json:"referral_code"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
-	if req.FullName == "" || req.Email == "" || req.Password == "" {
-		middleware.BadRequest(w, "full_name, email, and password are required")
+	if req.Email == "" || req.OTP == "" {
+		middleware.BadRequest(w, "email and otp are required")
+		return
+	}
+
+	authResp, err := h.svc.SupabaseVerifyOTP(r.Context(), req.Email, req.OTP)
+	if err != nil {
+		middleware.Error(w, http.StatusUnauthorized, "INVALID_OTP", "invalid or expired OTP")
+		return
+	}
+
+	uid := authResp.User.ID
+	if uid == "" {
+		middleware.InternalError(w)
+		return
+	}
+
+	// Check if this user already exists in our DB (returning user = login)
+	existingUser, err := h.svc.GetUserBySupabaseUID(r.Context(), uid)
+	if err == nil {
+		// Returning user — just return tokens + profile
+		middleware.JSON(w, http.StatusOK, map[string]interface{}{
+			"user": map[string]interface{}{
+				"id":           existingUser.ID,
+				"full_name":    existingUser.FullName,
+				"display_name": existingUser.DisplayName,
+				"email":        existingUser.Email,
+				"role":         existingUser.Role,
+			},
+			"access_token":  authResp.AccessToken,
+			"refresh_token": authResp.RefreshToken,
+			"is_new_user":   false,
+		})
+		return
+	}
+
+	// New user — full_name is required
+	if req.FullName == "" {
+		middleware.BadRequest(w, "full_name is required for new accounts")
 		return
 	}
 
 	var instID *string
 	role := "student"
-
 	if req.ReferralCode != "" {
 		id, assignedRole, err := h.svc.FindInstitutionByReferralCode(r.Context(), req.ReferralCode)
 		if err != nil {
@@ -45,19 +99,7 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 		role = assignedRole
 	}
 
-	authResp, err := h.svc.SupabaseSignUp(r.Context(), req.Email, req.Password)
-	if err != nil {
-		middleware.Error(w, http.StatusConflict, "EMAIL_IN_USE", "email already registered or "+err.Error())
-		return
-	}
-
-	uid := authResp.UserID()
-	if uid == "" {
-		middleware.Error(w, http.StatusUnprocessableEntity, "EMAIL_CONFIRMATION_REQUIRED", "please confirm your email before continuing")
-		return
-	}
-
-	user, err := h.svc.CreateUser(r.Context(), uid, req.FullName, req.Email, role, instID)
+	newUser, err := h.svc.CreateUser(r.Context(), uid, req.FullName, req.Email, role, instID)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -65,60 +107,22 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 
 	var instData interface{}
 	if instID != nil {
-		instName := h.svc.GetInstitutionName(r.Context(), *instID)
-		instData = map[string]string{"id": *instID, "name": instName}
+		instData = map[string]string{"id": *instID, "name": h.svc.GetInstitutionName(r.Context(), *instID)}
 	}
 
 	middleware.JSON(w, http.StatusCreated, map[string]interface{}{
 		"user": map[string]interface{}{
-			"id":           user.ID,
-			"full_name":    user.FullName,
-			"display_name": user.DisplayName,
-			"email":        user.Email,
-			"role":         user.Role,
+			"id":           newUser.ID,
+			"full_name":    newUser.FullName,
+			"display_name": newUser.DisplayName,
+			"email":        newUser.Email,
+			"role":         newUser.Role,
 			"institution":  instData,
 		},
 		"access_token":  authResp.AccessToken,
 		"refresh_token": authResp.RefreshToken,
+		"is_new_user":   true,
 	})
-}
-
-// POST /api/v1/auth/login
-func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		middleware.BadRequest(w, "invalid request body")
-		return
-	}
-	if req.Email == "" || req.Password == "" {
-		middleware.BadRequest(w, "email and password are required")
-		return
-	}
-
-	authResp, err := h.svc.SupabaseLogin(r.Context(), req.Email, req.Password)
-	if err != nil {
-		middleware.Error(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "invalid email or password")
-		return
-	}
-
-	middleware.JSON(w, http.StatusOK, map[string]interface{}{
-		"access_token":  authResp.AccessToken,
-		"refresh_token": authResp.RefreshToken,
-	})
-}
-
-// POST /api/v1/auth/logout
-func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
-	authHeader := r.Header.Get("Authorization")
-	token := ""
-	if len(authHeader) > 7 {
-		token = authHeader[7:]
-	}
-	h.svc.SupabaseLogout(r.Context(), token)
-	middleware.JSON(w, http.StatusOK, map[string]string{"message": "logged out"})
 }
 
 // POST /api/v1/auth/refresh
@@ -143,19 +147,14 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /api/v1/auth/forgot-password
-func (h *Handler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email string `json:"email"`
+// POST /api/v1/auth/logout
+func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
+	token := ""
+	if auth := r.Header.Get("Authorization"); len(auth) > 7 {
+		token = auth[7:]
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
-		middleware.BadRequest(w, "email is required")
-		return
-	}
-	// Supabase sends OTP email automatically
-	h.svc.SendPasswordResetOTP(r.Context(), req.Email)
-	// Always return success to prevent email enumeration
-	middleware.JSON(w, http.StatusOK, map[string]string{"message": "if that email is registered, a reset link has been sent"})
+	h.svc.SupabaseLogout(r.Context(), token)
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "logged out"})
 }
 
 // PATCH /api/v1/auth/referral-code
@@ -168,8 +167,7 @@ func (h *Handler) UpdateReferralCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := middleware.GetUserID(r)
-	if err := h.svc.UpdateUserInstitution(r.Context(), userID, req.ReferralCode); err != nil {
+	if err := h.svc.UpdateUserInstitution(r.Context(), middleware.GetUserID(r), req.ReferralCode); err != nil {
 		middleware.BadRequest(w, "invalid or inactive referral code")
 		return
 	}

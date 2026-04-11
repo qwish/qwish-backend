@@ -27,7 +27,8 @@ type userRow struct {
 	Status        string
 }
 
-func Authenticate(jwtSecret string, db *pgxpool.Pool) func(http.Handler) http.Handler {
+func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Handler) http.Handler {
+	keyFunc := makeKeyFunc(jwtSecret, supabaseURL)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
@@ -37,9 +38,7 @@ func Authenticate(jwtSecret string, db *pgxpool.Pool) func(http.Handler) http.Ha
 			}
 			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
-			token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
-				return []byte(jwtSecret), nil
-			}, jwt.WithValidMethods([]string{"HS256"}))
+			token, err := jwt.Parse(tokenStr, keyFunc, jwt.WithValidMethods([]string{"HS256", "ES256"}))
 			if err != nil || !token.Valid {
 				Unauthorized(w)
 				return
@@ -175,7 +174,8 @@ func GetEmail(r *http.Request) string {
 
 // AuthenticateJWTOnly validates the JWT signature without requiring a DB user record.
 // Use for endpoints where the user may not yet exist in the DB (e.g. create-profile).
-func AuthenticateJWTOnly(jwtSecret string) func(http.Handler) http.Handler {
+func AuthenticateJWTOnly(jwtSecret, supabaseURL string) func(http.Handler) http.Handler {
+	keyFunc := makeKeyFunc(jwtSecret, supabaseURL)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
@@ -185,9 +185,7 @@ func AuthenticateJWTOnly(jwtSecret string) func(http.Handler) http.Handler {
 			}
 			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
-			token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
-				return []byte(jwtSecret), nil
-			}, jwt.WithValidMethods([]string{"HS256"}))
+			token, err := jwt.Parse(tokenStr, keyFunc, jwt.WithValidMethods([]string{"HS256", "ES256"}))
 			if err != nil || !token.Valid {
 				Unauthorized(w)
 				return

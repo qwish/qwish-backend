@@ -109,13 +109,13 @@ func main() {
 
 			// JWT-only (user may not exist in DB yet)
 			r.Group(func(r chi.Router) {
-				r.Use(mw.AuthenticateJWTOnly(cfg.SupabaseJWTSecret))
+				r.Use(mw.AuthenticateJWTOnly(cfg.SupabaseJWTSecret, cfg.SupabaseURL))
 				r.Post("/create-profile", authH.CreateProfile)
 			})
 
 			// Protected auth routes
 			r.Group(func(r chi.Router) {
-				r.Use(mw.Authenticate(cfg.SupabaseJWTSecret, pool))
+				r.Use(mw.Authenticate(cfg.SupabaseJWTSecret, cfg.SupabaseURL, pool))
 				r.Post("/logout", authH.Logout)
 				r.Patch("/referral-code", authH.UpdateReferralCode)
 			})
@@ -123,7 +123,7 @@ func main() {
 
 		// ------ Protected routes (all require auth) ------
 		r.Group(func(r chi.Router) {
-			r.Use(mw.Authenticate(cfg.SupabaseJWTSecret, pool))
+			r.Use(mw.Authenticate(cfg.SupabaseJWTSecret, cfg.SupabaseURL, pool))
 
 			// Users (self)
 			r.Get("/users/me", userH.GetMe)

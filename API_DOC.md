@@ -167,10 +167,18 @@ After all answers are submitted:
 
 # 1. Auth
 
+## Auth Flow
+
+```
+send-otp → verify-otp → (if is_new_user) create-profile → home
+```
+
+---
+
 ## POST `/auth/send-otp`
 **Auth required:** No
 
-Sends a 6-digit OTP to the given email address. Always returns success to prevent email enumeration.
+Sends a 6-digit OTP to the given email address. Also indicates whether the email belongs to a new or returning user so the client can prepare the correct next screen.
 
 ### Request Body
 ```json
@@ -179,8 +187,15 @@ Sends a 6-digit OTP to the given email address. Always returns success to preven
 
 ### Response `200`
 ```json
-{ "message": "if that email is valid, an OTP has been sent" }
+{
+  "message":     "OTP sent",
+  "is_new_user": true
+}
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `is_new_user` | `bool` | `true` → no account yet, show name & referral fields after OTP. `false` → returning user. |
 
 ### Errors
 | Status | Code | Meaning |
@@ -192,27 +207,18 @@ Sends a 6-digit OTP to the given email address. Always returns success to preven
 ## POST `/auth/verify-otp`
 **Auth required:** No
 
-Verifies the OTP. Handles both **login** (returning user) and **signup** (new user) in a single call.
+Verifies the OTP and returns session tokens.
 
-- If the user already exists → returns `is_new_user: false`
-- If the user is new → creates the account and returns `is_new_user: true` (`full_name` is required in this case)
+- `is_new_user: false` → profile exists, go to home
+- `is_new_user: true` → call `POST /auth/create-profile` next
 
 ### Request Body
 ```json
 {
-  "email":         "alice@example.com",
-  "otp":           "123456",
-  "full_name":     "Alice Smith",
-  "referral_code": "SINST-ABC"
+  "email": "alice@example.com",
+  "otp":   "123456"
 }
 ```
-
-| Field | Required | Notes |
-|-------|----------|-------|
-| `email` | Yes | |
-| `otp` | Yes | 6-digit code from email |
-| `full_name` | **New users only** | Required on first login; ignored for returning users |
-| `referral_code` | No | Determines institution and role (`student` or `teacher`). Only applied on first login. |
 
 ### Response `200` — Returning user
 ```json
@@ -230,7 +236,44 @@ Verifies the OTP. Handles both **login** (returning user) and **signup** (new us
 }
 ```
 
-### Response `201` — New user
+### Response `200` — New user
+```json
+{
+  "access_token":  "eyJ...",
+  "refresh_token": "eyJ...",
+  "is_new_user":   true
+}
+```
+
+> No `user` object is returned for new users — profile does not exist yet. Call `POST /auth/create-profile` with the returned `access_token`.
+
+### Errors
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `BAD_REQUEST` | Missing `email` or `otp` |
+| 401 | `INVALID_OTP` | OTP is wrong or expired |
+
+---
+
+## POST `/auth/create-profile`
+**Auth required:** Yes (JWT from `verify-otp` — user need not exist in DB yet)
+
+Creates the profile for a newly verified user. Only call this when `verify-otp` returns `is_new_user: true`.
+
+### Request Body
+```json
+{
+  "full_name":     "Alice Smith",
+  "referral_code": "SINST-ABC"
+}
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `full_name` | Yes | |
+| `referral_code` | No | Determines institution and role (`student` or `teacher`) |
+
+### Response `201`
 ```json
 {
   "user": {
@@ -240,10 +283,7 @@ Verifies the OTP. Handles both **login** (returning user) and **signup** (new us
     "email":        "alice@example.com",
     "role":         "student",
     "institution":  { "id": "uuid", "name": "Springfield Academy" }
-  },
-  "access_token":  "eyJ...",
-  "refresh_token": "eyJ...",
-  "is_new_user":   true
+  }
 }
 ```
 
@@ -252,10 +292,9 @@ Verifies the OTP. Handles both **login** (returning user) and **signup** (new us
 ### Errors
 | Status | Code | Meaning |
 |--------|------|---------|
-| 400 | `BAD_REQUEST` | Missing `email` or `otp` |
-| 400 | `BAD_REQUEST` | New user but `full_name` is missing |
+| 400 | `BAD_REQUEST` | Missing `full_name` |
 | 400 | `BAD_REQUEST` | Invalid or inactive referral code |
-| 401 | `INVALID_OTP` | OTP is wrong or expired |
+| 401 | `UNAUTHORIZED` | Missing or invalid token |
 
 ---
 

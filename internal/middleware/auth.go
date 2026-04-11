@@ -12,10 +12,12 @@ import (
 type contextKey string
 
 const (
-	ContextKeyUserID   contextKey = "user_id"
-	ContextKeyRole     contextKey = "role"
-	ContextKeyInstID   contextKey = "institution_id"
-	ContextKeyAdminID  contextKey = "admin_id"
+	ContextKeyUserID      contextKey = "user_id"
+	ContextKeyRole        contextKey = "role"
+	ContextKeyInstID      contextKey = "institution_id"
+	ContextKeyAdminID     contextKey = "admin_id"
+	ContextKeySupabaseUID contextKey = "supabase_uid"
+	ContextKeyEmail       contextKey = "email"
 )
 
 type userRow struct {
@@ -159,4 +161,54 @@ func GetInstitutionID(r *http.Request) string {
 func GetAdminID(r *http.Request) string {
 	v, _ := r.Context().Value(ContextKeyAdminID).(string)
 	return v
+}
+
+func GetSupabaseUID(r *http.Request) string {
+	v, _ := r.Context().Value(ContextKeySupabaseUID).(string)
+	return v
+}
+
+func GetEmail(r *http.Request) string {
+	v, _ := r.Context().Value(ContextKeyEmail).(string)
+	return v
+}
+
+// AuthenticateJWTOnly validates the JWT signature without requiring a DB user record.
+// Use for endpoints where the user may not yet exist in the DB (e.g. create-profile).
+func AuthenticateJWTOnly(jwtSecret string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authHeader := r.Header.Get("Authorization")
+			if !strings.HasPrefix(authHeader, "Bearer ") {
+				Unauthorized(w)
+				return
+			}
+			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+
+			token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
+				return []byte(jwtSecret), nil
+			}, jwt.WithValidMethods([]string{"HS256"}))
+			if err != nil || !token.Valid {
+				Unauthorized(w)
+				return
+			}
+
+			claims, ok := token.Claims.(jwt.MapClaims)
+			if !ok {
+				Unauthorized(w)
+				return
+			}
+
+			supabaseUID, _ := claims["sub"].(string)
+			email, _ := claims["email"].(string)
+			if supabaseUID == "" {
+				Unauthorized(w)
+				return
+			}
+
+			ctx := context.WithValue(r.Context(), ContextKeySupabaseUID, supabaseUID)
+			ctx = context.WithValue(ctx, ContextKeyEmail, email)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
 }

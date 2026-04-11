@@ -78,6 +78,15 @@ func (s *Service) SupabaseLogout(ctx context.Context, accessToken string) error 
 	return nil
 }
 
+// UserExistsByEmail returns true if a user with the given email exists in the DB.
+func (s *Service) UserExistsByEmail(ctx context.Context, email string) bool {
+	var exists bool
+	s.db.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL)`, email,
+	).Scan(&exists)
+	return exists
+}
+
 // GetUserBySupabaseUID returns the local user record for a Supabase UID, if it exists.
 func (s *Service) GetUserBySupabaseUID(ctx context.Context, uid string) (*UserProfile, error) {
 	var u UserProfile

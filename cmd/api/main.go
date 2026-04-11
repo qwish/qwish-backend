@@ -107,6 +107,12 @@ func main() {
 			r.Post("/verify-otp", authH.VerifyOTP)
 			r.Post("/refresh", authH.Refresh)
 
+			// JWT-only (user may not exist in DB yet)
+			r.Group(func(r chi.Router) {
+				r.Use(mw.AuthenticateJWTOnly(cfg.SupabaseJWTSecret))
+				r.Post("/create-profile", authH.CreateProfile)
+			})
+
 			// Protected auth routes
 			r.Group(func(r chi.Router) {
 				r.Use(mw.Authenticate(cfg.SupabaseJWTSecret, pool))

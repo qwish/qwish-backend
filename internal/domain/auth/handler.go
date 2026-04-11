@@ -25,21 +25,21 @@ func (h *Handler) SendOTP(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "email is required")
 		return
 	}
-	// Fire and forget — don't expose whether the email exists
+	isNewUser := !h.svc.UserExistsByEmail(r.Context(), req.Email)
 	h.svc.SupabaseSendOTP(r.Context(), req.Email)
-	middleware.JSON(w, http.StatusOK, map[string]string{"message": "if that email is valid, an OTP has been sent"})
+	middleware.JSON(w, http.StatusOK, map[string]interface{}{
+		"message":      "OTP sent",
+		"is_new_user":  isNewUser,
+	})
 }
 
 // POST /api/v1/auth/verify-otp
-// Verifies the OTP. Creates the user record on first login (signup).
-// Body: { email, otp, full_name?, referral_code? }
-// full_name is required only for first-time users.
+// Verifies the OTP and returns tokens. Does not create a profile.
+// is_new_user=true means the client should redirect to the create-profile step.
 func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Email        string `json:"email"`
-		OTP          string `json:"otp"`
-		FullName     string `json:"full_name"`
-		ReferralCode string `json:"referral_code"`
+		Email string `json:"email"`
+		OTP   string `json:"otp"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
@@ -62,10 +62,8 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if this user already exists in our DB (returning user = login)
 	existingUser, err := h.svc.GetUserBySupabaseUID(r.Context(), uid)
 	if err == nil {
-		// Returning user — just return tokens + profile
 		middleware.JSON(w, http.StatusOK, map[string]interface{}{
 			"user": map[string]interface{}{
 				"id":           existingUser.ID,
@@ -81,11 +79,33 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// New user — full_name is required
-	if req.FullName == "" {
-		middleware.BadRequest(w, "full_name is required for new accounts")
+	// New user — return tokens so they can call create-profile next
+	middleware.JSON(w, http.StatusOK, map[string]interface{}{
+		"access_token":  authResp.AccessToken,
+		"refresh_token": authResp.RefreshToken,
+		"is_new_user":   true,
+	})
+}
+
+// POST /api/v1/auth/create-profile
+// Creates a profile for a newly verified user. Requires auth.
+// Body: { full_name, referral_code? }
+func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		FullName     string `json:"full_name"`
+		ReferralCode string `json:"referral_code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid request body")
 		return
 	}
+	if req.FullName == "" {
+		middleware.BadRequest(w, "full_name is required")
+		return
+	}
+
+	uid := middleware.GetSupabaseUID(r)
+	email := middleware.GetEmail(r)
 
 	var instID *string
 	role := "student"
@@ -99,7 +119,7 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		role = assignedRole
 	}
 
-	newUser, err := h.svc.CreateUser(r.Context(), uid, req.FullName, req.Email, role, instID)
+	newUser, err := h.svc.CreateUser(r.Context(), uid, req.FullName, email, role, instID)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -119,9 +139,6 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 			"role":         newUser.Role,
 			"institution":  instData,
 		},
-		"access_token":  authResp.AccessToken,
-		"refresh_token": authResp.RefreshToken,
-		"is_new_user":   true,
 	})
 }
 

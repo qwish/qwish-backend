@@ -12,6 +12,7 @@ type Config struct {
 	AppEnv             string
 	DatabaseURL        string
 	SupabaseURL        string
+	SupabaseAnonKey    string
 	SupabaseServiceKey string
 	SupabaseJWTSecret  string
 	R2AccountID        string
@@ -34,6 +35,7 @@ func Load() *Config {
 		AppEnv:             getEnv("APP_ENV", "development"),
 		DatabaseURL:        mustEnv("DATABASE_URL"),
 		SupabaseURL:        mustEnv("SUPABASE_URL"),
+		SupabaseAnonKey:    mustEnv("SUPABASE_ANON_KEY"),
 		SupabaseServiceKey: mustEnv("SUPABASE_SERVICE_ROLE_KEY"),
 		SupabaseJWTSecret:  mustEnv("SUPABASE_JWT_SECRET"),
 		R2AccountID:        getEnv("R2_ACCOUNT_ID", ""),

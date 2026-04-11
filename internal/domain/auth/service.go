@@ -31,7 +31,7 @@ func (s *Service) SupabaseSendOTP(ctx context.Context, email string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("apikey", s.cfg.SupabaseServiceKey)
+	req.Header.Set("apikey", s.cfg.SupabaseAnonKey)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -157,7 +157,7 @@ func (s *Service) supabasePost(ctx context.Context, path string, body map[string
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("apikey", s.cfg.SupabaseServiceKey)
+	req.Header.Set("apikey", s.cfg.SupabaseAnonKey)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

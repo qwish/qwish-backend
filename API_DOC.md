@@ -544,6 +544,202 @@ Returns a public profile (no email or sensitive data).
 
 ---
 
+## GET `/users/me/rank`
+**Auth required:** Yes
+
+Returns the authenticated user's rank and top-percentile across all scopes.
+
+### Response `200`
+```json
+{
+  "global_rank":        23,
+  "global_total":       1500,
+  "institution_rank":   5,
+  "institution_total":  120,
+  "domain_rank":        87,
+  "domain_total":       340,
+  "top_percentile":     12.5
+}
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `top_percentile` | `float` | e.g. `12.5` → "Top 12.5%" of all active users |
+| `institution_rank` / `institution_total` | `int` | Omitted if user has no institution |
+| `domain_rank` / `domain_total` | `int` | Omitted if user's `domain` is not set |
+
+---
+
+## GET `/users/me/profile-views`
+**Auth required:** Yes
+
+Returns how many unique users viewed the authenticated user's public profile.
+
+### Response `200`
+```json
+{
+  "today":     3,
+  "this_week": 12,
+  "total":     47
+}
+```
+
+> Views are recorded automatically when any user calls `GET /users/{userId}/profile`. Self-views are excluded.
+
+---
+
+## GET `/users/me/milestones`
+**Auth required:** Yes
+
+Returns progress across all defined milestones.
+
+### Response `200`
+```json
+[
+  {
+    "id":          "achiever",
+    "title":       "Achiever",
+    "description": "Earn 500 points",
+    "progress":    0.70,
+    "current":     350,
+    "target":      500,
+    "completed":   false
+  }
+]
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `progress` | `float` | `0.0`–`1.0`; use as fill percentage |
+| `completed` | `bool` | `true` when `current >= target` |
+
+### Milestone definitions
+
+| ID | Title | Metric | Target |
+|----|-------|--------|--------|
+| `first_quiz` | First Steps | Quizzes completed | 1 |
+| `quiz_5` | Getting Started | Quizzes completed | 5 |
+| `quiz_25` | Quiz Enthusiast | Quizzes completed | 25 |
+| `quiz_100` | Century Club | Quizzes completed | 100 |
+| `points_100` | Point Scorer | Total points | 100 |
+| `points_500` | Achiever | Total points | 500 |
+| `points_2000` | Elite | Total points | 2000 |
+| `points_5000` | Champion | Total points | 5000 |
+| `streak_3` | On Fire | Longest streak | 3 |
+| `streak_7` | Streak Master | Longest streak | 7 |
+| `streak_30` | Streak Legend | Longest streak | 30 |
+
+---
+
+## GET `/users/me/education`
+**Auth required:** Yes
+
+### Response `200`
+```json
+[
+  {
+    "id":               "uuid",
+    "institution_name": "MIT",
+    "degree":           "B.Tech",
+    "field":            "Computer Science",
+    "start_year":       2020,
+    "end_year":         null,
+    "is_current":       true
+  }
+]
+```
+
+---
+
+## POST `/users/me/education`
+**Auth required:** Yes
+
+### Request Body
+```json
+{
+  "institution_name": "MIT",
+  "degree":           "B.Tech",
+  "field":            "Computer Science",
+  "start_year":       2020,
+  "end_year":         null,
+  "is_current":       true
+}
+```
+
+| Field | Required |
+|-------|----------|
+| `institution_name` | Yes |
+| `degree`, `field`, `start_year`, `end_year`, `is_current` | No |
+
+### Response `201`
+Returns the created education object (same shape as list item).
+
+### Errors
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `BAD_REQUEST` | Missing `institution_name` |
+
+---
+
+## DELETE `/users/me/education/{id}`
+**Auth required:** Yes
+
+### Response `204`
+No content.
+
+---
+
+## GET `/users/me/skills`
+**Auth required:** Yes
+
+### Response `200`
+```json
+["Go", "Flutter", "PostgreSQL"]
+```
+
+---
+
+## POST `/users/me/skills`
+**Auth required:** Yes
+
+### Request Body
+```json
+{ "skill": "Go" }
+```
+
+### Response `204`
+No content. Duplicate skill names are silently ignored.
+
+### Errors
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `BAD_REQUEST` | Missing `skill` |
+
+---
+
+## DELETE `/users/me/skills/{skill}`
+**Auth required:** Yes
+
+### Response `204`
+No content.
+
+---
+
+## PATCH `/users/me/domain`
+**Auth required:** Yes
+
+Sets the user's study/subject domain. Used for domain-scoped ranking (e.g. "CS Domain #87").
+
+### Request Body
+```json
+{ "domain": "Computer Science" }
+```
+
+### Response `204`
+No content.
+
+---
+
 # 3. Quizzes
 
 ## GET `/quizzes`

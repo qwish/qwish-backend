@@ -218,3 +218,263 @@ func (s *Service) SoftDelete(ctx context.Context, userID string) error {
 		 WHERE id = $1`, userID)
 	return err
 }
+
+// ── Profile views ─────────────────────────────────────────────────────────────
+
+type ProfileViewStats struct {
+	Today    int `json:"today"`
+	ThisWeek int `json:"this_week"`
+	Total    int `json:"total"`
+}
+
+func (s *Service) RecordProfileView(ctx context.Context, viewerID, viewedID string) {
+	s.db.Exec(ctx,
+		`INSERT INTO profile_views (viewer_id, viewed_id) VALUES ($1, $2)`,
+		viewerID, viewedID)
+}
+
+func (s *Service) GetProfileViews(ctx context.Context, userID string) (*ProfileViewStats, error) {
+	v := &ProfileViewStats{}
+	err := s.db.QueryRow(ctx,
+		`SELECT
+		  COUNT(*) FILTER (WHERE viewed_at >= CURRENT_DATE)                   AS today,
+		  COUNT(*) FILTER (WHERE viewed_at >= CURRENT_DATE - INTERVAL '7 days') AS this_week,
+		  COUNT(*)                                                              AS total
+		 FROM profile_views
+		 WHERE viewed_id = $1 AND (viewer_id IS NULL OR viewer_id != $1)`,
+		userID,
+	).Scan(&v.Today, &v.ThisWeek, &v.Total)
+	return v, err
+}
+
+// ── Rank & percentile ─────────────────────────────────────────────────────────
+
+type RankInfo struct {
+	GlobalRank      int     `json:"global_rank"`
+	GlobalTotal     int     `json:"global_total"`
+	InstRank        *int    `json:"institution_rank,omitempty"`
+	InstTotal       *int    `json:"institution_total,omitempty"`
+	DomainRank      *int    `json:"domain_rank,omitempty"`
+	DomainTotal     *int    `json:"domain_total,omitempty"`
+	TopPercentile   float64 `json:"top_percentile"` // e.g. 12.5 → "Top 12.5%"
+}
+
+func (s *Service) GetRank(ctx context.Context, userID, instID string) (*RankInfo, error) {
+	ri := &RankInfo{}
+
+	var totalPoints int64
+	var domain *string
+	s.db.QueryRow(ctx,
+		`SELECT total_points, domain FROM users WHERE id = $1`, userID,
+	).Scan(&totalPoints, &domain)
+
+	// Global rank
+	s.db.QueryRow(ctx,
+		`SELECT COUNT(*)+1 FROM users WHERE status='active' AND total_points > $1`, totalPoints,
+	).Scan(&ri.GlobalRank)
+	s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM users WHERE status='active'`,
+	).Scan(&ri.GlobalTotal)
+
+	if ri.GlobalTotal > 0 {
+		above := float64(ri.GlobalRank - 1)
+		ri.TopPercentile = above / float64(ri.GlobalTotal) * 100
+	}
+
+	// Institution rank
+	if instID != "" {
+		var ir, it int
+		s.db.QueryRow(ctx,
+			`SELECT COUNT(*)+1 FROM users WHERE institution_id=$1 AND status='active' AND total_points > $2`,
+			instID, totalPoints,
+		).Scan(&ir)
+		s.db.QueryRow(ctx,
+			`SELECT COUNT(*) FROM users WHERE institution_id=$1 AND status='active'`, instID,
+		).Scan(&it)
+		ri.InstRank = &ir
+		ri.InstTotal = &it
+	}
+
+	// Domain rank
+	if domain != nil && *domain != "" {
+		var dr, dt int
+		s.db.QueryRow(ctx,
+			`SELECT COUNT(*)+1 FROM users WHERE domain=$1 AND status='active' AND total_points > $2`,
+			*domain, totalPoints,
+		).Scan(&dr)
+		s.db.QueryRow(ctx,
+			`SELECT COUNT(*) FROM users WHERE domain=$1 AND status='active'`, *domain,
+		).Scan(&dt)
+		ri.DomainRank = &dr
+		ri.DomainTotal = &dt
+	}
+
+	return ri, nil
+}
+
+// ── Milestones ────────────────────────────────────────────────────────────────
+
+type Milestone struct {
+	ID          string  `json:"id"`
+	Title       string  `json:"title"`
+	Description string  `json:"description"`
+	Progress    float64 `json:"progress"`   // 0.0–1.0
+	Current     int64   `json:"current"`
+	Target      int64   `json:"target"`
+	Completed   bool    `json:"completed"`
+}
+
+type milestoneSpec struct {
+	id, title, desc, typ string
+	target               int64
+}
+
+var milestoneSpecs = []milestoneSpec{
+	{"first_quiz", "First Steps", "Complete your first quiz", "quizzes", 1},
+	{"quiz_5", "Getting Started", "Complete 5 quizzes", "quizzes", 5},
+	{"quiz_25", "Quiz Enthusiast", "Complete 25 quizzes", "quizzes", 25},
+	{"quiz_100", "Century Club", "Complete 100 quizzes", "quizzes", 100},
+	{"points_100", "Point Scorer", "Earn 100 points", "points", 100},
+	{"points_500", "Achiever", "Earn 500 points", "points", 500},
+	{"points_2000", "Elite", "Earn 2000 points", "points", 2000},
+	{"points_5000", "Champion", "Earn 5000 points", "points", 5000},
+	{"streak_3", "On Fire", "Maintain a 3-day streak", "streak", 3},
+	{"streak_7", "Streak Master", "Maintain a 7-day streak", "streak", 7},
+	{"streak_30", "Streak Legend", "Maintain a 30-day streak", "streak", 30},
+}
+
+func (s *Service) GetMilestones(ctx context.Context, userID string) ([]Milestone, error) {
+	var totalPoints int64
+	var longestStreak int
+	var quizzesTaken int
+	s.db.QueryRow(ctx,
+		`SELECT u.total_points, u.longest_streak,
+		        (SELECT COUNT(*) FROM quiz_attempts WHERE user_id=u.id AND status='completed')
+		 FROM users u WHERE u.id = $1`, userID,
+	).Scan(&totalPoints, &longestStreak, &quizzesTaken)
+
+	result := make([]Milestone, 0, len(milestoneSpecs))
+	for _, spec := range milestoneSpecs {
+		var current int64
+		switch spec.typ {
+		case "quizzes":
+			current = int64(quizzesTaken)
+		case "points":
+			current = totalPoints
+		case "streak":
+			current = int64(longestStreak)
+		}
+		progress := float64(current) / float64(spec.target)
+		if progress > 1 {
+			progress = 1
+		}
+		result = append(result, Milestone{
+			ID:          spec.id,
+			Title:       spec.title,
+			Description: spec.desc,
+			Progress:    progress,
+			Current:     current,
+			Target:      spec.target,
+			Completed:   current >= spec.target,
+		})
+	}
+	return result, nil
+}
+
+// ── Education ─────────────────────────────────────────────────────────────────
+
+type Education struct {
+	ID              string `json:"id"`
+	InstitutionName string `json:"institution_name"`
+	Degree          string `json:"degree,omitempty"`
+	Field           string `json:"field,omitempty"`
+	StartYear       *int   `json:"start_year,omitempty"`
+	EndYear         *int   `json:"end_year,omitempty"`
+	IsCurrent       bool   `json:"is_current"`
+}
+
+func (s *Service) GetEducation(ctx context.Context, userID string) ([]Education, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT id, institution_name, COALESCE(degree,''), COALESCE(field,''),
+		        start_year, end_year, is_current
+		 FROM user_education WHERE user_id=$1 ORDER BY COALESCE(start_year,0) DESC`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []Education
+	for rows.Next() {
+		var e Education
+		rows.Scan(&e.ID, &e.InstitutionName, &e.Degree, &e.Field,
+			&e.StartYear, &e.EndYear, &e.IsCurrent)
+		list = append(list, e)
+	}
+	if list == nil {
+		list = []Education{}
+	}
+	return list, nil
+}
+
+func (s *Service) AddEducation(ctx context.Context, userID string, e Education) (Education, error) {
+	var out Education
+	err := s.db.QueryRow(ctx,
+		`INSERT INTO user_education (user_id, institution_name, degree, field, start_year, end_year, is_current)
+		 VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,$6,$7)
+		 RETURNING id, institution_name, COALESCE(degree,''), COALESCE(field,''),
+		           start_year, end_year, is_current`,
+		userID, e.InstitutionName, e.Degree, e.Field, e.StartYear, e.EndYear, e.IsCurrent,
+	).Scan(&out.ID, &out.InstitutionName, &out.Degree, &out.Field,
+		&out.StartYear, &out.EndYear, &out.IsCurrent)
+	return out, err
+}
+
+func (s *Service) DeleteEducation(ctx context.Context, userID, educationID string) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM user_education WHERE id=$1 AND user_id=$2`, educationID, userID)
+	return err
+}
+
+// ── Skills ────────────────────────────────────────────────────────────────────
+
+func (s *Service) GetSkills(ctx context.Context, userID string) ([]string, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT skill_name FROM user_skills WHERE user_id=$1 ORDER BY created_at`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var skills []string
+	for rows.Next() {
+		var sk string
+		rows.Scan(&sk)
+		skills = append(skills, sk)
+	}
+	if skills == nil {
+		skills = []string{}
+	}
+	return skills, nil
+}
+
+func (s *Service) AddSkill(ctx context.Context, userID, skill string) error {
+	_, err := s.db.Exec(ctx,
+		`INSERT INTO user_skills (user_id, skill_name) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+		userID, skill)
+	return err
+}
+
+func (s *Service) DeleteSkill(ctx context.Context, userID, skill string) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM user_skills WHERE user_id=$1 AND skill_name=$2`, userID, skill)
+	return err
+}
+
+// ── Domain ────────────────────────────────────────────────────────────────────
+
+func (s *Service) UpdateDomain(ctx context.Context, userID, domain string) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE users SET domain=$1, updated_at=now() WHERE id=$2`, domain, userID)
+	return err
+}

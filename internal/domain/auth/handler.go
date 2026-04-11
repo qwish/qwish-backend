@@ -2,8 +2,11 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -121,6 +124,12 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 
 	newUser, err := h.svc.CreateUser(r.Context(), uid, req.FullName, email, role, instID)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			middleware.Error(w, http.StatusConflict, "USER_ALREADY_EXISTS", "profile already created")
+			return
+		}
+		log.Printf("CreateProfile: CreateUser error: %v", err)
 		middleware.InternalError(w)
 		return
 	}

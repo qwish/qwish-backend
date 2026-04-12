@@ -1858,6 +1858,24 @@ GDPR soft-delete — anonymises name and email.
 
 ---
 
+## POST `/admin/users/{userId}/reset-password`
+**Roles:** super_admin only
+
+Triggers a password-reset email for the user via the Supabase Admin API (`generate_link` with `type=recovery`). The email is sent directly by Supabase; no password or link is returned to the caller.
+
+### Response `200`
+```json
+{ "message": "password reset email sent" }
+```
+
+### Error responses
+| Status | Condition |
+|--------|-----------|
+| `404` | User not found or soft-deleted |
+| `502` | Supabase rejected the request |
+
+---
+
 ## GET `/admin/quizzes/moderation-queue`
 **Roles:** all admin
 
@@ -1888,6 +1906,29 @@ Array with `id`, `title`, `teacher`, `institution`, `question_count`, `submitted
 ```json
 { "message": "quiz rejected" }
 ```
+
+---
+
+## POST `/admin/quizzes/{quizId}/request-edits`
+**Roles:** super_admin, moderator
+
+Sends feedback to the teacher without fully rejecting the quiz. Sets `status` to `needs_edits` and stores the feedback text. Only applies to quizzes currently in `pending_approval`.
+
+### Request Body
+```json
+{ "feedback": "Please add at least one image to question 3." }
+```
+
+### Response `200`
+```json
+{ "message": "edit request sent to teacher" }
+```
+
+### Error responses
+| Status | Condition |
+|--------|-----------|
+| `400` | `feedback` is missing or empty |
+| `404` | Quiz not found or not in `pending_approval` state |
 
 ---
 
@@ -1946,13 +1987,42 @@ Array of config entries with `key`, `value`, `description`, `updated_at`.
 
 ### Request Body
 ```json
-{ "value": 15 }
+{ "value": 15, "reason": "Adjusted for Q2 engagement campaign" }
 ```
+
+`reason` is optional but is written to the audit log when provided.
 
 ### Response `200`
 ```json
 { "message": "config updated" }
 ```
+
+---
+
+## GET `/admin/announcements`
+**Roles:** all admin
+### Query Params
+`status` (`draft`, `scheduled`, `sent`, `retracted`), `page`, `limit`
+
+### Response `200` (paginated)
+Array with `id`, `title`, `body`, `delivery_types`, `audience`, `status`, `scheduled_at`, `sent_at`, `created_at`.
+
+---
+
+## PATCH `/admin/announcements/{announcementId}/retract`
+**Roles:** super_admin, moderator
+
+Retracts a `scheduled` or `sent` announcement. Has no effect on `draft`.
+
+### Response `200`
+```json
+{ "message": "announcement retracted" }
+```
+
+### Error responses
+| Status | Condition |
+|--------|-----------|
+| `404` | Announcement not found or already in `draft`/`retracted` state |
 
 ---
 
@@ -2042,6 +2112,175 @@ Cannot delete your own account.
 ### Response `200`
 ```json
 { "message": "admin account deleted" }
+```
+
+---
+
+## GET `/admin/promos`
+**Roles:** all admin
+### Query Params
+`status` (`draft`, `active`, `inactive`), `page`, `limit`
+
+### Response `200` (paginated)
+Array with `id`, `placement`, `title`, `body`, `cta_label`, `cta_url`, `target`, `status`, `start_date`, `end_date`, `created_at`.
+
+---
+
+## POST `/admin/promos`
+**Roles:** super_admin, moderator
+
+### Request Body
+```json
+{
+  "title":      "Summer Challenge",
+  "body":       "Complete 5 quizzes this week!",
+  "cta_label":  "Start Now",
+  "cta_url":    "https://...",
+  "placement":  "home_banner",
+  "target":     "all",
+  "start_date": "2024-06-01T00:00:00Z",
+  "end_date":   "2024-06-30T23:59:59Z"
+}
+```
+
+`title`, `placement`, and `target` are required. `placement` must be one of `home_banner`, `quiz_browser_banner`, `splash_interstitial`, `achievement_prompt`.
+
+### Response `201`
+```json
+{ "id": "uuid" }
+```
+
+---
+
+## PATCH `/admin/promos/{promoId}`
+**Roles:** super_admin, moderator
+
+Activate or deactivate a promo.
+
+### Request Body
+```json
+{ "status": "active" }
+```
+
+`status` must be `draft`, `active`, or `inactive`.
+
+### Response `200`
+```json
+{ "message": "promo updated" }
+```
+
+---
+
+## DELETE `/admin/promos/{promoId}`
+**Roles:** super_admin only
+
+Hard-deletes the promo record.
+
+### Response `200`
+```json
+{ "message": "promo deleted" }
+```
+
+---
+
+## GET `/admin/brands`
+**Roles:** all admin
+### Query Params
+`status` (`pending`, `active`, `suspended`), `industry`, `page`, `limit`
+
+### Response `200` (paginated)
+Array with `id`, `name`, `industry`, `contact_email`, `website`, `reward_pool`, `status`, `created_at`.
+
+---
+
+## POST `/admin/brands`
+**Roles:** super_admin only
+
+Creates a brand in `pending` status.
+
+### Request Body
+```json
+{
+  "name":          "Acme Corp",
+  "industry":      "EdTech",
+  "contact_email": "partners@acme.com",
+  "website":       "https://acme.com",
+  "reward_pool":   5000.00
+}
+```
+
+`name` is required.
+
+### Response `201`
+```json
+{ "id": "uuid", "status": "pending" }
+```
+
+---
+
+## POST `/admin/brands/{brandId}/approve`
+**Roles:** super_admin only
+
+Approves a `pending` brand, setting status to `active`.
+
+### Response `200`
+```json
+{ "message": "brand approved" }
+```
+
+---
+
+## POST `/admin/brands/{brandId}/suspend`
+**Roles:** super_admin only
+
+### Response `200`
+```json
+{ "message": "brand suspended" }
+```
+
+---
+
+## POST `/admin/brands/{brandId}/reactivate`
+**Roles:** super_admin only
+
+### Response `200`
+```json
+{ "message": "brand reactivated" }
+```
+
+---
+
+## GET `/admin/brands/{brandId}/sponsorship-requests`
+**Roles:** all admin
+
+### Response `200`
+Array with `id`, `quiz_id`, `quiz_title`, `status`, `reason`, `requested_at`, `reviewed_at`.
+
+---
+
+## POST `/admin/sponsorship-requests/{requestId}/approve`
+**Roles:** super_admin, moderator
+
+Approves a `pending` sponsorship request.
+
+### Response `200`
+```json
+{ "message": "sponsorship request approved" }
+```
+
+---
+
+## POST `/admin/sponsorship-requests/{requestId}/reject`
+**Roles:** super_admin, moderator
+
+### Request Body
+```json
+{ "reason": "Brand does not meet content guidelines." }
+```
+
+### Response `200`
+```json
+{ "message": "sponsorship request rejected" }
 ```
 
 ---

@@ -1,9 +1,11 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -11,15 +13,17 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/config"
 	"github.com/qwish/backend/internal/middleware"
 )
 
 type Handler struct {
-	db *pgxpool.Pool
+	db  *pgxpool.Pool
+	cfg *config.Config
 }
 
-func NewHandler(db *pgxpool.Pool) *Handler {
-	return &Handler{db: db}
+func NewHandler(db *pgxpool.Pool, cfg *config.Config) *Handler {
+	return &Handler{db: db, cfg: cfg}
 }
 
 // GET /api/v1/admin/overview
@@ -639,7 +643,8 @@ func (h *Handler) UpdatePointEconomy(w http.ResponseWriter, r *http.Request) {
 	adminID := middleware.GetAdminID(r)
 
 	var req struct {
-		Value json.RawMessage `json:"value"`
+		Value  json.RawMessage `json:"value"`
+		Reason string          `json:"reason"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "value is required")
@@ -658,11 +663,11 @@ func (h *Handler) UpdatePointEconomy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Audit with old/new values
+	// Audit with old/new values and optional reason
 	h.db.Exec(r.Context(),
-		`INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, old_value, new_value)
-		 VALUES ($1,(SELECT name FROM admin_accounts WHERE id=$1),(SELECT role FROM admin_accounts WHERE id=$1),'update_point_config','config',$2,$3)`,
-		adminID, oldVal, req.Value)
+		`INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, reason, old_value, new_value)
+		 VALUES ($1,(SELECT name FROM admin_accounts WHERE id=$1),(SELECT role FROM admin_accounts WHERE id=$1),'update_point_config','config',$2,$3,$4,$5)`,
+		adminID, key, req.Reason, oldVal, req.Value)
 
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "config updated"})
 }
@@ -849,6 +854,467 @@ func (h *Handler) DeleteAdminAccount(w http.ResponseWriter, r *http.Request) {
 	h.db.Exec(r.Context(), `UPDATE admin_accounts SET status='deleted', deleted_at=now() WHERE id=$1`, targetID)
 	logAudit(r.Context(), h.db, requestorID, "delete_admin_account", "admin", targetID, "")
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "admin account deleted"})
+}
+
+// POST /api/v1/admin/users/:userId/reset-password
+func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "userId")
+
+	var email, supabaseUID string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT email, supabase_uid FROM users WHERE id=$1 AND deleted_at IS NULL`, userID,
+	).Scan(&email, &supabaseUID)
+	if err != nil {
+		middleware.NotFound(w, "user")
+		return
+	}
+
+	body, _ := json.Marshal(map[string]string{"type": "recovery", "email": email})
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		h.cfg.SupabaseURL+"/auth/v1/admin/generate_link", bytes.NewReader(body))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("apikey", h.cfg.SupabaseServiceKey)
+	req.Header.Set("Authorization", "Bearer "+h.cfg.SupabaseServiceKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		raw, _ := io.ReadAll(resp.Body)
+		middleware.JSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("supabase error: %s", string(raw))})
+		return
+	}
+
+	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "reset_password", "user", userID, "")
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "password reset email sent"})
+}
+
+// POST /api/v1/admin/quizzes/:quizId/request-edits
+func (h *Handler) RequestEdits(w http.ResponseWriter, r *http.Request) {
+	quizID := chi.URLParam(r, "quizId")
+	var req struct {
+		Feedback string `json:"feedback"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Feedback == "" {
+		middleware.BadRequest(w, "feedback is required")
+		return
+	}
+
+	tag, err := h.db.Exec(r.Context(),
+		`UPDATE quizzes SET status='needs_edits', edit_feedback=$1, updated_at=now()
+		 WHERE id=$2 AND status='pending_approval' AND deleted_at IS NULL`,
+		req.Feedback, quizID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		middleware.NotFound(w, "quiz (must be pending_approval)")
+		return
+	}
+
+	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "request_quiz_edits", "quiz", quizID, req.Feedback)
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "edit request sent to teacher"})
+}
+
+// GET /api/v1/admin/announcements
+func (h *Handler) ListAnnouncements(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if page < 1 { page = 1 }
+	if limit < 1 || limit > 50 { limit = 20 }
+	offset := (page - 1) * limit
+
+	where := "1=1"
+	args := []interface{}{}
+	n := 1
+	if s := q.Get("status"); s != "" {
+		where += fmt.Sprintf(` AND status=$%d`, n)
+		args = append(args, s)
+		n++
+	}
+
+	var total int
+	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM announcements WHERE `+where, args...).Scan(&total)
+	args = append(args, limit, offset)
+
+	rows, err := h.db.Query(r.Context(),
+		`SELECT id, title, body, delivery_types, audience, status, scheduled_at, sent_at, created_at
+		 FROM announcements WHERE `+where+
+			fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, n, n+1),
+		args...)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+
+	type ann struct {
+		ID            string          `json:"id"`
+		Title         string          `json:"title"`
+		Body          string          `json:"body"`
+		DeliveryTypes json.RawMessage `json:"delivery_types"`
+		Audience      string          `json:"audience"`
+		Status        string          `json:"status"`
+		ScheduledAt   *time.Time      `json:"scheduled_at,omitempty"`
+		SentAt        *time.Time      `json:"sent_at,omitempty"`
+		CreatedAt     time.Time       `json:"created_at"`
+	}
+	var items []ann
+	for rows.Next() {
+		var a ann
+		rows.Scan(&a.ID, &a.Title, &a.Body, &a.DeliveryTypes, &a.Audience, &a.Status, &a.ScheduledAt, &a.SentAt, &a.CreatedAt)
+		items = append(items, a)
+	}
+	if items == nil { items = []ann{} }
+	middleware.JSONWithMeta(w, http.StatusOK, items, &middleware.Meta{Page: page, Limit: limit, Total: total})
+}
+
+// PATCH /api/v1/admin/announcements/:announcementId/retract
+func (h *Handler) RetractAnnouncement(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "announcementId")
+	tag, err := h.db.Exec(r.Context(),
+		`UPDATE announcements SET status='retracted' WHERE id=$1 AND status IN ('scheduled','sent')`, id)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		middleware.NotFound(w, "announcement (must be scheduled or sent)")
+		return
+	}
+	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "retract_announcement", "announcement", id, "")
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "announcement retracted"})
+}
+
+// GET /api/v1/admin/promos
+func (h *Handler) ListPromos(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if page < 1 { page = 1 }
+	if limit < 1 || limit > 50 { limit = 20 }
+	offset := (page - 1) * limit
+
+	where := "1=1"
+	args := []interface{}{}
+	n := 1
+	if s := q.Get("status"); s != "" {
+		where += fmt.Sprintf(` AND status=$%d`, n)
+		args = append(args, s)
+		n++
+	}
+
+	var total int
+	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM promotional_content WHERE `+where, args...).Scan(&total)
+	args = append(args, limit, offset)
+
+	rows, err := h.db.Query(r.Context(),
+		`SELECT id, type, title, body, cta_label, cta_url, audience, status, starts_at, ends_at, created_at
+		 FROM promotional_content WHERE `+where+
+			fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, n, n+1),
+		args...)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+
+	type promo struct {
+		ID        string     `json:"id"`
+		Type      string     `json:"placement"`
+		Title     string     `json:"title"`
+		Body      *string    `json:"body,omitempty"`
+		CTALabel  *string    `json:"cta_label,omitempty"`
+		CTAURL    *string    `json:"cta_url,omitempty"`
+		Audience  string     `json:"target"`
+		Status    string     `json:"status"`
+		StartsAt  *time.Time `json:"start_date,omitempty"`
+		EndsAt    *time.Time `json:"end_date,omitempty"`
+		CreatedAt time.Time  `json:"created_at"`
+	}
+	var promos []promo
+	for rows.Next() {
+		var p promo
+		rows.Scan(&p.ID, &p.Type, &p.Title, &p.Body, &p.CTALabel, &p.CTAURL, &p.Audience, &p.Status, &p.StartsAt, &p.EndsAt, &p.CreatedAt)
+		promos = append(promos, p)
+	}
+	if promos == nil { promos = []promo{} }
+	middleware.JSONWithMeta(w, http.StatusOK, promos, &middleware.Meta{Page: page, Limit: limit, Total: total})
+}
+
+// POST /api/v1/admin/promos
+func (h *Handler) CreatePromo(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Title     string     `json:"title"`
+		Body      *string    `json:"body"`
+		CTALabel  *string    `json:"cta_label"`
+		CTAURL    *string    `json:"cta_url"`
+		Placement string     `json:"placement"`
+		Target    string     `json:"target"`
+		StartDate *time.Time `json:"start_date"`
+		EndDate   *time.Time `json:"end_date"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Title == "" || req.Placement == "" || req.Target == "" {
+		middleware.BadRequest(w, "title, placement, and target are required")
+		return
+	}
+	adminID := middleware.GetAdminID(r)
+	var id string
+	err := h.db.QueryRow(r.Context(),
+		`INSERT INTO promotional_content (title, body, cta_label, cta_url, type, audience, starts_at, ends_at, created_by)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+		req.Title, req.Body, req.CTALabel, req.CTAURL, req.Placement, req.Target, req.StartDate, req.EndDate, adminID,
+	).Scan(&id)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	logAudit(r.Context(), h.db, adminID, "create_promo", "promo", id, "")
+	middleware.JSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
+// PATCH /api/v1/admin/promos/:promoId
+func (h *Handler) UpdatePromoStatus(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "promoId")
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Status == "" {
+		middleware.BadRequest(w, "status is required")
+		return
+	}
+	tag, err := h.db.Exec(r.Context(),
+		`UPDATE promotional_content SET status=$1 WHERE id=$2`, req.Status, id)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		middleware.NotFound(w, "promo")
+		return
+	}
+	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "update_promo_status", "promo", id, req.Status)
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "promo updated"})
+}
+
+// DELETE /api/v1/admin/promos/:promoId
+func (h *Handler) DeletePromo(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "promoId")
+	tag, err := h.db.Exec(r.Context(), `DELETE FROM promotional_content WHERE id=$1`, id)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		middleware.NotFound(w, "promo")
+		return
+	}
+	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "delete_promo", "promo", id, "")
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "promo deleted"})
+}
+
+// GET /api/v1/admin/brands
+func (h *Handler) ListBrands(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if page < 1 { page = 1 }
+	if limit < 1 || limit > 50 { limit = 20 }
+	offset := (page - 1) * limit
+
+	where := "1=1"
+	args := []interface{}{}
+	n := 1
+	if s := q.Get("status"); s != "" {
+		where += fmt.Sprintf(` AND status=$%d`, n)
+		args = append(args, s)
+		n++
+	}
+	if s := q.Get("industry"); s != "" {
+		where += fmt.Sprintf(` AND industry=$%d`, n)
+		args = append(args, s)
+		n++
+	}
+
+	var total int
+	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM brands WHERE `+where, args...).Scan(&total)
+	args = append(args, limit, offset)
+
+	rows, err := h.db.Query(r.Context(),
+		`SELECT id, name, industry, contact_email, website, reward_pool, status, created_at
+		 FROM brands WHERE `+where+
+			fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, n, n+1),
+		args...)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+
+	type brand struct {
+		ID           string    `json:"id"`
+		Name         string    `json:"name"`
+		Industry     *string   `json:"industry,omitempty"`
+		ContactEmail *string   `json:"contact_email,omitempty"`
+		Website      *string   `json:"website,omitempty"`
+		RewardPool   float64   `json:"reward_pool"`
+		Status       string    `json:"status"`
+		CreatedAt    time.Time `json:"created_at"`
+	}
+	var brands []brand
+	for rows.Next() {
+		var b brand
+		rows.Scan(&b.ID, &b.Name, &b.Industry, &b.ContactEmail, &b.Website, &b.RewardPool, &b.Status, &b.CreatedAt)
+		brands = append(brands, b)
+	}
+	if brands == nil { brands = []brand{} }
+	middleware.JSONWithMeta(w, http.StatusOK, brands, &middleware.Meta{Page: page, Limit: limit, Total: total})
+}
+
+// POST /api/v1/admin/brands
+func (h *Handler) CreateBrand(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name         string  `json:"name"`
+		Industry     *string `json:"industry"`
+		ContactEmail *string `json:"contact_email"`
+		Website      *string `json:"website"`
+		RewardPool   float64 `json:"reward_pool"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		middleware.BadRequest(w, "name is required")
+		return
+	}
+	adminID := middleware.GetAdminID(r)
+	var id string
+	err := h.db.QueryRow(r.Context(),
+		`INSERT INTO brands (name, industry, contact_email, website, reward_pool, created_by)
+		 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+		req.Name, req.Industry, req.ContactEmail, req.Website, req.RewardPool, adminID,
+	).Scan(&id)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	logAudit(r.Context(), h.db, adminID, "create_brand", "brand", id, "")
+	middleware.JSON(w, http.StatusCreated, map[string]string{"id": id, "status": "pending"})
+}
+
+// POST /api/v1/admin/brands/:brandId/approve
+func (h *Handler) ApproveBrand(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "brandId")
+	adminID := middleware.GetAdminID(r)
+	tag, err := h.db.Exec(r.Context(),
+		`UPDATE brands SET status='active', approved_by=$1, approved_at=now(), updated_at=now()
+		 WHERE id=$2 AND status='pending'`, adminID, id)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		middleware.NotFound(w, "brand (must be pending)")
+		return
+	}
+	logAudit(r.Context(), h.db, adminID, "approve_brand", "brand", id, "")
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "brand approved"})
+}
+
+// POST /api/v1/admin/brands/:brandId/suspend
+func (h *Handler) SuspendBrand(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "brandId")
+	h.db.Exec(r.Context(), `UPDATE brands SET status='suspended', updated_at=now() WHERE id=$1`, id)
+	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "suspend_brand", "brand", id, "")
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "brand suspended"})
+}
+
+// POST /api/v1/admin/brands/:brandId/reactivate
+func (h *Handler) ReactivateBrand(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "brandId")
+	h.db.Exec(r.Context(), `UPDATE brands SET status='active', updated_at=now() WHERE id=$1`, id)
+	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "reactivate_brand", "brand", id, "")
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "brand reactivated"})
+}
+
+// GET /api/v1/admin/brands/:brandId/sponsorship-requests
+func (h *Handler) ListSponsorshipRequests(w http.ResponseWriter, r *http.Request) {
+	brandID := chi.URLParam(r, "brandId")
+	rows, err := h.db.Query(r.Context(),
+		`SELECT sr.id, sr.quiz_id, COALESCE(q.title,'') as quiz_title, sr.status, sr.reason, sr.requested_at, sr.reviewed_at
+		 FROM sponsorship_requests sr LEFT JOIN quizzes q ON q.id=sr.quiz_id
+		 WHERE sr.brand_id=$1 ORDER BY sr.requested_at DESC`, brandID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+
+	type sr struct {
+		ID          string     `json:"id"`
+		QuizID      *string    `json:"quiz_id,omitempty"`
+		QuizTitle   string     `json:"quiz_title"`
+		Status      string     `json:"status"`
+		Reason      *string    `json:"reason,omitempty"`
+		RequestedAt time.Time  `json:"requested_at"`
+		ReviewedAt  *time.Time `json:"reviewed_at,omitempty"`
+	}
+	var items []sr
+	for rows.Next() {
+		var s sr
+		rows.Scan(&s.ID, &s.QuizID, &s.QuizTitle, &s.Status, &s.Reason, &s.RequestedAt, &s.ReviewedAt)
+		items = append(items, s)
+	}
+	if items == nil { items = []sr{} }
+	middleware.JSON(w, http.StatusOK, items)
+}
+
+// POST /api/v1/admin/sponsorship-requests/:requestId/approve
+func (h *Handler) ApproveSponsorshipRequest(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "requestId")
+	adminID := middleware.GetAdminID(r)
+	tag, err := h.db.Exec(r.Context(),
+		`UPDATE sponsorship_requests SET status='approved', reviewed_by=$1, reviewed_at=now()
+		 WHERE id=$2 AND status='pending'`, adminID, id)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		middleware.NotFound(w, "sponsorship request (must be pending)")
+		return
+	}
+	logAudit(r.Context(), h.db, adminID, "approve_sponsorship_request", "sponsorship_request", id, "")
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "sponsorship request approved"})
+}
+
+// POST /api/v1/admin/sponsorship-requests/:requestId/reject
+func (h *Handler) RejectSponsorshipRequest(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "requestId")
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	adminID := middleware.GetAdminID(r)
+	tag, err := h.db.Exec(r.Context(),
+		`UPDATE sponsorship_requests SET status='rejected', reason=$1, reviewed_by=$2, reviewed_at=now()
+		 WHERE id=$3 AND status='pending'`, req.Reason, adminID, id)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		middleware.NotFound(w, "sponsorship request (must be pending)")
+		return
+	}
+	logAudit(r.Context(), h.db, adminID, "reject_sponsorship_request", "sponsorship_request", id, req.Reason)
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "sponsorship request rejected"})
 }
 
 // logAudit writes an entry to the audit_log table.

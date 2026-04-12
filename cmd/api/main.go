@@ -61,7 +61,7 @@ func main() {
 	topicH := topicrequest.NewHandler(pool)
 	uploadH := upload.NewHandler(r2Client)
 	institutionH := institution.NewHandler(pool)
-	adminH := admin.NewHandler(pool)
+	adminH := admin.NewHandler(pool, cfg)
 
 	_ = notifSvc
 	_ = scoring.LoadConfig // referenced by services
@@ -255,11 +255,13 @@ func main() {
 				r.With(mw.RequireRole("super_admin")).Post("/users/{userId}/points", adminH.AdjustPoints)
 				r.Post("/users/{userId}/impersonate", adminH.Impersonate)
 				r.Post("/impersonation/{sessionId}/end", adminH.EndImpersonation)
+				r.With(mw.RequireRole("super_admin")).Post("/users/{userId}/reset-password", adminH.ResetPassword)
 
 				// Quizzes moderation
 				r.Get("/quizzes/moderation-queue", adminH.ModerationQueue)
 				r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/approve", adminH.ApproveQuiz)
 				r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/reject", adminH.RejectQuiz)
+				r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/request-edits", adminH.RequestEdits)
 				r.With(mw.RequireRole("super_admin")).Post("/quizzes/{quizId}/unpublish", adminH.UnpublishQuiz)
 
 				// Reports
@@ -271,7 +273,25 @@ func main() {
 				r.With(mw.RequireRole("super_admin")).Patch("/point-economy/{key}", adminH.UpdatePointEconomy)
 
 				// Announcements
+				r.Get("/announcements", adminH.ListAnnouncements)
 				r.Post("/announcements", adminH.CreateAnnouncement)
+				r.With(mw.RequireRole("super_admin", "moderator")).Patch("/announcements/{announcementId}/retract", adminH.RetractAnnouncement)
+
+				// Promos
+				r.Get("/promos", adminH.ListPromos)
+				r.With(mw.RequireRole("super_admin", "moderator")).Post("/promos", adminH.CreatePromo)
+				r.With(mw.RequireRole("super_admin", "moderator")).Patch("/promos/{promoId}", adminH.UpdatePromoStatus)
+				r.With(mw.RequireRole("super_admin")).Delete("/promos/{promoId}", adminH.DeletePromo)
+
+				// Brands
+				r.Get("/brands", adminH.ListBrands)
+				r.With(mw.RequireRole("super_admin")).Post("/brands", adminH.CreateBrand)
+				r.With(mw.RequireRole("super_admin")).Post("/brands/{brandId}/approve", adminH.ApproveBrand)
+				r.With(mw.RequireRole("super_admin")).Post("/brands/{brandId}/suspend", adminH.SuspendBrand)
+				r.With(mw.RequireRole("super_admin")).Post("/brands/{brandId}/reactivate", adminH.ReactivateBrand)
+				r.Get("/brands/{brandId}/sponsorship-requests", adminH.ListSponsorshipRequests)
+				r.With(mw.RequireRole("super_admin", "moderator")).Post("/sponsorship-requests/{requestId}/approve", adminH.ApproveSponsorshipRequest)
+				r.With(mw.RequireRole("super_admin", "moderator")).Post("/sponsorship-requests/{requestId}/reject", adminH.RejectSponsorshipRequest)
 
 				// Audit log (super_admin only)
 				r.With(mw.RequireRole("super_admin")).Get("/audit-log", adminH.AuditLog)

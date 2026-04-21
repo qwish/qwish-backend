@@ -19,6 +19,7 @@ import (
 	"github.com/qwish/backend/internal/domain/institution"
 	"github.com/qwish/backend/internal/domain/leaderboard"
 	"github.com/qwish/backend/internal/domain/notification"
+	"github.com/qwish/backend/internal/domain/onboarding"
 	"github.com/qwish/backend/internal/domain/parent"
 	"github.com/qwish/backend/internal/domain/points"
 	"github.com/qwish/backend/internal/domain/quiz"
@@ -62,6 +63,7 @@ func main() {
 	uploadH := upload.NewHandler(r2Client)
 	institutionH := institution.NewHandler(pool)
 	adminH := admin.NewHandler(pool, cfg)
+	onboardingH := onboarding.NewHandler(pool)
 
 	_ = notifSvc
 	_ = scoring.LoadConfig // referenced by services
@@ -100,6 +102,12 @@ func main() {
 	// API v1
 	// ==========================================
 	r.Route("/api/v1", func(r chi.Router) {
+
+		// ------ Public Institution Onboarding ------
+		r.Route("/onboarding", func(r chi.Router) {
+			r.Post("/institution", onboardingH.RegisterInstitution)
+			r.Get("/institution/status", onboardingH.CheckStatus)
+		})
 
 		// ------ AUTH (public) ------
 		r.Route("/auth", func(r chi.Router) {
@@ -245,6 +253,7 @@ func main() {
 				r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/suspend", adminH.SuspendInstitution)
 				r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/reactivate", adminH.ReactivateInstitution)
 				r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/reset-referral-codes", adminH.ResetReferralCodes)
+				r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/provision-admin", adminH.ProvisionAdmin)
 
 				// Users
 				r.Get("/users", adminH.ListUsers)

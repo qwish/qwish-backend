@@ -1750,6 +1750,39 @@ Approves the institution and generates referral codes.
 
 ---
 
+## POST `/admin/institutions/{institutionId}/provision-admin`
+**Roles:** super_admin only
+
+Provisions an `institution_admin` user account for a verified institution and sends a Supabase email invite.
+
+### Request Body (Optional)
+```json
+{
+  "admin_name": "Tom",
+  "admin_email": "tom@school.com"
+}
+```
+If omitted, defaults to the institution contact email and onboarding admin name.
+
+### Response `201`
+```json
+{
+  "message": "Institution admin provisioned. An invite email has been sent...",
+  "user_id": "uuid",
+  "admin_email": "admin@school.com",
+  "admin_name": "School Admin",
+  "institution_id": "uuid",
+  "institution": "Springfield Academy"
+}
+```
+
+### Errors
+| Status | Code | Meaning |
+|--------|------|---------|
+| 422 | `NOT_VERIFIED` | Institution must be verified first |
+
+---
+
 ## GET `/admin/users`
 **Roles:** all admin
 ### Query Params
@@ -2313,4 +2346,66 @@ All return:
 ### Response `200`
 ```json
 { "status": "ok" }
+```
+
+---
+
+# 14. Onboarding
+
+## POST `/onboarding/institution`
+**Auth required:** No
+
+Submit an application to register a new institution. Will be marked as 'pending' for super admin review.
+
+### Request Body
+```json
+{
+  "name": "Springfield High",
+  "type": "school",
+  "contact_email": "principal@springfield.edu",
+  "admin_name": "Seymour Skinner",
+  "timezone": "America/New_York",
+  "phone": "555-0199",
+  "website": "https://springfield.edu",
+  "city": "Springfield",
+  "state": "IL",
+  "country": "US"
+}
+```
+> `phone`, `website`, `city`, `state`, `country` are optional.
+
+### Response `201`
+```json
+{
+  "id": "uuid",
+  "status": "pending",
+  "message": "Your institution application has been submitted...",
+  "contact_email": "principal@springfield.edu"
+}
+```
+
+### Errors
+| Status | Code | Meaning |
+|--------|------|---------|
+| 409 | `DUPLICATE_REQUEST` | An application is already pending for this email |
+
+---
+
+## GET `/onboarding/institution/status`
+**Auth required:** No
+
+Check the current status of an institution onboarding request via email.
+
+### Query Params
+| Param | Description |
+|-------|-------------|
+| `email` | **Required.** The contact email used in the application. |
+
+### Response `200`
+```json
+{
+  "id": "uuid",
+  "name": "Springfield High",
+  "status": "pending"
+}
 ```

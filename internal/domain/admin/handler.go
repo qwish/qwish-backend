@@ -1317,6 +1317,151 @@ func (h *Handler) RejectSponsorshipRequest(w http.ResponseWriter, r *http.Reques
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "sponsorship request rejected"})
 }
 
+// POST /api/v1/admin/institutions/:institutionId/provision-admin
+// Creates an institution_admin user record and sends a Supabase email invite
+// so the institution admin can set up their password and log in to the dashboard.
+// Only valid for 'verified' institutions that do not yet have an admin user.
+func (h *Handler) ProvisionAdmin(w http.ResponseWriter, r *http.Request) {
+	instID := chi.URLParam(r, "institutionId")
+	requesterAdminID := middleware.GetAdminID(r)
+
+	// Fetch institution details
+	var instName, contactEmail, status, onboardingAdminName string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT name, contact_email, status, COALESCE(onboarding_admin_name,'') FROM institutions WHERE id=$1 AND deleted_at IS NULL`,
+		instID,
+	).Scan(&instName, &contactEmail, &status, &onboardingAdminName)
+	if err != nil {
+		middleware.NotFound(w, "institution")
+		return
+	}
+	if status != "verified" {
+		middleware.Error(w, http.StatusUnprocessableEntity, "NOT_VERIFIED",
+			"institution must be approved (status=verified) before provisioning admin credentials")
+		return
+	}
+
+	// Parse optional override body
+	var req struct {
+		AdminName    string `json:"admin_name"`    // overrides onboarding_admin_name if provided
+		AdminEmail   string `json:"admin_email"`   // overrides contact_email if provided
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+
+	adminEmail := contactEmail
+	if req.AdminEmail != "" {
+		adminEmail = req.AdminEmail
+	}
+	adminName := onboardingAdminName
+	if req.AdminName != "" {
+		adminName = req.AdminName
+	}
+	if adminName == "" {
+		adminName = instName + " Admin"
+	}
+
+	// Prevent duplicate provisioning — check if an institution_admin already exists
+	var existingCount int
+	h.db.QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='institution_admin' AND deleted_at IS NULL`,
+		instID,
+	).Scan(&existingCount)
+	if existingCount > 0 {
+		// Still return their details rather than an error
+		var existingID, existingEmail string
+		h.db.QueryRow(r.Context(),
+			`SELECT id, email FROM users WHERE institution_id=$1 AND role='institution_admin' AND deleted_at IS NULL LIMIT 1`,
+			instID,
+		).Scan(&existingID, &existingEmail)
+		middleware.JSON(w, http.StatusOK, map[string]interface{}{
+			"message":        "institution admin already provisioned",
+			"user_id":        existingID,
+			"admin_email":    existingEmail,
+			"institution_id": instID,
+			"already_exists": true,
+		})
+		return
+	}
+
+	// Invite user via Supabase Admin API — sends a magic-link/invite email
+	// which lets the admin set their password and log in.
+	inviteBody, _ := json.Marshal(map[string]interface{}{
+		"email": adminEmail,
+		"data": map[string]string{
+			"role":           "institution_admin",
+			"institution_id": instID,
+			"full_name":      adminName,
+		},
+	})
+	inviteReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		h.cfg.SupabaseURL+"/auth/v1/admin/invite", bytes.NewReader(inviteBody))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	inviteReq.Header.Set("Content-Type", "application/json")
+	inviteReq.Header.Set("apikey", h.cfg.SupabaseServiceKey)
+	inviteReq.Header.Set("Authorization", "Bearer "+h.cfg.SupabaseServiceKey)
+
+	inviteResp, err := http.DefaultClient.Do(inviteReq)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer inviteResp.Body.Close()
+	rawResp, _ := io.ReadAll(inviteResp.Body)
+
+	if inviteResp.StatusCode >= 400 {
+		middleware.JSON(w, http.StatusBadGateway, map[string]string{
+			"error": fmt.Sprintf("supabase invite failed: %s", string(rawResp)),
+		})
+		return
+	}
+
+	// Extract the Supabase UID from the invite response
+	var supabaseResp struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(rawResp, &supabaseResp)
+
+	var supabaseUID string
+	if supabaseResp.ID != "" {
+		supabaseUID = supabaseResp.ID
+	} else {
+		// Fallback: generate a placeholder UID; actual UID will be updated on first login
+		supabaseUID = uuid.New().String()
+	}
+
+	// Create the institution_admin user record in our DB
+	var userID string
+	err = h.db.QueryRow(r.Context(),
+		`INSERT INTO users (supabase_uid, full_name, display_name, email, role, institution_id)
+		 VALUES ($1,$2,$2,$3,'institution_admin',$4)
+		 RETURNING id`,
+		supabaseUID, adminName, adminEmail, instID,
+	).Scan(&userID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+
+	// Also initialise streak row
+	h.db.Exec(r.Context(),
+		`INSERT INTO streaks (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, userID)
+
+	logAudit(r.Context(), h.db, requesterAdminID, "provision_institution_admin", "institution", instID,
+		fmt.Sprintf("admin_user_id=%s email=%s", userID, adminEmail))
+
+	middleware.JSON(w, http.StatusCreated, map[string]interface{}{
+		"message":        "Institution admin provisioned. An invite email has been sent to " + adminEmail + " with login instructions.",
+		"user_id":        userID,
+		"admin_email":    adminEmail,
+		"admin_name":     adminName,
+		"institution_id": instID,
+		"institution":    instName,
+	})
+}
+
 // logAudit writes an entry to the audit_log table.
 func logAudit(ctx context.Context, db *pgxpool.Pool, adminID, action, targetType, targetID, reason string) {
 	var adminName, adminRole string

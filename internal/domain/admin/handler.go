@@ -1462,6 +1462,83 @@ func (h *Handler) ProvisionAdmin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GET /api/v1/admin/notification-log
+// Optional query params: to_email, status (sent|failed), date_from (YYYY-MM-DD), date_to (YYYY-MM-DD)
+func (h *Handler) ListNotificationLog(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
+	offset := (page - 1) * limit
+
+	args := []interface{}{}
+	where := "1=1"
+	n := 1
+
+	if toEmail := q.Get("to_email"); toEmail != "" {
+		where += fmt.Sprintf(" AND to_email ILIKE $%d", n)
+		args = append(args, "%"+toEmail+"%")
+		n++
+	}
+	if status := q.Get("status"); status == "sent" || status == "failed" {
+		where += fmt.Sprintf(" AND status=$%d", n)
+		args = append(args, status)
+		n++
+	}
+	if dateFrom := q.Get("date_from"); dateFrom != "" {
+		where += fmt.Sprintf(" AND created_at >= $%d", n)
+		args = append(args, dateFrom)
+		n++
+	}
+	if dateTo := q.Get("date_to"); dateTo != "" {
+		where += fmt.Sprintf(" AND created_at < ($%d::date + INTERVAL '1 day')", n)
+		args = append(args, dateTo)
+		n++
+	}
+
+	var total int
+	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM notification_log WHERE `+where, args...).Scan(&total)
+
+	args = append(args, limit, offset)
+	rows, err := h.db.Query(r.Context(),
+		`SELECT id, to_email, subject, status, error, reference, created_at
+		 FROM notification_log
+		 WHERE `+where+
+			fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, n, n+1),
+		args...)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+
+	type entry struct {
+		ID        string     `json:"id"`
+		ToEmail   string     `json:"to_email"`
+		Subject   string     `json:"subject"`
+		Status    string     `json:"status"`
+		Error     *string    `json:"error,omitempty"`
+		Reference *string    `json:"reference,omitempty"`
+		CreatedAt time.Time  `json:"created_at"`
+	}
+
+	var entries []entry
+	for rows.Next() {
+		var e entry
+		rows.Scan(&e.ID, &e.ToEmail, &e.Subject, &e.Status, &e.Error, &e.Reference, &e.CreatedAt)
+		entries = append(entries, e)
+	}
+	if entries == nil {
+		entries = []entry{}
+	}
+	middleware.JSONWithMeta(w, http.StatusOK, entries, &middleware.Meta{Page: page, Limit: limit, Total: total})
+}
+
 // logAudit writes an entry to the audit_log table.
 func logAudit(ctx context.Context, db *pgxpool.Pool, adminID, action, targetType, targetID, reason string) {
 	var adminName, adminRole string

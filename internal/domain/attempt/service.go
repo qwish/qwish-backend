@@ -115,12 +115,18 @@ func (s *Service) Start(ctx context.Context, userID, quizID string) (*StartAttem
 }
 
 func (s *Service) SubmitAnswer(ctx context.Context, userID, attemptID string, req AnswerReq) (*AnswerResp, error) {
-	// Verify attempt belongs to user and is in_progress
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Verify attempt belongs to user and is in_progress, lock FOR SHARE to prevent concurrent completion
 	var quizID string
 	var cfgSnapshot json.RawMessage
 	var qType string
-	err := s.db.QueryRow(ctx,
-		`SELECT quiz_id, point_config_snapshot FROM quiz_attempts WHERE id=$1 AND user_id=$2 AND status='in_progress'`,
+	err = tx.QueryRow(ctx,
+		`SELECT quiz_id, point_config_snapshot FROM quiz_attempts WHERE id=$1 AND user_id=$2 AND status='in_progress' FOR SHARE`,
 		attemptID, userID,
 	).Scan(&quizID, &cfgSnapshot)
 	if err != nil {
@@ -130,12 +136,12 @@ func (s *Service) SubmitAnswer(ctx context.Context, userID, attemptID string, re
 	// Load config from snapshot
 	cfg, err := scoring.ConfigFromSnapshot(cfgSnapshot)
 	if err != nil {
-		cfg, _ = scoring.LoadConfig(ctx, s.db)
+		cfg, _ = scoring.LoadConfig(ctx, s.db) // fallback to load from db
 	}
 
 	// Get question details
 	var correctAnswer json.RawMessage
-	err = s.db.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT type, correct_answer FROM questions WHERE id=$1 AND quiz_id=$2`,
 		req.QuestionID, quizID,
 	).Scan(&qType, &correctAnswer)
@@ -155,12 +161,19 @@ func (s *Service) SubmitAnswer(ctx context.Context, userID, attemptID string, re
 	isCorrect, pts := scoring.ScoreQuestion(resp, cfg)
 
 	// Upsert response
-	s.db.Exec(ctx,
+	_, err = tx.Exec(ctx,
 		`INSERT INTO question_responses (attempt_id, question_id, answer, is_correct, time_taken_ms, clues_used, confidence_level, combo_level, points_earned)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		 ON CONFLICT (attempt_id, question_id) DO UPDATE
 		 SET answer=$3, is_correct=$4, time_taken_ms=$5, clues_used=$6, confidence_level=$7, combo_level=$8, points_earned=$9`,
 		attemptID, req.QuestionID, req.Answer, isCorrect, req.TimeTakenMs, req.CluesUsed, req.ConfidenceLevel, req.ComboLevel, pts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to save response: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit answer: %w", err)
+	}
 
 	return &AnswerResp{
 		IsCorrect:     isCorrect,
@@ -174,12 +187,18 @@ func (s *Service) SubmitAnswer(ctx context.Context, userID, attemptID string, re
 // migrations/002_constraints.sql: ALTER TABLE question_responses ADD UNIQUE (attempt_id, question_id);
 
 func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*CompleteResp, error) {
-	// Load attempt
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Load attempt with FOR UPDATE
 	var quizID string
 	var cfgSnapshot json.RawMessage
 	var totalQuestions int
-	err := s.db.QueryRow(ctx,
-		`SELECT quiz_id, point_config_snapshot, total_questions FROM quiz_attempts WHERE id=$1 AND user_id=$2 AND status='in_progress'`,
+	err = tx.QueryRow(ctx,
+		`SELECT quiz_id, point_config_snapshot, total_questions FROM quiz_attempts WHERE id=$1 AND user_id=$2 AND status='in_progress' FOR UPDATE`,
 		attemptID, userID,
 	).Scan(&quizID, &cfgSnapshot, &totalQuestions)
 	if err != nil {
@@ -193,12 +212,12 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 
 	// Load institution multiplier
 	var instMultiplier float64 = 1.0
-	s.db.QueryRow(ctx,
+	tx.QueryRow(ctx,
 		`SELECT i.point_multiplier FROM users u JOIN institutions i ON i.id=u.institution_id WHERE u.id=$1`, userID,
 	).Scan(&instMultiplier)
 
 	// Load all question responses
-	rows, err := s.db.Query(ctx,
+	rows, err := tx.Query(ctx,
 		`SELECT qr.question_id, q.type, q.correct_answer, qr.answer, qr.confidence_level, qr.clues_used, qr.combo_level, qr.points_earned,
 		        q.position, q.prompt, qr.is_correct
 		 FROM question_responses qr
@@ -208,7 +227,6 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	var rawPoints int64
 	var totalCorrect int
@@ -242,6 +260,7 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 			Points:          ptsEarned,
 		})
 	}
+	rows.Close() // Explicit close so tx is free for next statements
 
 	// Score percentage
 	scorePct := 0.0
@@ -260,38 +279,42 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 	}
 
 	// Update attempt
-	s.db.Exec(ctx,
+	tx.Exec(ctx,
 		`UPDATE quiz_attempts SET status='completed', score_pct=$1, points_delta=$2, total_correct=$3, total_questions=$4, completed_at=now()
 		 WHERE id=$5`,
 		scorePct, finalPoints, totalCorrect, totalQuestions, attemptID)
 
-	// Update user points (floor at 0)
-	var currentBalance int64
-	s.db.QueryRow(ctx, `SELECT total_points FROM users WHERE id=$1`, userID).Scan(&currentBalance)
-	newBalance := currentBalance + finalPoints
-	if newBalance < 0 {
-		finalPoints = -currentBalance
-		newBalance = 0
+	// Update user points
+	var newBalance int64
+	err = tx.QueryRow(ctx, `UPDATE users SET total_points = GREATEST(0, total_points + $1), updated_at=now() WHERE id=$2 RETURNING total_points`, finalPoints, userID).Scan(&newBalance)
+	if err != nil {
+		return nil, err
 	}
-	s.db.Exec(ctx, `UPDATE users SET total_points=$1, updated_at=now() WHERE id=$2`, newBalance, userID)
 
 	// Insert ledger entry
 	expiresAt := time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0)
-	s.db.Exec(ctx,
+	tx.Exec(ctx,
 		`INSERT INTO points_ledger (user_id, amount, reason, reference_id, balance_after, expires_at)
 		 VALUES ($1,$2,'quiz_attempt',$3,$4,$5)`,
 		userID, finalPoints, attemptID, newBalance, expiresAt)
 
+	err = tx.Commit(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	// Update streak and get bonus
 	streakBonus, _ := s.streakSvc.RecordCompletion(ctx, userID, cfg)
 	if streakBonus > 0 {
-		newBalance += streakBonus
-		s.db.Exec(ctx, `UPDATE users SET total_points=$1, updated_at=now() WHERE id=$2`, newBalance, userID)
-		streakExpiry := time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0)
-		s.db.Exec(ctx,
-			`INSERT INTO points_ledger (user_id, amount, reason, balance_after, expires_at)
-			 VALUES ($1,$2,'streak_bonus',$3,$4)`,
-			userID, streakBonus, newBalance, streakExpiry)
+		var postStreakBalance int64
+		err = s.db.QueryRow(ctx, `UPDATE users SET total_points = total_points + $1, updated_at=now() WHERE id=$2 RETURNING total_points`, streakBonus, userID).Scan(&postStreakBalance)
+		if err == nil {
+			streakExpiry := time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0)
+			s.db.Exec(ctx,
+				`INSERT INTO points_ledger (user_id, amount, reason, balance_after, expires_at)
+				 VALUES ($1,$2,'streak_bonus',$3,$4)`,
+				userID, streakBonus, postStreakBalance, streakExpiry)
+		}
 	}
 
 	// Check and award badges

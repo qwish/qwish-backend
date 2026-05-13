@@ -14,6 +14,7 @@ import (
 	"github.com/qwish/backend/internal/config"
 	"github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/domain/admin"
+	"github.com/qwish/backend/internal/domain/contact"
 	"github.com/qwish/backend/internal/domain/attempt"
 	"github.com/qwish/backend/internal/domain/auth"
 	"github.com/qwish/backend/internal/domain/institution"
@@ -46,7 +47,7 @@ func main() {
 	quizSvc := quiz.NewService(pool)
 	streakSvc := streak.NewService(pool)
 	attemptSvc := attempt.NewService(pool, quizSvc, streakSvc)
-	notifSvc := notification.NewService(cfg.ResendAPIKey)
+	notifSvc := notification.NewService(pool, cfg.ResendAPIKey)
 	r2Client := storage.NewR2Client(cfg)
 	sched := scheduler.New(pool, streakSvc)
 
@@ -61,9 +62,10 @@ func main() {
 	parentH := parent.NewHandler(pool)
 	topicH := topicrequest.NewHandler(pool)
 	uploadH := upload.NewHandler(r2Client)
-	institutionH := institution.NewHandler(pool)
+	institutionH := institution.NewHandler(pool, notifSvc)
 	adminH := admin.NewHandler(pool, cfg)
 	onboardingH := onboarding.NewHandler(pool)
+	contactH := contact.NewHandler(pool)
 
 	_ = notifSvc
 	_ = scoring.LoadConfig // referenced by services
@@ -108,6 +110,9 @@ func main() {
 			r.Post("/institution", onboardingH.RegisterInstitution)
 			r.Get("/institution/status", onboardingH.CheckStatus)
 		})
+
+		// ------ Public Contact Form ------
+		r.Post("/contact", contactH.Submit)
 
 		// ------ AUTH (public) ------
 		r.Route("/auth", func(r chi.Router) {
@@ -217,6 +222,7 @@ func main() {
 				r.Get("/teachers/{userId}", institutionH.GetTeacher)
 				r.Patch("/teachers/{userId}/status", institutionH.UpdateTeacherStatus)
 				r.Delete("/teachers/{userId}", institutionH.RemoveTeacher)
+				r.Post("/teachers/invite", institutionH.InviteTeacher)
 				r.Get("/groups", institutionH.ListGroups)
 				r.Post("/groups", institutionH.CreateGroup)
 				r.Get("/groups/{groupId}", institutionH.GetGroup)
@@ -301,6 +307,13 @@ func main() {
 				r.Get("/brands/{brandId}/sponsorship-requests", adminH.ListSponsorshipRequests)
 				r.With(mw.RequireRole("super_admin", "moderator")).Post("/sponsorship-requests/{requestId}/approve", adminH.ApproveSponsorshipRequest)
 				r.With(mw.RequireRole("super_admin", "moderator")).Post("/sponsorship-requests/{requestId}/reject", adminH.RejectSponsorshipRequest)
+
+				// Contact form submissions
+				r.Get("/contact-submissions", contactH.List)
+				r.Post("/contact-submissions/{id}/resolve", contactH.Resolve)
+
+				// Notification log (super_admin only)
+				r.With(mw.RequireRole("super_admin")).Get("/notification-log", adminH.ListNotificationLog)
 
 				// Audit log (super_admin only)
 				r.With(mw.RequireRole("super_admin")).Get("/audit-log", adminH.AuditLog)

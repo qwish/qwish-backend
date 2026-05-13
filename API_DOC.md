@@ -2391,6 +2391,7 @@ Submit an application to register a new institution. Will be marked as 'pending'
 
 ---
 
+
 ## GET `/onboarding/institution/status`
 **Auth required:** No
 
@@ -2409,3 +2410,226 @@ Check the current status of an institution onboarding request via email.
   "status": "pending"
 }
 ```
+
+---
+
+# 15. Contact Form
+
+Public endpoint for brand-website contact submissions. No authentication required.
+
+---
+
+## POST `/contact`
+**Auth required:** No
+
+Stores a contact form submission, categorised by topic.
+
+### Request Body
+```json
+{
+  "topic":    "partnership",
+  "name":     "Priya Sharma",
+  "email":    "priya@example.com",
+  "phone":    "+91 9876543210",
+  "message":  "We'd love to explore a partnership opportunity.",
+  "metadata": {}
+}
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `topic` | Yes | One of the valid topic values (see below) |
+| `name` | Yes | Sender's full name |
+| `email` | Yes | Sender's email address |
+| `phone` | No | Sender's phone number |
+| `message` | Yes | Message body |
+| `metadata` | No | Optional JSONB object for topic-specific extra fields |
+
+### Valid Topics
+
+| Value | Use-case |
+|-------|----------|
+| `general` | Generic enquiries |
+| `partnership` | Brand / business partnerships |
+| `support` | Technical or account help |
+| `feedback` | Product feedback |
+| `press` | Media / press enquiries |
+| `institution_onboarding` | Schools / colleges interested in joining |
+| `careers` | Job / internship enquiries |
+
+### Response `201`
+```json
+{
+  "id":      "uuid",
+  "message": "Your message has been received. We'll get back to you at priya@example.com."
+}
+```
+
+### Errors
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `BAD_REQUEST` | Missing required field or invalid topic |
+
+---
+
+## GET `/admin/contact-submissions`
+**Auth required:** Yes
+**Roles:** `super_admin`, `moderator`, `support_agent`
+
+Returns a list of contact submissions (up to 100), optionally filtered.
+
+### Query Params
+| Param | Description |
+|-------|-------------|
+| `topic` | Filter by topic (e.g. `support`) |
+| `status` | Filter by status (`new`, `in_progress`, `resolved`, `spam`) |
+
+### Response `200`
+```json
+{
+  "count": 2,
+  "submissions": [
+    {
+      "id":         "uuid",
+      "topic":      "support",
+      "name":       "Priya Sharma",
+      "email":      "priya@example.com",
+      "phone":      "+91 9876543210",
+      "message":    "Help me reset my account.",
+      "metadata":   null,
+      "status":     "new",
+      "created_at": "2026-05-13T07:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+## POST `/admin/contact-submissions/{id}/resolve`
+**Auth required:** Yes
+**Roles:** `super_admin`, `moderator`, `support_agent`
+
+Updates the status of a contact submission.
+
+### Request Body
+```json
+{ "status": "resolved" }
+```
+
+| Value | Meaning |
+|-------|---------|
+| `in_progress` | Submission is being handled |
+| `resolved` | Submission has been resolved |
+| `spam` | Submission is spam |
+
+### Response `200`
+```json
+{ "status": "resolved" }
+```
+
+### Errors
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `BAD_REQUEST` | Invalid status value |
+| 404 | `NOT_FOUND` | Submission not found |
+
+---
+
+# 16. Teacher Invite
+
+Institution admins can invite teachers by email. The invite token is embedded in a sign-up link sent to the teacher. Invites expire after 7 days.
+
+---
+
+## POST `/institution/teachers/invite`
+**Auth required:** Yes  
+**Roles:** `institution_admin`
+
+Sends an email invitation to join the institution as a teacher.
+
+### Request Body
+```json
+{
+  "email": "teacher@school.edu",
+  "name":  "Anil Mehta"
+}
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `email` | Yes | Email address of the teacher to invite |
+| `name` | No | Recipient's name (used in the email greeting) |
+
+### Response `201`
+```json
+{
+  "message":    "invite sent",
+  "invite_id":  "uuid",
+  "email":      "teacher@school.edu",
+  "expires_at": "2026-05-20T08:10:00Z"
+}
+```
+
+### Errors
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `BAD_REQUEST` | Missing email, teacher already in institution, or pending invite already exists |
+
+### Notes
+- A duplicate invite for the same email + institution is rejected while a **pending, non-expired** invite exists.
+- The invite link is `https://app.quizapp.in/auth/teacher-signup?token=<token>`.
+
+---
+
+# 17. Notification Log
+
+## GET `/admin/notification-log`
+**Auth required:** Yes  
+**Roles:** `super_admin`
+
+Returns a paginated list of all outbound email send attempts (newest first).
+
+### Query Params
+| Param | Description |
+|-------|-------------|
+| `to_email` | Partial match on recipient address (case-insensitive) |
+| `status` | Filter by result — `sent` or `failed` |
+| `date_from` | ISO date `YYYY-MM-DD` — inclusive start |
+| `date_to` | ISO date `YYYY-MM-DD` — inclusive end |
+| `page` | Page number (default `1`) |
+| `limit` | Results per page, max `100` (default `50`) |
+
+### Response `200`
+```json
+{
+  "data": [
+    {
+      "id":         "uuid",
+      "to_email":   "teacher@school.edu",
+      "subject":    "You're invited to teach on QuizApp",
+      "status":     "sent",
+      "reference":  "teacher_invite:uuid",
+      "created_at": "2026-05-13T08:10:00Z"
+    },
+    {
+      "id":         "uuid",
+      "to_email":   "admin@school.edu",
+      "subject":    "Your QuizApp Institution Has Been Approved",
+      "status":     "failed",
+      "error":      "resend error 422: invalid email address",
+      "reference":  "institution_approval",
+      "created_at": "2026-05-13T07:55:00Z"
+    }
+  ],
+  "meta": { "page": 1, "limit": 50, "total": 2 }
+}
+```
+
+### `reference` values
+| Reference | Triggered by |
+|-----------|-------------|
+| `institution_approval` | Admin approves an institution |
+| `institution_rejection` | Admin rejects an institution |
+| `password_reset` | Admin triggers a password reset |
+| `teacher_invite:<uuid>` | Institution admin sends a teacher invite |

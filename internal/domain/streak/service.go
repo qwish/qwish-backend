@@ -47,12 +47,16 @@ func nextMilestone(current int) int {
 	return 30
 }
 
-// RecordCompletion updates the streak for a user after completing a quiz.
-// Returns bonus points awarded (0 if no milestone hit).
 func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scoring.Config) (int64, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+
 	// Get current timezone for user's institution
 	var timezone string
-	s.db.QueryRow(ctx,
+	tx.QueryRow(ctx,
 		`SELECT COALESCE(i.timezone,'UTC') FROM users u LEFT JOIN institutions i ON i.id=u.institution_id WHERE u.id=$1`, userID,
 	).Scan(&timezone)
 
@@ -68,15 +72,22 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 	var lastDate *string
 	var grace, m7, m15, m30 bool
 
-	err = s.db.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT current_streak, longest_streak, last_completed_date::text, grace_window_active,
 		        milestone_7_claimed, milestone_15_claimed, milestone_30_claimed
-		 FROM streaks WHERE user_id=$1`, userID,
+		 FROM streaks WHERE user_id=$1 FOR UPDATE`, userID,
 	).Scan(&current, &longest, &lastDate, &grace, &m7, &m15, &m30)
 	if err != nil {
 		// Create streak record
-		s.db.Exec(ctx, `INSERT INTO streaks (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, userID)
-		current, longest, lastDate, grace, m7, m15, m30 = 0, 0, nil, false, false, false, false
+		tx.Exec(ctx, `INSERT INTO streaks (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, userID)
+		err = tx.QueryRow(ctx,
+			`SELECT current_streak, longest_streak, last_completed_date::text, grace_window_active,
+			        milestone_7_claimed, milestone_15_claimed, milestone_30_claimed
+			 FROM streaks WHERE user_id=$1 FOR UPDATE`, userID,
+		).Scan(&current, &longest, &lastDate, &grace, &m7, &m15, &m30)
+		if err != nil {
+			current, longest, lastDate, grace, m7, m15, m30 = 0, 0, nil, false, false, false, false
+		}
 	}
 
 	// Already completed today → no change
@@ -119,7 +130,7 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 		bonus += int64(cfg.StreakBonus30Day)
 	}
 
-	s.db.Exec(ctx,
+	tx.Exec(ctx,
 		`UPDATE streaks SET current_streak=$1, longest_streak=$2, last_completed_date=$3,
 		 grace_window_active=false, milestone_7_claimed=$4, milestone_15_claimed=$5, milestone_30_claimed=$6,
 		 updated_at=now()
@@ -127,29 +138,30 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 		current, longest, todayDate, m7, m15, m30, userID)
 
 	// Update denormalized fields on users
-	s.db.Exec(ctx,
+	tx.Exec(ctx,
 		`UPDATE users SET current_streak=$1, longest_streak=$2, last_completed_date=$3, updated_at=now() WHERE id=$4`,
 		current, longest, todayDate, userID)
 
 	// top_10 badge check
 	var rank int
-	s.db.QueryRow(ctx,
+	tx.QueryRow(ctx,
 		`SELECT COUNT(*)+1 FROM users WHERE institution_id=(SELECT institution_id FROM users WHERE id=$1) AND total_points > (SELECT total_points FROM users WHERE id=$1) AND status='active'`,
 		userID,
 	).Scan(&rank)
 	if rank <= 10 {
-		s.db.Exec(ctx, `INSERT INTO badges (user_id, badge_type) VALUES ($1,'top_10') ON CONFLICT DO NOTHING`, userID)
+		tx.Exec(ctx, `INSERT INTO badges (user_id, badge_type) VALUES ($1,'top_10') ON CONFLICT DO NOTHING`, userID)
 	}
 
 	// on_a_roll badge
 	if current >= 7 {
-		s.db.Exec(ctx, `INSERT INTO badges (user_id, badge_type) VALUES ($1,'on_a_roll') ON CONFLICT DO NOTHING`, userID)
+		tx.Exec(ctx, `INSERT INTO badges (user_id, badge_type) VALUES ($1,'on_a_roll') ON CONFLICT DO NOTHING`, userID)
 	}
 	// unstoppable badge
 	if current >= 30 {
-		s.db.Exec(ctx, `INSERT INTO badges (user_id, badge_type) VALUES ($1,'unstoppable') ON CONFLICT DO NOTHING`, userID)
+		tx.Exec(ctx, `INSERT INTO badges (user_id, badge_type) VALUES ($1,'unstoppable') ON CONFLICT DO NOTHING`, userID)
 	}
 
+	tx.Commit(ctx)
 	return bonus, nil
 }
 

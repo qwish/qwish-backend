@@ -3,6 +3,7 @@ package institution
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,15 +12,17 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/middleware"
 )
 
 type Handler struct {
-	db *pgxpool.Pool
+	db    *pgxpool.Pool
+	notif *notification.Service
 }
 
-func NewHandler(db *pgxpool.Pool) *Handler {
-	return &Handler{db: db}
+func NewHandler(db *pgxpool.Pool, notif *notification.Service) *Handler {
+	return &Handler{db: db, notif: notif}
 }
 
 // GET /api/v1/institution/overview
@@ -392,6 +395,90 @@ func (h *Handler) RemoveTeacher(w http.ResponseWriter, r *http.Request) {
 	// Quizzes remain, full_name replaced in display
 	logAudit(r.Context(), h.db, middleware.GetUserID(r), "remove_teacher", "user", teacherID, "")
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "teacher removed from institution"})
+}
+
+// POST /api/v1/institution/teachers/invite
+func (h *Handler) InviteTeacher(w http.ResponseWriter, r *http.Request) {
+	instID := middleware.GetInstitutionID(r)
+	loggedInUser := middleware.GetUserID(r)
+
+	var req struct {
+		Email string `json:"email"`
+		Name  string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
+		middleware.BadRequest(w, "email is required")
+		return
+	}
+
+	// Reject if the email already belongs to a teacher in this institution
+	var existing int
+	h.db.QueryRow(r.Context(),
+		`SELECT 1 FROM users WHERE email=$1 AND institution_id=$2 AND role='teacher' AND deleted_at IS NULL`,
+		req.Email, instID).Scan(&existing)
+	if existing != 0 {
+		middleware.BadRequest(w, "a teacher with this email is already part of your institution")
+		return
+	}
+
+	// Reject if there is already a pending invite for this email + institution
+	var pendingID string
+	h.db.QueryRow(r.Context(),
+		`SELECT id FROM teacher_invites
+		 WHERE email=$1 AND institution_id=$2 AND status='pending' AND expires_at > now()`,
+		req.Email, instID).Scan(&pendingID)
+	if pendingID != "" {
+		middleware.BadRequest(w, "a pending invite for this email already exists")
+		return
+	}
+
+	// Generate a cryptographically random 32-byte hex token
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	token := hex.EncodeToString(tokenBytes)
+
+	// Fetch institution name for the email
+	var instName string
+	h.db.QueryRow(r.Context(), `SELECT name FROM institutions WHERE id=$1`, instID).Scan(&instName)
+
+	// Insert the invite record
+	var inviteID string
+	err := h.db.QueryRow(r.Context(),
+		`INSERT INTO teacher_invites (institution_id, invited_by, email, name, token)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id`,
+		instID, loggedInUser, req.Email, nullableString(req.Name), token,
+	).Scan(&inviteID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+
+	// Send invite email (non-blocking on error — invite is already created)
+	if h.notif != nil {
+		// APP_URL is embedded in institution settings; fall back to a sensible default
+		appURL := "https://app.quizapp.in"
+		_ = h.notif.SendTeacherInvite(r.Context(), req.Email, req.Name, instName, token, appURL, inviteID)
+	}
+
+	logAudit(r.Context(), h.db, loggedInUser, "invite_teacher", "teacher_invite", inviteID, req.Email)
+	middleware.JSON(w, http.StatusCreated, map[string]string{
+		"message":   "invite sent",
+		"invite_id": inviteID,
+		"email":     req.Email,
+		"expires_at": time.Now().UTC().Add(7 * 24 * time.Hour).Format(time.RFC3339),
+	})
+}
+
+// nullableString returns a *string pointer for DB nullable TEXT columns.
+func nullableString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // GET /api/v1/institution/groups

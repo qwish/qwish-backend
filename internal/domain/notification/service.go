@@ -8,15 +8,19 @@ import (
 	"io"
 	"log"
 	"net/http"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Service struct {
+	db        *pgxpool.Pool
 	apiKey    string
 	fromEmail string
 }
 
-func NewService(apiKey string) *Service {
+func NewService(db *pgxpool.Pool, apiKey string) *Service {
 	return &Service{
+		db:        db,
 		apiKey:    apiKey,
 		fromEmail: "QuizApp <noreply@quizapp.in>",
 	}
@@ -29,9 +33,17 @@ type EmailPayload struct {
 	HTML    string   `json:"html"`
 }
 
-func (s *Service) SendEmail(ctx context.Context, to, subject, html string) error {
+// SendEmail delivers an email via Resend and writes a row to notification_log.
+// reference is an optional free-form context string (e.g. "teacher_invite:<id>").
+func (s *Service) SendEmail(ctx context.Context, to, subject, html string, reference ...string) error {
+	ref := ""
+	if len(reference) > 0 {
+		ref = reference[0]
+	}
+
 	if s.apiKey == "" {
 		log.Printf("[notification] skipping email to %s (no API key configured): %s", to, subject)
+		s.logSend(ctx, to, subject, "sent", "", ref) // log even when skipped so devs can see intent
 		return nil
 	}
 
@@ -45,6 +57,7 @@ func (s *Service) SendEmail(ctx context.Context, to, subject, html string) error
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.resend.com/emails", bytes.NewReader(body))
 	if err != nil {
+		s.logSend(ctx, to, subject, "failed", err.Error(), ref)
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -52,16 +65,42 @@ func (s *Service) SendEmail(ctx context.Context, to, subject, html string) error
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		s.logSend(ctx, to, subject, "failed", err.Error(), ref)
 		return err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("resend error %d: %s", resp.StatusCode, string(raw))
+		errMsg := fmt.Sprintf("resend error %d: %s", resp.StatusCode, string(raw))
+		s.logSend(ctx, to, subject, "failed", errMsg, ref)
+		return fmt.Errorf("%s", errMsg)
 	}
+
+	s.logSend(ctx, to, subject, "sent", "", ref)
 	return nil
 }
+
+// logSend inserts a row into notification_log. Errors are swallowed (best-effort).
+func (s *Service) logSend(ctx context.Context, to, subject, status, errMsg, reference string) {
+	if s.db == nil {
+		return
+	}
+	var errPtr *string
+	if errMsg != "" {
+		errPtr = &errMsg
+	}
+	var refPtr *string
+	if reference != "" {
+		refPtr = &reference
+	}
+	s.db.Exec(ctx,
+		`INSERT INTO notification_log (to_email, subject, status, error, reference)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		to, subject, status, errPtr, refPtr)
+}
+
+// ── Typed email helpers ───────────────────────────────────────────────────────
 
 func (s *Service) SendInstitutionApproval(ctx context.Context, contactEmail, instName, adminEmail, adminPassword, sCode, tCode string) error {
 	html := fmt.Sprintf(`
@@ -75,7 +114,7 @@ func (s *Service) SendInstitutionApproval(ctx context.Context, contactEmail, ins
 <p>Teacher Code: <strong>%s</strong></p>
 <p>Please change your password after first login.</p>
 `, instName, adminEmail, adminPassword, sCode, tCode)
-	return s.SendEmail(ctx, contactEmail, "Your QuizApp Institution Has Been Approved", html)
+	return s.SendEmail(ctx, contactEmail, "Your QuizApp Institution Has Been Approved", html, "institution_approval")
 }
 
 func (s *Service) SendInstitutionRejection(ctx context.Context, contactEmail, instName, reason string) error {
@@ -85,7 +124,7 @@ func (s *Service) SendInstitutionRejection(ctx context.Context, contactEmail, in
 <p><strong>Reason:</strong> %s</p>
 <p>You may reapply after addressing the above issues.</p>
 `, instName, reason)
-	return s.SendEmail(ctx, contactEmail, "QuizApp Institution Application Update", html)
+	return s.SendEmail(ctx, contactEmail, "QuizApp Institution Application Update", html, "institution_rejection")
 }
 
 func (s *Service) SendPasswordReset(ctx context.Context, email, resetLink string) error {
@@ -95,5 +134,30 @@ func (s *Service) SendPasswordReset(ctx context.Context, email, resetLink string
 <p><a href="%s">Reset Password</a></p>
 <p>If you did not request this, please ignore this email.</p>
 `, resetLink)
-	return s.SendEmail(ctx, email, "QuizApp Password Reset", html)
+	return s.SendEmail(ctx, email, "QuizApp Password Reset", html, "password_reset")
+}
+
+// SendTeacherInvite emails a teacher invite link to the given address.
+func (s *Service) SendTeacherInvite(ctx context.Context, to, name, instName, inviteToken, appURL, inviteID string) error {
+	inviteLink := fmt.Sprintf("%s/auth/teacher-signup?token=%s", appURL, inviteToken)
+	greeting := "Hi"
+	if name != "" {
+		greeting = "Hi " + name
+	}
+	html := fmt.Sprintf(`
+<h2>You're invited to join QuizApp as a Teacher</h2>
+<p>%s,</p>
+<p><strong>%s</strong> has invited you to join their institution on QuizApp as a teacher.</p>
+<p>Click the button below to set up your account. This invite expires in 7 days.</p>
+<p style="margin:24px 0">
+  <a href="%s"
+     style="background:#4F46E5;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold">
+    Accept Invitation
+  </a>
+</p>
+<p style="font-size:12px;color:#888">Or copy this link: %s</p>
+<p style="font-size:12px;color:#888">If you weren't expecting this invitation, you can safely ignore this email.</p>
+`, greeting, instName, inviteLink, inviteLink)
+	return s.SendEmail(ctx, to, "You're invited to teach on QuizApp", html,
+		fmt.Sprintf("teacher_invite:%s", inviteID))
 }

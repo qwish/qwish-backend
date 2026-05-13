@@ -42,6 +42,18 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 
 	userID := middleware.GetUserID(r)
 	instID := middleware.GetInstitutionID(r)
+	role := middleware.GetRole(r)
+
+	if role == "super_admin" {
+		if reqInstID := r.URL.Query().Get("institution_id"); reqInstID != "" {
+			instID = reqInstID
+		}
+	}
+
+	if scope == "institution" && instID == "" {
+		middleware.BadRequest(w, "institution_id is required for institution scope")
+		return
+	}
 
 	var total int
 	var entries []Entry
@@ -93,18 +105,20 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	// Get current user's rank
 	var myRank int
 	var myPoints int64
-	if scope == "institution" {
-		h.db.QueryRow(r.Context(),
-			`SELECT COUNT(*)+1 FROM users WHERE institution_id=$1 AND total_points > (SELECT total_points FROM users WHERE id=$2) AND status='active'`,
-			instID, userID,
-		).Scan(&myRank)
-	} else {
-		h.db.QueryRow(r.Context(),
-			`SELECT COUNT(*)+1 FROM users WHERE total_points > (SELECT total_points FROM users WHERE id=$1) AND status='active'`,
-			userID,
-		).Scan(&myRank)
+	if role == "student" || role == "teacher" {
+		if scope == "institution" {
+			h.db.QueryRow(r.Context(),
+				`SELECT COUNT(*)+1 FROM users WHERE institution_id=$1 AND total_points > (SELECT total_points FROM users WHERE id=$2) AND status='active'`,
+				instID, userID,
+			).Scan(&myRank)
+		} else {
+			h.db.QueryRow(r.Context(),
+				`SELECT COUNT(*)+1 FROM users WHERE total_points > (SELECT total_points FROM users WHERE id=$1) AND status='active'`,
+				userID,
+			).Scan(&myRank)
+		}
+		h.db.QueryRow(r.Context(), `SELECT total_points FROM users WHERE id=$1`, userID).Scan(&myPoints)
 	}
-	h.db.QueryRow(r.Context(), `SELECT total_points FROM users WHERE id=$1`, userID).Scan(&myPoints)
 
 	middleware.JSONWithMeta(w, http.StatusOK, map[string]interface{}{
 		"scope":     scope,

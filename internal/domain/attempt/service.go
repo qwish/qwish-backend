@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/domain/quiz"
 	"github.com/qwish/backend/internal/domain/scoring"
 	"github.com/qwish/backend/internal/domain/streak"
@@ -16,11 +17,15 @@ type Service struct {
 	db        *pgxpool.Pool
 	quizSvc   *quiz.Service
 	streakSvc *streak.Service
+	notifSvc  *notification.Service
 }
 
 func NewService(db *pgxpool.Pool, quizSvc *quiz.Service, streakSvc *streak.Service) *Service {
 	return &Service{db: db, quizSvc: quizSvc, streakSvc: streakSvc}
 }
+
+// SetNotifier wires the in-app notification emitter. Optional — if unset, emits no-op.
+func (s *Service) SetNotifier(n *notification.Service) { s.notifSvc = n }
 
 type StartAttemptResp struct {
 	AttemptID string                      `json:"attempt_id"`
@@ -320,6 +325,34 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 	// Check and award badges
 	awarded := s.checkBadges(ctx, userID, quizID, scorePct, totalCorrect, totalQuestions, attemptID)
 
+	// ── Emit in-app notifications (best-effort) ─────────────────────────────
+	if s.notifSvc != nil {
+		// Badge unlocks
+		for _, bt := range awarded {
+			label, body := badgeCopy(bt)
+			s.notifSvc.Emit(ctx, userID, "badge", label, body,
+				notification.WithIcon("emoji_events"),
+				notification.WithColor("warning"),
+				notification.WithReference("badge:"+bt))
+		}
+		// Streak milestone bonus
+		if streakBonus > 0 {
+			s.notifSvc.Emit(ctx, userID, "streak", "Streak milestone reached!",
+				fmt.Sprintf("You earned +%d bonus points for keeping your streak alive.", streakBonus),
+				notification.WithIcon("local_fire_department"),
+				notification.WithColor("warning"),
+				notification.WithReference("streak_bonus"))
+		}
+		// Perfect score
+		if scorePct >= 100 {
+			s.notifSvc.Emit(ctx, userID, "points", "Perfect score!",
+				"You aced every question on that quiz.",
+				notification.WithIcon("star"),
+				notification.WithColor("success"),
+				notification.WithReference("attempt:"+attemptID))
+		}
+	}
+
 	if breakdown == nil {
 		breakdown = []QuestionBreakdownItem{}
 	}
@@ -369,6 +402,29 @@ func (s *Service) GetResult(ctx context.Context, userID, attemptID string) (map[
 		"completed_at":     completedAt,
 	}
 	return result, nil
+}
+
+// badgeCopy maps badge_type to a user-friendly (title, body) pair.
+func badgeCopy(bt string) (string, string) {
+	switch bt {
+	case "first_quiz":
+		return "First Sprint unlocked", "You completed your very first quiz — welcome aboard!"
+	case "on_a_roll":
+		return "On a Roll!", "You've maintained a 7-day streak. Keep the momentum going."
+	case "unstoppable":
+		return "Unstoppable", "A 30-day streak — that's championship territory."
+	case "top_10":
+		return "Top 10 in your institution", "You broke into the top 10 — share the win."
+	case "perfect_score":
+		return "Perfect Score badge", "100% on a quiz. Flawless execution."
+	case "speed_demon":
+		return "Speed Demon", "Lightning combo on a speed_chain question."
+	case "sharp_mind":
+		return "Sharp Mind", "You were both confident and right — every answer."
+	case "explorer":
+		return "Explorer", "You've now answered every question type on the platform."
+	}
+	return "New badge unlocked!", "Check your profile to see your latest achievement."
 }
 
 // checkBadges awards applicable badges after a quiz completion.

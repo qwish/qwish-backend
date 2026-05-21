@@ -23,6 +23,8 @@ type Config struct {
 	ResendAPIKey       string
 	CronSecret         string
 	AllowedOrigins     string
+	FCMProjectID       string
+	FCMCredentialsJSON string
 }
 
 func Load() *Config {
@@ -46,6 +48,8 @@ func Load() *Config {
 		ResendAPIKey:       getEnv("RESEND_API_KEY", ""),
 		CronSecret:         getEnv("CRON_SECRET", ""),
 		AllowedOrigins:     getEnv("ALLOWED_ORIGINS", "*"),
+		FCMProjectID:       getEnv("FCM_PROJECT_ID", ""),
+		FCMCredentialsJSON: getEnv("FCM_SERVICE_ACCOUNT_JSON", ""),
 	}
 }
 

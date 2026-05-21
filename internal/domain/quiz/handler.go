@@ -210,6 +210,40 @@ func (h *Handler) TeacherPublish(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, map[string]string{"status": newStatus})
 }
 
+// DELETE /api/v1/teacher/quizzes/:quizId
+func (h *Handler) TeacherDelete(w http.ResponseWriter, r *http.Request) {
+	if err := h.svc.Delete(r.Context(), chi.URLParam(r, "quizId"), middleware.GetUserID(r)); err != nil {
+		middleware.BadRequest(w, err.Error())
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "quiz deleted"})
+}
+
+// POST /api/v1/teacher/quizzes/:quizId/unpublish
+func (h *Handler) TeacherUnpublish(w http.ResponseWriter, r *http.Request) {
+	if err := h.svc.Unpublish(r.Context(), chi.URLParam(r, "quizId"), middleware.GetUserID(r)); err != nil {
+		middleware.BadRequest(w, err.Error())
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]string{"status": "draft"})
+}
+
+// PATCH /api/v1/teacher/quizzes/:quizId/questions/order
+func (h *Handler) TeacherReorderQuestions(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Order []string `json:"order"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Order) == 0 {
+		middleware.BadRequest(w, "order array is required")
+		return
+	}
+	if err := h.svc.ReorderQuestions(r.Context(), chi.URLParam(r, "quizId"), middleware.GetUserID(r), req.Order); err != nil {
+		middleware.Error(w, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "questions reordered"})
+}
+
 // GET /api/v1/teacher/quizzes/:quizId/results
 func (h *Handler) TeacherResults(w http.ResponseWriter, r *http.Request) {
 	results, err := h.svc.GetTeacherResults(r.Context(), chi.URLParam(r, "quizId"), middleware.GetUserID(r))

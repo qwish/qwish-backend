@@ -17,11 +17,12 @@ func NewHandler(db *pgxpool.Pool) *Handler {
 }
 
 type Entry struct {
-	Rank          int    `json:"rank"`
-	UserID        string `json:"user_id"`
-	DisplayName   string `json:"display_name"`
-	TotalPoints   int64  `json:"total_points"`
-	CurrentStreak int    `json:"current_streak"`
+	Rank            int     `json:"rank"`
+	UserID          string  `json:"user_id"`
+	DisplayName     string  `json:"display_name"`
+	InstitutionName *string `json:"institution_name,omitempty"`
+	TotalPoints     int64   `json:"total_points"`
+	CurrentStreak   int     `json:"current_streak"`
 }
 
 // GET /api/v1/leaderboard?scope=institution|global
@@ -64,16 +65,17 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 		).Scan(&total)
 
 		rows, err := h.db.Query(r.Context(),
-			`SELECT id, display_name, total_points, current_streak,
-			        RANK() OVER (ORDER BY total_points DESC) as rank
-			 FROM users WHERE institution_id=$1 AND status='active' AND role IN ('student','teacher')
-			 ORDER BY total_points DESC LIMIT $2 OFFSET $3`,
+			`SELECT u.id, u.display_name, i.name, u.total_points, u.current_streak,
+			        RANK() OVER (ORDER BY u.total_points DESC) as rank
+			 FROM users u LEFT JOIN institutions i ON i.id = u.institution_id
+			 WHERE u.institution_id=$1 AND u.status='active' AND u.role IN ('student','teacher')
+			 ORDER BY u.total_points DESC LIMIT $2 OFFSET $3`,
 			instID, limit, offset)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
 				var e Entry
-				rows.Scan(&e.UserID, &e.DisplayName, &e.TotalPoints, &e.CurrentStreak, &e.Rank)
+				rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.TotalPoints, &e.CurrentStreak, &e.Rank)
 				entries = append(entries, e)
 			}
 		}
@@ -83,16 +85,17 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 		).Scan(&total)
 
 		rows, err := h.db.Query(r.Context(),
-			`SELECT id, display_name, total_points, current_streak,
-			        RANK() OVER (ORDER BY total_points DESC) as rank
-			 FROM users WHERE status='active' AND role IN ('student','teacher')
-			 ORDER BY total_points DESC LIMIT $1 OFFSET $2`,
+			`SELECT u.id, u.display_name, i.name, u.total_points, u.current_streak,
+			        RANK() OVER (ORDER BY u.total_points DESC) as rank
+			 FROM users u LEFT JOIN institutions i ON i.id = u.institution_id
+			 WHERE u.status='active' AND u.role IN ('student','teacher')
+			 ORDER BY u.total_points DESC LIMIT $1 OFFSET $2`,
 			limit, offset)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
 				var e Entry
-				rows.Scan(&e.UserID, &e.DisplayName, &e.TotalPoints, &e.CurrentStreak, &e.Rank)
+				rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.TotalPoints, &e.CurrentStreak, &e.Rank)
 				entries = append(entries, e)
 			}
 		}

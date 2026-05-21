@@ -236,6 +236,61 @@ func (s *Service) Publish(ctx context.Context, quizID, ownerID string) (string, 
 	return newStatus, err
 }
 
+// Delete soft-deletes a quiz the teacher owns. Only drafts and rejected quizzes
+// can be deleted by the teacher; once published, only super-admin can unpublish.
+func (s *Service) Delete(ctx context.Context, quizID, ownerID string) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE quizzes SET deleted_at=now(), updated_at=now()
+		 WHERE id=$1 AND created_by=$2 AND status IN ('draft','rejected') AND deleted_at IS NULL`,
+		quizID, ownerID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("not found, already deleted, or cannot delete a published quiz")
+	}
+	return nil
+}
+
+// Unpublish reverts a published quiz the teacher owns back to draft so it can be
+// edited. Quizzes in pending_approval cannot be unpublished by the teacher.
+func (s *Service) Unpublish(ctx context.Context, quizID, ownerID string) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE quizzes SET status='draft', published_at=NULL, updated_at=now()
+		 WHERE id=$1 AND created_by=$2 AND status='published' AND deleted_at IS NULL`,
+		quizID, ownerID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("quiz is not published or not owned by you")
+	}
+	return nil
+}
+
+// ReorderQuestions sets the position of each question in the given order. The
+// caller must own the quiz; question IDs not belonging to the quiz are ignored.
+func (s *Service) ReorderQuestions(ctx context.Context, quizID, ownerID string, order []string) error {
+	var check int
+	s.db.QueryRow(ctx, `SELECT 1 FROM quizzes WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL`,
+		quizID, ownerID).Scan(&check)
+	if check == 0 {
+		return fmt.Errorf("not found or forbidden")
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for i, qid := range order {
+		if _, err := tx.Exec(ctx,
+			`UPDATE questions SET position=$1 WHERE id=$2 AND quiz_id=$3`, i+1, qid, quizID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Service) SaveQuiz(ctx context.Context, userID, quizID string) error {
 	_, err := s.db.Exec(ctx,
 		`INSERT INTO saved_quizzes (user_id, quiz_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, userID, quizID)

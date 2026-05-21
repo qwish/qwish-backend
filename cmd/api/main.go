@@ -23,9 +23,11 @@ import (
 	"github.com/qwish/backend/internal/domain/onboarding"
 	"github.com/qwish/backend/internal/domain/parent"
 	"github.com/qwish/backend/internal/domain/points"
+	"github.com/qwish/backend/internal/domain/push"
 	"github.com/qwish/backend/internal/domain/quiz"
 	"github.com/qwish/backend/internal/domain/scoring"
 	"github.com/qwish/backend/internal/domain/streak"
+	"github.com/qwish/backend/internal/domain/teacher"
 	"github.com/qwish/backend/internal/domain/topicrequest"
 	"github.com/qwish/backend/internal/domain/upload"
 	"github.com/qwish/backend/internal/domain/user"
@@ -47,7 +49,12 @@ func main() {
 	quizSvc := quiz.NewService(pool)
 	streakSvc := streak.NewService(pool)
 	attemptSvc := attempt.NewService(pool, quizSvc, streakSvc)
+	pushSvc := push.NewService(pool, cfg.FCMProjectID, cfg.FCMCredentialsJSON)
 	notifSvc := notification.NewService(pool, cfg.ResendAPIKey)
+	notifSvc.SetPusher(func(ctx context.Context, userID, title, body string, data map[string]string) {
+		pushSvc.SendToUser(ctx, userID, push.Payload{Title: title, Body: body, Data: data})
+	})
+	attemptSvc.SetNotifier(notifSvc)
 	r2Client := storage.NewR2Client(cfg)
 	sched := scheduler.New(pool, streakSvc)
 
@@ -63,9 +70,12 @@ func main() {
 	topicH := topicrequest.NewHandler(pool)
 	uploadH := upload.NewHandler(r2Client)
 	institutionH := institution.NewHandler(pool, notifSvc)
+	teacherH := teacher.NewHandler(pool)
 	adminH := admin.NewHandler(pool, cfg)
 	onboardingH := onboarding.NewHandler(pool)
 	contactH := contact.NewHandler(pool)
+	notifH := notification.NewHandler(notifSvc)
+	pushH := push.NewHandler(pool)
 
 	_ = notifSvc
 	_ = scoring.LoadConfig // referenced by services
@@ -154,6 +164,12 @@ func main() {
 			r.Get("/users/me/education", userH.GetMyEducation)
 			r.Post("/users/me/education", userH.AddMyEducation)
 			r.Delete("/users/me/education/{id}", userH.DeleteMyEducation)
+			r.Get("/users/me/notifications", notifH.List)
+			r.Get("/users/me/notifications/unread-count", notifH.UnreadCount)
+			r.Patch("/users/me/notifications/read-all", notifH.MarkAllRead)
+			r.Patch("/users/me/notifications/{id}/read", notifH.MarkRead)
+			r.Post("/users/me/devices", pushH.Register)
+			r.Delete("/users/me/devices/{token}", pushH.Unregister)
 			r.Get("/users/me/skills", userH.GetMySkills)
 			r.Post("/users/me/skills", userH.AddMySkill)
 			r.Delete("/users/me/skills/{skill}", userH.DeleteMySkill)
@@ -193,14 +209,24 @@ func main() {
 			// ---- Teacher routes ----
 			r.Route("/teacher", func(r chi.Router) {
 				r.Use(mw.RequireRole("teacher"))
+				r.Get("/overview", teacherH.Overview)
 				r.Get("/quizzes", quizH.TeacherList)
 				r.Post("/quizzes", quizH.TeacherCreate)
 				r.Patch("/quizzes/{quizId}", quizH.TeacherUpdate)
+				r.Delete("/quizzes/{quizId}", quizH.TeacherDelete)
+				r.Post("/quizzes/{quizId}/publish", quizH.TeacherPublish)
+				r.Post("/quizzes/{quizId}/unpublish", quizH.TeacherUnpublish)
+				r.Get("/quizzes/{quizId}/results", quizH.TeacherResults)
 				r.Post("/quizzes/{quizId}/questions", quizH.TeacherAddQuestion)
+				r.Patch("/quizzes/{quizId}/questions/order", quizH.TeacherReorderQuestions)
 				r.Patch("/quizzes/{quizId}/questions/{questionId}", quizH.TeacherUpdateQuestion)
 				r.Delete("/quizzes/{quizId}/questions/{questionId}", quizH.TeacherDeleteQuestion)
-				r.Post("/quizzes/{quizId}/publish", quizH.TeacherPublish)
-				r.Get("/quizzes/{quizId}/results", quizH.TeacherResults)
+				r.Get("/students", teacherH.ListStudents)
+				r.Get("/students/{userId}", teacherH.GetStudent)
+				r.Get("/classes", teacherH.ListClasses)
+				r.Get("/classes/{classId}", teacherH.GetClass)
+				r.Get("/reports/quiz-analytics", teacherH.QuizAnalyticsReport)
+				r.Get("/reports/student-performance", teacherH.StudentPerformanceReport)
 				r.Get("/topic-requests", topicH.TeacherList)
 				r.Patch("/topic-requests/{requestId}", topicH.TeacherUpdate)
 			})
@@ -236,6 +262,11 @@ func main() {
 				r.Get("/topic-requests", topicH.TeacherList)
 				r.Patch("/topic-requests/{requestId}", topicH.InstitutionUpdate)
 				r.Get("/reports/student-performance", institutionH.StudentPerformanceReport)
+				r.Get("/reports/teacher-activity", institutionH.TeacherActivityReport)
+				r.Get("/reports/quiz-analytics", institutionH.QuizAnalyticsReport)
+				r.Get("/reports/streak-health", institutionH.StreakHealthReport)
+				r.Get("/reports/points-summary", institutionH.PointsSummaryReport)
+				r.Get("/quizzes/{quizId}/results", institutionH.QuizResults)
 				r.Get("/settings", institutionH.GetSettings)
 				r.Patch("/settings", institutionH.UpdateSettings)
 				r.Patch("/settings/point-rules", institutionH.UpdatePointRules)

@@ -16,6 +16,7 @@ type Service struct {
 	db        *pgxpool.Pool
 	apiKey    string
 	fromEmail string
+	push      pusherAdapter
 }
 
 func NewService(db *pgxpool.Pool, apiKey string) *Service {

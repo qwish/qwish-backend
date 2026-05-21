@@ -1520,6 +1520,132 @@ Array of student performance rows with `id`, `display_name`, `total_points`, `cu
 
 ---
 
+## GET `/institution/reports/teacher-activity`
+Per-teacher activity stats for the institution.
+
+### Query Params
+| Param | Description |
+|-------|-------------|
+| `date_from`, `date_to` | Restrict attempt aggregates to this date range (ISO timestamp). |
+| `page`, `limit` | Pagination (default `page=1`, `limit=20`, max `100`). |
+
+### Response `200`
+```json
+{
+  "data": [
+    {
+      "teacher_id":      "uuid",
+      "display_name":    "Ms. Sharma",
+      "quizzes_created": 12,
+      "total_attempts":  348,
+      "avg_score":       72.4
+    }
+  ],
+  "meta": { "page": 1, "limit": 20, "total": 7 }
+}
+```
+
+---
+
+## GET `/institution/reports/quiz-analytics`
+Per-quiz breakdown with completion rate and score-distribution bands (≥80, 60–79, <60).
+
+### Query Params
+| Param | Description |
+|-------|-------------|
+| `date_from`, `date_to` | Restrict attempts by `started_at`. |
+| `page`, `limit` | Pagination (default `page=1`, `limit=20`, max `100`). |
+
+### Response `200`
+```json
+{
+  "data": [
+    {
+      "quiz_id":         "uuid",
+      "title":           "Algebra Basics",
+      "completion_rate": 84.6,
+      "score_dist_high": 45,
+      "score_dist_mid":  62,
+      "score_dist_low":  18
+    }
+  ],
+  "meta": { "page": 1, "limit": 20, "total": 32 }
+}
+```
+
+---
+
+## GET `/institution/reports/streak-health`
+Institution-wide student counts by streak status.
+
+### Response `200`
+```json
+{ "active": 512, "at_risk": 289, "broken": 483 }
+```
+- `active` — `current_streak >= 7`
+- `at_risk` — `current_streak` between 1 and 6
+- `broken` — `current_streak = 0`
+
+---
+
+## GET `/institution/reports/points-summary`
+Points distribution trend + per-student totals.
+
+### Query Params
+| Param | Description |
+|-------|-------------|
+| `date_from`, `date_to` | Restrict the `daily_trend` window. Defaults to the last 30 days. |
+
+### Response `200`
+```json
+{
+  "daily_trend": [
+    { "date": "2026-04-17", "points_distributed": 1240 }
+  ],
+  "students": [
+    {
+      "user_id":       "uuid",
+      "display_name":  "Aman R.",
+      "total_points":  4820,
+      "expiring_soon": 350
+    }
+  ]
+}
+```
+`expiring_soon` is the sum of positive `points_ledger` entries with `expires_at` within the next 30 days.
+
+---
+
+## GET `/institution/quizzes/{quizId}/results`
+Institution-admin view of attempt results for a quiz the institution owns. Mirrors `/teacher/quizzes/{quizId}/results` but scopes by `institution_id` instead of `created_by`.
+
+### Response `200`
+```json
+{
+  "completions":     128,
+  "completion_rate": 87.4,
+  "avg_score":       71.2,
+  "per_question_accuracy": [
+    { "position": 1, "accuracy_pct": 92.1 }
+  ],
+  "attempts": [
+    {
+      "student_id":    "uuid",
+      "display_name":  "Priya S.",
+      "score_pct":     80.0,
+      "points_earned": 240,
+      "time_taken_ms": 412300,
+      "completed_at":  "2026-05-12T10:22:14Z"
+    }
+  ]
+}
+```
+
+### Errors
+- `404` — quiz not found in this institution.
+
+---
+
 ## GET `/institution/settings`
 ### Response `200`
 ```json

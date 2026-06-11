@@ -51,8 +51,14 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	domain := r.URL.Query().Get("domain")
+
 	if scope == "institution" && instID == "" {
 		middleware.BadRequest(w, "institution_id is required for institution scope")
+		return
+	}
+	if scope == "domain" && domain == "" {
+		middleware.BadRequest(w, "domain is required for domain scope")
 		return
 	}
 
@@ -71,6 +77,26 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 			 WHERE u.institution_id=$1 AND u.status='active' AND u.role IN ('student','teacher')
 			 ORDER BY u.total_points DESC LIMIT $2 OFFSET $3`,
 			instID, limit, offset)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var e Entry
+				rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.TotalPoints, &e.CurrentStreak, &e.Rank)
+				entries = append(entries, e)
+			}
+		}
+	} else if scope == "domain" {
+		h.db.QueryRow(r.Context(),
+			`SELECT COUNT(*) FROM users WHERE LOWER(domain)=LOWER($1) AND status='active' AND role IN ('student','teacher')`, domain,
+		).Scan(&total)
+
+		rows, err := h.db.Query(r.Context(),
+			`SELECT u.id, u.display_name, i.name, u.total_points, u.current_streak,
+			        RANK() OVER (ORDER BY u.total_points DESC) as rank
+			 FROM users u LEFT JOIN institutions i ON i.id = u.institution_id
+			 WHERE LOWER(u.domain)=LOWER($1) AND u.status='active' AND u.role IN ('student','teacher')
+			 ORDER BY u.total_points DESC LIMIT $2 OFFSET $3`,
+			domain, limit, offset)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -113,6 +139,11 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 			h.db.QueryRow(r.Context(),
 				`SELECT COUNT(*)+1 FROM users WHERE institution_id=$1 AND total_points > (SELECT total_points FROM users WHERE id=$2) AND status='active'`,
 				instID, userID,
+			).Scan(&myRank)
+		} else if scope == "domain" {
+			h.db.QueryRow(r.Context(),
+				`SELECT COUNT(*)+1 FROM users WHERE LOWER(domain)=LOWER($1) AND total_points > (SELECT total_points FROM users WHERE id=$2) AND status='active'`,
+				domain, userID,
 			).Scan(&myRank)
 		} else {
 			h.db.QueryRow(r.Context(),

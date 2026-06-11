@@ -32,11 +32,16 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
-			if !strings.HasPrefix(authHeader, "Bearer ") {
+			var tokenStr string
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				tokenStr = strings.TrimPrefix(authHeader, "Bearer ")
+			} else {
+				tokenStr = r.URL.Query().Get("token")
+			}
+			if tokenStr == "" {
 				Unauthorized(w)
 				return
 			}
-			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
 			token, err := jwt.Parse(tokenStr, keyFunc, jwt.WithValidMethods([]string{"HS256", "ES256"}))
 			if err != nil || !token.Valid {

@@ -2,6 +2,7 @@ package user
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -247,3 +248,76 @@ func (h *Handler) DeleteMe(w http.ResponseWriter, r *http.Request) {
 	}
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "account deleted"})
 }
+
+// GET /api/v1/users/me/recommendations
+func (h *Handler) GetMyRecommendations(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	instID := middleware.GetInstitutionID(r)
+	recs, err := h.svc.GetRecommendations(r.Context(), userID, instID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, recs)
+}
+
+// GET /api/v1/users/me/report-card
+func (h *Handler) GetMyReportCardPDF(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	profile, err := h.svc.GetProfile(r.Context(), userID)
+	if err != nil {
+		middleware.NotFound(w, "user")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Content-Disposition", `attachment; filename="report-card.pdf"`)
+
+	// Minimal valid PDF structure with dynamic user stats
+	streamContent := fmt.Sprintf(`BT
+/F1 22 Tf
+50 750 Td
+(NumPie Verified Skill Report Card) Tj
+/F1 12 Tf
+0 -40 Td
+(Name: %s) Tj
+0 -20 Td
+(Email: %s) Tj
+0 -20 Td
+(Total Points: %d) Tj
+0 -20 Td
+(Current Streak: %d days) Tj
+ET`, profile.DisplayName, profile.Email, profile.TotalPoints, profile.CurrentStreak)
+
+	pdfData := fmt.Sprintf(`%%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length %d >>
+stream
+%s
+endstream
+endobj
+xref
+0 5
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000282 00000 n 
+trailer
+<< /Size 5 /Root 1 0 R >>
+startxref
+450
+%%%%EOF`, len(streamContent), streamContent)
+
+	w.Write([]byte(pdfData))
+}
+

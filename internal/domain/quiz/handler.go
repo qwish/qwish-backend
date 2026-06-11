@@ -30,7 +30,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > 50 {
 		limit = 20
 	}
-	quizzes, total, err := h.svc.ListForStudent(r.Context(), instID, q.Get("type"), q.Get("saved"), userID, page, limit)
+	quizzes, total, err := h.svc.ListForStudent(r.Context(), instID, q.Get("type"), q.Get("saved"), q.Get("search"), userID, page, limit)
 	if err != nil {
 		middleware.InternalError(w)
 		return

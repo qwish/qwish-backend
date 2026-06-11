@@ -174,6 +174,8 @@ func main() {
 			r.Post("/users/me/skills", userH.AddMySkill)
 			r.Delete("/users/me/skills/{skill}", userH.DeleteMySkill)
 			r.Patch("/users/me/domain", userH.UpdateMyDomain)
+			r.Get("/users/me/recommendations", userH.GetMyRecommendations)
+			r.Get("/users/me/report-card", userH.GetMyReportCardPDF)
 			r.Get("/users/{userId}/profile", userH.GetPublicProfile)
 
 			// Quiz browser (student / teacher)

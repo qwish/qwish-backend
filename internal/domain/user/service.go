@@ -478,3 +478,46 @@ func (s *Service) UpdateDomain(ctx context.Context, userID, domain string) error
 		`UPDATE users SET domain=$1, updated_at=now() WHERE id=$2`, domain, userID)
 	return err
 }
+
+// ── Recommendations ───────────────────────────────────────────────────────────
+
+type RecommendedQuiz struct {
+	ID            string  `json:"id"`
+	Title         string  `json:"title"`
+	Description   *string `json:"description,omitempty"`
+	QuestionCount int     `json:"question_count"`
+	Type          string  `json:"type"`
+}
+
+func (s *Service) GetRecommendations(ctx context.Context, userID, instID string) ([]RecommendedQuiz, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT q.id, q.title, q.description, q.question_count, q.type
+		 FROM quizzes q
+		 WHERE (q.institution_id = $1 OR q.visibility = 'public')
+		   AND q.status = 'published'
+		   AND q.deleted_at IS NULL
+		   AND q.id NOT IN (
+		       SELECT quiz_id FROM quiz_attempts WHERE user_id = $2 AND status = 'completed'
+		   )
+		 ORDER BY q.published_at DESC
+		 LIMIT 5`,
+		instID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []RecommendedQuiz
+	for rows.Next() {
+		var q RecommendedQuiz
+		if err := rows.Scan(&q.ID, &q.Title, &q.Description, &q.QuestionCount, &q.Type); err != nil {
+			return nil, err
+		}
+		list = append(list, q)
+	}
+	if list == nil {
+		list = []RecommendedQuiz{}
+	}
+	return list, nil
+}
+

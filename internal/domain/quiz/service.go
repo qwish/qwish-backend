@@ -69,7 +69,7 @@ type AddQuestionReq struct {
 	Clues            json.RawMessage `json:"clues,omitempty"`
 }
 
-func (s *Service) ListForStudent(ctx context.Context, institutionID, quizType, saved, userID string, page, limit int) ([]Quiz, int, error) {
+func (s *Service) ListForStudent(ctx context.Context, institutionID, quizType, saved, search, userID string, page, limit int) ([]Quiz, int, error) {
 	offset := (page - 1) * limit
 	var total int
 
@@ -85,6 +85,11 @@ func (s *Service) ListForStudent(ctx context.Context, institutionID, quizType, s
 	if saved == "true" {
 		baseWhere += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM saved_quizzes sq WHERE sq.quiz_id = q.id AND sq.user_id = $%d)`, argN)
 		args = append(args, userID)
+		argN++
+	}
+	if search != "" {
+		baseWhere += fmt.Sprintf(` AND (q.title ILIKE $%d OR q.description ILIKE $%d)`, argN, argN)
+		args = append(args, "%"+search+"%")
 		argN++
 	}
 

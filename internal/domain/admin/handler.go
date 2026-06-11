@@ -786,13 +786,71 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "name, email, and role are required")
 		return
 	}
+
+	// Validate role
+	if req.Role != "super_admin" && req.Role != "moderator" && req.Role != "support_agent" {
+		middleware.BadRequest(w, "invalid role: must be super_admin, moderator, or support_agent")
+		return
+	}
+
 	adminID := middleware.GetAdminID(r)
-	// Placeholder supabase_uid — in practice, invite via Supabase Auth admin API and then provision
+
+	// Invite user via Supabase Admin API — sends a magic-link/invite email
+	inviteBody, _ := json.Marshal(map[string]interface{}{
+		"email": req.Email,
+		"data": map[string]string{
+			"role":      req.Role,
+			"full_name": req.Name,
+		},
+	})
+	inviteReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		h.cfg.SupabaseURL+"/auth/v1/admin/invite", bytes.NewReader(inviteBody))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	inviteReq.Header.Set("Content-Type", "application/json")
+	inviteReq.Header.Set("apikey", h.cfg.SupabaseServiceKey)
+	inviteReq.Header.Set("Authorization", "Bearer "+h.cfg.SupabaseServiceKey)
+
+	inviteResp, err := http.DefaultClient.Do(inviteReq)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer inviteResp.Body.Close()
+	rawResp, _ := io.ReadAll(inviteResp.Body)
+
+	if inviteResp.StatusCode >= 400 {
+		middleware.JSON(w, http.StatusBadGateway, map[string]string{
+			"error": fmt.Sprintf("supabase invite failed: %s", string(rawResp)),
+		})
+		return
+	}
+
+	// Extract the Supabase UID from the invite response
+	var supabaseResp struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(rawResp, &supabaseResp)
+
+	var supabaseUID string
+	if supabaseResp.ID != "" {
+		supabaseUID = supabaseResp.ID
+	} else {
+		supabaseUID = uuid.New().String()
+	}
+
 	var id string
-	h.db.QueryRow(r.Context(),
-		`INSERT INTO admin_accounts (supabase_uid, name, email, role, created_by) VALUES (gen_random_uuid(),$1,$2,$3,$4) RETURNING id`,
-		req.Name, req.Email, req.Role, adminID,
+	err = h.db.QueryRow(r.Context(),
+		`INSERT INTO admin_accounts (supabase_uid, name, email, role, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+		supabaseUID, req.Name, req.Email, req.Role, adminID,
 	).Scan(&id)
+	if err != nil {
+		middleware.Error(w, http.StatusConflict, "DB_ERROR", "failed to create admin account record (possibly duplicate email)")
+		return
+	}
+
 	logAudit(r.Context(), h.db, adminID, "create_admin_account", "admin", id, "")
 	middleware.JSON(w, http.StatusCreated, map[string]string{"id": id, "message": "admin account created, invite sent"})
 }

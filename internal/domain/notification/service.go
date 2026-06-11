@@ -162,3 +162,38 @@ func (s *Service) SendTeacherInvite(ctx context.Context, to, name, instName, inv
 	return s.SendEmail(ctx, to, "You're invited to teach on QuizApp", html,
 		fmt.Sprintf("teacher_invite:%s", inviteID))
 }
+
+func (s *Service) SendAdminInvite(ctx context.Context, to, name, role, inviteLink string) error {
+	greeting := "Hi"
+	if name != "" {
+		greeting = "Hi " + name
+	}
+	html := fmt.Sprintf(`
+<h2>You're invited to join QuizApp as an Admin</h2>
+<p>%s,</p>
+<p>You have been invited to join QuizApp as a <strong>%s</strong>.</p>
+<p>Click the button below to set up your account and access the Admin Dashboard.</p>
+<p style="margin:24px 0">
+  <a href="%s"
+     style="background:#4F46E5;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold">
+    Accept Invitation
+  </a>
+</p>
+<p style="font-size:12px;color:#888">Or copy this link: %s</p>
+`, greeting, role, inviteLink, inviteLink)
+	return s.SendEmail(ctx, to, "You're invited to join QuizApp as an Admin", html, "admin_invite")
+}
+
+func (s *Service) SendAdminWelcome(ctx context.Context, to, name, role string) error {
+	greeting := "Hi"
+	if name != "" {
+		greeting = "Hi " + name
+	}
+	html := fmt.Sprintf(`
+<h2>Welcome to QuizApp Admins!</h2>
+<p>%s,</p>
+<p>You have been granted <strong>%s</strong> privileges on QuizApp.</p>
+<p>You can now log in using your existing credentials at the Admin Dashboard.</p>
+`, greeting, role)
+	return s.SendEmail(ctx, to, "QuizApp Admin Access Granted", html, "admin_welcome")
+}

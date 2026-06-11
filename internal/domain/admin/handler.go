@@ -14,16 +14,18 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/config"
+	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/middleware"
 )
 
 type Handler struct {
-	db  *pgxpool.Pool
-	cfg *config.Config
+	db    *pgxpool.Pool
+	cfg   *config.Config
+	notif *notification.Service
 }
 
-func NewHandler(db *pgxpool.Pool, cfg *config.Config) *Handler {
-	return &Handler{db: db, cfg: cfg}
+func NewHandler(db *pgxpool.Pool, cfg *config.Config, notif *notification.Service) *Handler {
+	return &Handler{db: db, cfg: cfg, notif: notif}
 }
 
 // GET /api/v1/admin/overview
@@ -795,55 +797,64 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 
 	adminID := middleware.GetAdminID(r)
 
-	// Invite user via Supabase Admin API — sends a magic-link/invite email
-	inviteBody, _ := json.Marshal(map[string]interface{}{
-		"email": req.Email,
-		"data": map[string]string{
-			"role":      req.Role,
-			"full_name": req.Name,
-		},
-	})
-	inviteReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-		h.cfg.SupabaseURL+"/auth/v1/admin/invite", bytes.NewReader(inviteBody))
-
 	var supabaseUID string
+	var inviteLink string
+	var userExistsInSupabase bool
+
+	// Call Supabase generate_link API to create the user and get the action link
+	linkBody, _ := json.Marshal(map[string]interface{}{
+		"type":  "invite",
+		"email": req.Email,
+	})
+	linkReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		h.cfg.SupabaseURL+"/auth/v1/admin/generate_link", bytes.NewReader(linkBody))
 
 	if err == nil {
-		inviteReq.Header.Set("Content-Type", "application/json")
-		inviteReq.Header.Set("apikey", h.cfg.SupabaseServiceKey)
-		inviteReq.Header.Set("Authorization", "Bearer "+h.cfg.SupabaseServiceKey)
+		linkReq.Header.Set("Content-Type", "application/json")
+		linkReq.Header.Set("apikey", h.cfg.SupabaseServiceKey)
+		linkReq.Header.Set("Authorization", "Bearer "+h.cfg.SupabaseServiceKey)
 
-		inviteResp, err := http.DefaultClient.Do(inviteReq)
+		linkResp, err := http.DefaultClient.Do(linkReq)
 		if err == nil {
-			defer inviteResp.Body.Close()
-			rawResp, _ := io.ReadAll(inviteResp.Body)
+			defer linkResp.Body.Close()
+			rawResp, _ := io.ReadAll(linkResp.Body)
 
-			if inviteResp.StatusCode < 400 {
-				var supabaseResp struct {
-					ID string `json:"id"`
+			if linkResp.StatusCode < 400 {
+				var generateResp struct {
+					ActionLink string `json:"action_link"`
+					ID         string `json:"id"`
+					User       struct {
+						ID string `json:"id"`
+					} `json:"user"`
 				}
-				json.Unmarshal(rawResp, &supabaseResp)
-				if supabaseResp.ID != "" {
-					supabaseUID = supabaseResp.ID
+				json.Unmarshal(rawResp, &generateResp)
+				inviteLink = generateResp.ActionLink
+				if generateResp.ID != "" {
+					supabaseUID = generateResp.ID
+				} else if generateResp.User.ID != "" {
+					supabaseUID = generateResp.User.ID
 				}
 			} else {
-				// Log the error but do not fail the request
-				fmt.Printf("[admin] Supabase invite failed (status %d): %s\n", inviteResp.StatusCode, string(rawResp))
+				fmt.Printf("[admin] Supabase generate_link failed (status %d): %s\n", linkResp.StatusCode, string(rawResp))
+				if linkResp.StatusCode == 422 || bytes.Contains(rawResp, []byte("already")) {
+					userExistsInSupabase = true
+				}
 			}
 		} else {
-			fmt.Printf("[admin] Failed to execute Supabase invite request: %v\n", err)
+			fmt.Printf("[admin] Failed to execute Supabase generate_link request: %v\n", err)
 		}
 	} else {
-		fmt.Printf("[admin] Failed to create Supabase invite request: %v\n", err)
+		fmt.Printf("[admin] Failed to create Supabase generate_link request: %v\n", err)
 	}
 
 	// If the invite call failed or didn't return an ID, check if they already exist in auth.users
 	if supabaseUID == "" {
 		err = h.db.QueryRow(r.Context(), `SELECT id FROM auth.users WHERE email = $1`, req.Email).Scan(&supabaseUID)
-		if err != nil {
-			fmt.Printf("[admin] User not found in auth.users database table: %v\n", err)
-		} else {
+		if err == nil {
+			userExistsInSupabase = true
 			fmt.Printf("[admin] Found existing user in auth.users with UID: %s\n", supabaseUID)
+		} else {
+			fmt.Printf("[admin] User not found in auth.users database table: %v\n", err)
 		}
 	}
 
@@ -861,6 +872,15 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		middleware.Error(w, http.StatusConflict, "DB_ERROR", "failed to create admin account record (possibly duplicate email)")
 		return
+	}
+
+	// Send email via Resend
+	if h.notif != nil {
+		if inviteLink != "" {
+			_ = h.notif.SendAdminInvite(r.Context(), req.Email, req.Name, req.Role, inviteLink)
+		} else if userExistsInSupabase {
+			_ = h.notif.SendAdminWelcome(r.Context(), req.Email, req.Name, req.Role)
+		}
 	}
 
 	logAudit(r.Context(), h.db, adminID, "create_admin_account", "admin", id, "")

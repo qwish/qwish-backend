@@ -71,7 +71,7 @@ func main() {
 	uploadH := upload.NewHandler(r2Client)
 	institutionH := institution.NewHandler(pool, notifSvc)
 	teacherH := teacher.NewHandler(pool)
-	adminH := admin.NewHandler(pool, cfg)
+	adminH := admin.NewHandler(pool, cfg, notifSvc)
 	onboardingH := onboarding.NewHandler(pool)
 	contactH := contact.NewHandler(pool)
 	notifH := notification.NewHandler(notifSvc)

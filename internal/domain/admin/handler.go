@@ -864,13 +864,31 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("[admin] Generated fallback placeholder UUID for admin account: %s\n", supabaseUID)
 	}
 
-	var id string
+	// An email may already exist in admin_accounts from a prior invite or a
+	// soft-deleted account (DeleteAdminAccount only flags status='deleted').
+	// Revive soft-deleted rows; reject genuine active duplicates with a clear message.
+	var id, existingStatus string
 	err = h.db.QueryRow(r.Context(),
-		`INSERT INTO admin_accounts (supabase_uid, name, email, role, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-		supabaseUID, req.Name, req.Email, req.Role, adminID,
-	).Scan(&id)
+		`SELECT id, status FROM admin_accounts WHERE email=$1`, req.Email,
+	).Scan(&id, &existingStatus)
+	switch {
+	case err == nil && existingStatus != "deleted":
+		middleware.Error(w, http.StatusConflict, "DUPLICATE_EMAIL", "an admin account with this email already exists")
+		return
+	case err == nil:
+		// Revive soft-deleted account.
+		_, err = h.db.Exec(r.Context(),
+			`UPDATE admin_accounts SET supabase_uid=$1, name=$2, role=$3, status='active',
+			 deleted_at=NULL, created_by=$4 WHERE id=$5`,
+			supabaseUID, req.Name, req.Role, adminID, id)
+	default:
+		err = h.db.QueryRow(r.Context(),
+			`INSERT INTO admin_accounts (supabase_uid, name, email, role, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+			supabaseUID, req.Name, req.Email, req.Role, adminID,
+		).Scan(&id)
+	}
 	if err != nil {
-		fmt.Printf("[admin] DB insert failed: %v\n", err)
+		fmt.Printf("[admin] DB write failed: %v\n", err)
 		middleware.Error(w, http.StatusConflict, "DB_ERROR", fmt.Sprintf("failed to create admin account record: %v", err))
 		return
 	}

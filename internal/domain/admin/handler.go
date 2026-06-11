@@ -870,7 +870,8 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 		supabaseUID, req.Name, req.Email, req.Role, adminID,
 	).Scan(&id)
 	if err != nil {
-		middleware.Error(w, http.StatusConflict, "DB_ERROR", "failed to create admin account record (possibly duplicate email)")
+		fmt.Printf("[admin] DB insert failed: %v\n", err)
+		middleware.Error(w, http.StatusConflict, "DB_ERROR", fmt.Sprintf("failed to create admin account record: %v", err))
 		return
 	}
 

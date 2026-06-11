@@ -796,6 +796,13 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	adminID := middleware.GetAdminID(r)
+	// created_by is a nullable FK to admin_accounts.id. When the requester is
+	// authenticated via the users table (not admin_accounts), GetAdminID is empty;
+	// pass NULL rather than "" which fails uuid parsing (22P02).
+	var createdBy *string
+	if adminID != "" {
+		createdBy = &adminID
+	}
 
 	var supabaseUID string
 	var inviteLink string
@@ -880,11 +887,11 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 		_, err = h.db.Exec(r.Context(),
 			`UPDATE admin_accounts SET supabase_uid=$1, name=$2, role=$3, status='active',
 			 deleted_at=NULL, created_by=$4 WHERE id=$5`,
-			supabaseUID, req.Name, req.Role, adminID, id)
+			supabaseUID, req.Name, req.Role, createdBy, id)
 	default:
 		err = h.db.QueryRow(r.Context(),
 			`INSERT INTO admin_accounts (supabase_uid, name, email, role, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-			supabaseUID, req.Name, req.Email, req.Role, adminID,
+			supabaseUID, req.Name, req.Email, req.Role, createdBy,
 		).Scan(&id)
 	}
 	if err != nil {

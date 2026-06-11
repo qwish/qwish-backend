@@ -82,6 +82,27 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Not in users — check admin_accounts (invited admins have no users row)
+	if admin, aerr := h.svc.GetAdminForLogin(r.Context(), uid, req.Email); aerr == nil {
+		if admin.Status != "active" {
+			middleware.Error(w, http.StatusForbidden, "ACCOUNT_SUSPENDED", "account is suspended")
+			return
+		}
+		middleware.JSON(w, http.StatusOK, map[string]interface{}{
+			"user": map[string]interface{}{
+				"id":           admin.ID,
+				"full_name":    admin.Name,
+				"display_name": admin.Name,
+				"email":        admin.Email,
+				"role":         admin.Role,
+			},
+			"access_token":  authResp.AccessToken,
+			"refresh_token": authResp.RefreshToken,
+			"is_new_user":   false,
+		})
+		return
+	}
+
 	// New user — return tokens so they can call create-profile next
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"access_token":  authResp.AccessToken,

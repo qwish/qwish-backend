@@ -102,6 +102,26 @@ func (s *Service) GetUserBySupabaseUID(ctx context.Context, uid string) (*UserPr
 	return &u, nil
 }
 
+// GetAdminForLogin returns an active admin_accounts record matching the
+// Supabase UID or email. Invited admins may have a placeholder supabase_uid
+// (set before their auth user existed), so match by email too and self-heal
+// the stored UID to the real one on first login.
+func (s *Service) GetAdminForLogin(ctx context.Context, uid, email string) (*AdminAccount, error) {
+	var a AdminAccount
+	err := s.db.QueryRow(ctx,
+		`SELECT id, supabase_uid, name, email, role, status FROM admin_accounts
+		 WHERE (supabase_uid = $1 OR email = $2) AND deleted_at IS NULL`,
+		uid, email,
+	).Scan(&a.ID, &a.SupabaseUID, &a.Name, &a.Email, &a.Role, &a.Status)
+	if err != nil {
+		return nil, err
+	}
+	if a.SupabaseUID != uid {
+		s.db.Exec(ctx, `UPDATE admin_accounts SET supabase_uid = $1 WHERE id = $2`, uid, a.ID)
+	}
+	return &a, nil
+}
+
 // CreateUser inserts a new user into the users table.
 func (s *Service) CreateUser(ctx context.Context, supabaseUID, fullName, email, role string, institutionID *string) (UserProfile, error) {
 	var u UserProfile
@@ -194,6 +214,15 @@ type SupabaseAuthResponse struct {
 		ID    string `json:"id"`
 		Email string `json:"email"`
 	} `json:"user"`
+}
+
+type AdminAccount struct {
+	ID          string
+	SupabaseUID string
+	Name        string
+	Email       string
+	Role        string
+	Status      string
 }
 
 type UserProfile struct {

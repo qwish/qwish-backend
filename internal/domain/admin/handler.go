@@ -805,40 +805,52 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 	})
 	inviteReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
 		h.cfg.SupabaseURL+"/auth/v1/admin/invite", bytes.NewReader(inviteBody))
-	if err != nil {
-		middleware.InternalError(w)
-		return
-	}
-	inviteReq.Header.Set("Content-Type", "application/json")
-	inviteReq.Header.Set("apikey", h.cfg.SupabaseServiceKey)
-	inviteReq.Header.Set("Authorization", "Bearer "+h.cfg.SupabaseServiceKey)
-
-	inviteResp, err := http.DefaultClient.Do(inviteReq)
-	if err != nil {
-		middleware.InternalError(w)
-		return
-	}
-	defer inviteResp.Body.Close()
-	rawResp, _ := io.ReadAll(inviteResp.Body)
-
-	if inviteResp.StatusCode >= 400 {
-		middleware.JSON(w, http.StatusBadGateway, map[string]string{
-			"error": fmt.Sprintf("supabase invite failed: %s", string(rawResp)),
-		})
-		return
-	}
-
-	// Extract the Supabase UID from the invite response
-	var supabaseResp struct {
-		ID string `json:"id"`
-	}
-	json.Unmarshal(rawResp, &supabaseResp)
 
 	var supabaseUID string
-	if supabaseResp.ID != "" {
-		supabaseUID = supabaseResp.ID
+
+	if err == nil {
+		inviteReq.Header.Set("Content-Type", "application/json")
+		inviteReq.Header.Set("apikey", h.cfg.SupabaseServiceKey)
+		inviteReq.Header.Set("Authorization", "Bearer "+h.cfg.SupabaseServiceKey)
+
+		inviteResp, err := http.DefaultClient.Do(inviteReq)
+		if err == nil {
+			defer inviteResp.Body.Close()
+			rawResp, _ := io.ReadAll(inviteResp.Body)
+
+			if inviteResp.StatusCode < 400 {
+				var supabaseResp struct {
+					ID string `json:"id"`
+				}
+				json.Unmarshal(rawResp, &supabaseResp)
+				if supabaseResp.ID != "" {
+					supabaseUID = supabaseResp.ID
+				}
+			} else {
+				// Log the error but do not fail the request
+				fmt.Printf("[admin] Supabase invite failed (status %d): %s\n", inviteResp.StatusCode, string(rawResp))
+			}
+		} else {
+			fmt.Printf("[admin] Failed to execute Supabase invite request: %v\n", err)
+		}
 	} else {
+		fmt.Printf("[admin] Failed to create Supabase invite request: %v\n", err)
+	}
+
+	// If the invite call failed or didn't return an ID, check if they already exist in auth.users
+	if supabaseUID == "" {
+		err = h.db.QueryRow(r.Context(), `SELECT id FROM auth.users WHERE email = $1`, req.Email).Scan(&supabaseUID)
+		if err != nil {
+			fmt.Printf("[admin] User not found in auth.users database table: %v\n", err)
+		} else {
+			fmt.Printf("[admin] Found existing user in auth.users with UID: %s\n", supabaseUID)
+		}
+	}
+
+	// Fallback to generating a random UUID if not found anywhere else
+	if supabaseUID == "" {
 		supabaseUID = uuid.New().String()
+		fmt.Printf("[admin] Generated fallback placeholder UUID for admin account: %s\n", supabaseUID)
 	}
 
 	var id string

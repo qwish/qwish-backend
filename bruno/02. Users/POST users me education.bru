@@ -1,0 +1,26 @@
+meta {
+  name: POST /users/me/education
+  type: http
+  seq: 15
+}
+
+post {
+  url: {{baseUrl}}/users/me/education
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  {
+    "institution_name": "MIT",
+    "degree":           "B.Tech",
+    "field":            "Computer Science",
+    "start_year":       2020,
+    "end_year":         null,
+    "is_current":       true
+  }
+}

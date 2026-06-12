@@ -3,21 +3,28 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/domain/notification"
+	"github.com/qwish/backend/internal/domain/push"
 	"github.com/qwish/backend/internal/domain/scoring"
 	"github.com/qwish/backend/internal/domain/streak"
+	"github.com/qwish/backend/internal/domain/user"
 )
 
 type Scheduler struct {
 	db        *pgxpool.Pool
 	streakSvc *streak.Service
+	pushSvc   *push.Service
+	notifSvc  *notification.Service
+	userSvc   *user.Service
 }
 
-func New(db *pgxpool.Pool, streakSvc *streak.Service) *Scheduler {
-	return &Scheduler{db: db, streakSvc: streakSvc}
+func New(db *pgxpool.Pool, streakSvc *streak.Service, pushSvc *push.Service, notifSvc *notification.Service, userSvc *user.Service) *Scheduler {
+	return &Scheduler{db: db, streakSvc: streakSvc, pushSvc: pushSvc, notifSvc: notifSvc, userSvc: userSvc}
 }
 
 // ExpirePoints runs nightly. Marks points older than institution/config expiry.
@@ -139,6 +146,198 @@ func (s *Scheduler) SnapshotLeaderboard(ctx context.Context) error {
 	}
 
 	log.Println("[cron] snapshot-leaderboard done")
+	return nil
+}
+
+// SendStreakNudges pushes a reminder to users who have an active streak but
+// haven't completed a quiz today, so they don't break it. Respects the
+// push_streak_nudge preference. Intended to run in the evening (e.g. 18:00 local
+// — here scheduled in UTC by the caller).
+func (s *Scheduler) SendStreakNudges(ctx context.Context) error {
+	log.Println("[cron] running streak-nudges")
+	if s.notifSvc == nil {
+		return nil
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT u.id, u.current_streak
+		 FROM users u
+		 LEFT JOIN notification_preferences np ON np.user_id = u.id
+		 WHERE u.status='active' AND u.role IN ('student','teacher')
+		   AND u.current_streak > 0
+		   AND (u.last_completed_date IS NULL OR u.last_completed_date < CURRENT_DATE)
+		   AND COALESCE(np.push_streak_nudge, true)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type nudge struct {
+		id     string
+		streak int
+	}
+	var targets []nudge
+	for rows.Next() {
+		var n nudge
+		rows.Scan(&n.id, &n.streak)
+		targets = append(targets, n)
+	}
+	rows.Close()
+	for _, n := range targets {
+		body := fmt.Sprintf("Your %d-day streak is at risk! Complete a quiz before midnight to keep it alive.", n.streak)
+		s.notifSvc.Emit(ctx, n.id, "streak", "Keep your streak alive 🔥", body,
+			notification.WithIcon("local_fire_department"), notification.WithColor("warning"),
+			notification.WithReference("streak_nudge"))
+	}
+	log.Printf("[cron] streak-nudges done (%d sent)", len(targets))
+	return nil
+}
+
+// SendWeeklyDigests pushes each active user a summary of their past week.
+// Respects the push_weekly_digest preference. Intended to run weekly.
+func (s *Scheduler) SendWeeklyDigests(ctx context.Context) error {
+	log.Println("[cron] running weekly-digests")
+	if s.notifSvc == nil {
+		return nil
+	}
+	weekStart := time.Now().UTC().AddDate(0, 0, -7)
+	rows, err := s.db.Query(ctx,
+		`SELECT u.id, u.current_streak,
+		   COALESCE((SELECT SUM(amount) FROM points_ledger
+		             WHERE user_id=u.id AND amount>0 AND created_at >= $1),0) AS pts,
+		   (SELECT COUNT(*) FROM quiz_attempts
+		    WHERE user_id=u.id AND status='completed' AND completed_at >= $1) AS quizzes
+		 FROM users u
+		 LEFT JOIN notification_preferences np ON np.user_id = u.id
+		 WHERE u.status='active' AND u.role IN ('student','teacher')
+		   AND COALESCE(np.push_weekly_digest, true)`, weekStart)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type digest struct {
+		id      string
+		streak  int
+		points  int64
+		quizzes int
+	}
+	var targets []digest
+	for rows.Next() {
+		var d digest
+		rows.Scan(&d.id, &d.streak, &d.points, &d.quizzes)
+		targets = append(targets, d)
+	}
+	rows.Close()
+	sent := 0
+	for _, d := range targets {
+		if d.quizzes == 0 && d.points == 0 {
+			continue // nothing to report; skip silent weeks
+		}
+		body := fmt.Sprintf("This week: %d points across %d quizzes. Streak: %d days. Tap to see your full breakdown.",
+			d.points, d.quizzes, d.streak)
+		s.notifSvc.Emit(ctx, d.id, "system", "Your weekly recap 📈", body,
+			notification.WithIcon("insights"), notification.WithReference("weekly_digest"))
+		sent++
+	}
+	log.Printf("[cron] weekly-digests done (%d sent)", sent)
+	return nil
+}
+
+// SendRankChangeAlerts pushes a notification when a user's global leaderboard
+// rank improves since the last alert. Records every user's current rank so the
+// next run only fires on change. Respects the push_rank_changes preference.
+func (s *Scheduler) SendRankChangeAlerts(ctx context.Context) error {
+	log.Println("[cron] running rank-change-alerts")
+	if s.notifSvc == nil {
+		return nil
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT id, rank, last_notified_rank, notify FROM (
+		   SELECT u.id,
+		          RANK() OVER (ORDER BY u.total_points DESC) AS rank,
+		          u.last_notified_rank,
+		          COALESCE(np.push_rank_changes, true) AS notify
+		   FROM users u
+		   LEFT JOIN notification_preferences np ON np.user_id = u.id
+		   WHERE u.status='active' AND u.role IN ('student','teacher')
+		 ) ranked`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type entry struct {
+		id       string
+		rank     int
+		prevRank *int
+		notify   bool
+	}
+	var entries []entry
+	for rows.Next() {
+		var e entry
+		rows.Scan(&e.id, &e.rank, &e.prevRank, &e.notify)
+		entries = append(entries, e)
+	}
+	rows.Close()
+	sent := 0
+	for _, e := range entries {
+		// Notify only on an improvement (lower rank number) the user opted into.
+		if e.notify && e.prevRank != nil && e.rank < *e.prevRank {
+			body := fmt.Sprintf("You climbed to #%d on the global leaderboard (up from #%d). Keep going!", e.rank, *e.prevRank)
+			s.notifSvc.Emit(ctx, e.id, "rank", "You moved up the leaderboard 🏆", body,
+				notification.WithIcon("emoji_events"), notification.WithColor("success"),
+				notification.WithReference("rank_change"))
+			sent++
+		}
+		s.db.Exec(ctx, `UPDATE users SET last_notified_rank=$1 WHERE id=$2`, e.rank, e.id)
+	}
+	log.Printf("[cron] rank-change-alerts done (%d sent)", sent)
+	return nil
+}
+
+// SendWeeklyInsightsEmail emails each opted-in user their weekly score insights.
+// Respects the email_weekly_insights preference.
+func (s *Scheduler) SendWeeklyInsightsEmail(ctx context.Context) error {
+	log.Println("[cron] running weekly-insights-email")
+	if s.notifSvc == nil || s.userSvc == nil {
+		return nil
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT u.id, u.email, u.display_name, COALESCE(u.institution_id::text,'')
+		 FROM users u
+		 LEFT JOIN notification_preferences np ON np.user_id = u.id
+		 WHERE u.status='active' AND u.role IN ('student','teacher')
+		   AND u.deleted_at IS NULL
+		   AND COALESCE(np.email_weekly_insights, true)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type recipient struct {
+		id, email, name, instID string
+	}
+	var recipients []recipient
+	for rows.Next() {
+		var r recipient
+		rows.Scan(&r.id, &r.email, &r.name, &r.instID)
+		recipients = append(recipients, r)
+	}
+	rows.Close()
+	sent := 0
+	for _, r := range recipients {
+		wi, err := s.userSvc.GetWeeklyInsights(ctx, r.id, r.instID)
+		if err != nil {
+			continue
+		}
+		if wi.QuizzesThisWeek == 0 && wi.PointsThisWeek == 0 {
+			continue // skip users with no activity
+		}
+		domain := ""
+		if wi.Domain != nil {
+			domain = *wi.Domain
+		}
+		s.notifSvc.SendWeeklyInsights(ctx, r.email, r.name, wi.PointsThisWeek, wi.PointsDeltaPct,
+			wi.QuizzesThisWeek, wi.AvgScoreThisWeek, wi.CurrentStreak, domain, wi.Suggestion)
+		sent++
+	}
+	log.Printf("[cron] weekly-insights-email done (%d sent)", sent)
 	return nil
 }
 

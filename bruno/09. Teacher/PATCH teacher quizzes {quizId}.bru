@@ -1,0 +1,15 @@
+meta {
+  name: PATCH /teacher/quizzes/{quizId}
+  type: http
+  seq: 3
+}
+
+patch {
+  url: {{baseUrl}}/teacher/quizzes/:quizId
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

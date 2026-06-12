@@ -1,0 +1,19 @@
+meta {
+  name: PATCH /auth/referral-code
+  type: http
+  seq: 6
+}
+
+patch {
+  url: {{baseUrl}}/auth/referral-code
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "referral_code": "SINST-ABC" }
+}

@@ -1,0 +1,15 @@
+meta {
+  name: GET /attempts/{attemptId}
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/attempts/:attemptId
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

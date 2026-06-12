@@ -1,0 +1,19 @@
+meta {
+  name: POST /admin/users/{userId}/points
+  type: http
+  seq: 17
+}
+
+post {
+  url: {{baseUrl}}/admin/users/:userId/points
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "amount": 500, "reason": "Competition winner bonus" }
+}

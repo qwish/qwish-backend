@@ -1,0 +1,22 @@
+meta {
+  name: PATCH /teacher/topic-requests/{requestId}
+  type: http
+  seq: 10
+}
+
+patch {
+  url: {{baseUrl}}/teacher/topic-requests/:requestId
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  {
+    "status":      "in_progress",
+    "assigned_to": "teacher-uuid"
+  }
+}

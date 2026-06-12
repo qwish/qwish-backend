@@ -1,0 +1,15 @@
+meta {
+  name: GET /teacher/quizzes
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/teacher/quizzes
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

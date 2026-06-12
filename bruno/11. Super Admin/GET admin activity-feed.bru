@@ -1,0 +1,15 @@
+meta {
+  name: GET /admin/activity-feed
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/admin/activity-feed
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

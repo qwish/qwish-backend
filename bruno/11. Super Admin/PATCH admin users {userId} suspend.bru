@@ -1,0 +1,19 @@
+meta {
+  name: PATCH /admin/users/{userId}/suspend
+  type: http
+  seq: 14
+}
+
+patch {
+  url: {{baseUrl}}/admin/users/:userId/suspend
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "reason": "Abuse of platform" }
+}

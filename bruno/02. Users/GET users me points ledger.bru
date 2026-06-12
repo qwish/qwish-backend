@@ -1,0 +1,15 @@
+meta {
+  name: GET /users/me/points/ledger
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{baseUrl}}/users/me/points/ledger
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

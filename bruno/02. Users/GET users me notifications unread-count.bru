@@ -1,0 +1,15 @@
+meta {
+  name: GET /users/me/notifications/unread-count
+  type: http
+  seq: 23
+}
+
+get {
+  url: {{baseUrl}}/users/me/notifications/unread-count
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

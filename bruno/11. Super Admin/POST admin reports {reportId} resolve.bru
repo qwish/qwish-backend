@@ -1,0 +1,19 @@
+meta {
+  name: POST /admin/reports/{reportId}/resolve
+  type: http
+  seq: 27
+}
+
+post {
+  url: {{baseUrl}}/admin/reports/:reportId/resolve
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "resolution": "remove_quiz" }
+}

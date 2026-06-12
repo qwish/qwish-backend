@@ -1,0 +1,18 @@
+meta {
+  name: POST /auth/verify-otp
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/auth/verify-otp
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "email": "alice@example.com",
+    "otp":   "123456"
+  }
+}

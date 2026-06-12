@@ -1,0 +1,19 @@
+meta {
+  name: POST /admin/quizzes/{quizId}/unpublish
+  type: http
+  seq: 25
+}
+
+post {
+  url: {{baseUrl}}/admin/quizzes/:quizId/unpublish
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "reason": "Policy violation" }
+}

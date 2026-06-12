@@ -1,0 +1,15 @@
+meta {
+  name: GET /quizzes/{quizId}/share
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseUrl}}/quizzes/:quizId/share
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

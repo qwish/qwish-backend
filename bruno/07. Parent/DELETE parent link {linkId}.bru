@@ -1,0 +1,15 @@
+meta {
+  name: DELETE /parent/link/{linkId}
+  type: http
+  seq: 4
+}
+
+delete {
+  url: {{baseUrl}}/parent/link/:linkId
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/qwish/backend/internal/middleware"
@@ -118,6 +119,7 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		FullName     string `json:"full_name"`
 		ReferralCode string `json:"referral_code"`
+		InviteToken  string `json:"invite_token"` // teacher email-invite token
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
@@ -133,7 +135,30 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 
 	var instID *string
 	role := "student"
-	if req.ReferralCode != "" {
+	var acceptedInviteID string
+	switch {
+	case req.InviteToken != "":
+		inv, err := h.svc.GetTeacherInviteByToken(r.Context(), req.InviteToken)
+		if err != nil {
+			middleware.NotFound(w, "invite")
+			return
+		}
+		if inv.Status != "pending" {
+			middleware.Error(w, http.StatusGone, "INVITE_"+strings.ToUpper(inv.Status),
+				"this invite is "+inv.Status)
+			return
+		}
+		// The invite is bound to the email it was sent to; the authenticated
+		// Supabase session must match it.
+		if !strings.EqualFold(inv.Email, email) {
+			middleware.Error(w, http.StatusForbidden, "INVITE_EMAIL_MISMATCH",
+				"this invite was issued for a different email address")
+			return
+		}
+		instID = &inv.InstitutionID
+		role = "teacher"
+		acceptedInviteID = inv.ID
+	case req.ReferralCode != "":
 		id, assignedRole, err := h.svc.FindInstitutionByReferralCode(r.Context(), req.ReferralCode)
 		if err != nil {
 			middleware.BadRequest(w, "invalid or inactive referral code")
@@ -155,6 +180,12 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if acceptedInviteID != "" {
+		if err := h.svc.MarkTeacherInviteAccepted(r.Context(), acceptedInviteID); err != nil {
+			log.Printf("CreateProfile: failed to mark teacher invite %s accepted: %v", acceptedInviteID, err)
+		}
+	}
+
 	var instData interface{}
 	if instID != nil {
 		instData = map[string]string{"id": *instID, "name": h.svc.GetInstitutionName(r.Context(), *instID)}
@@ -169,6 +200,29 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 			"role":         newUser.Role,
 			"institution":  instData,
 		},
+	})
+}
+
+// GET /api/v1/auth/teacher-invite?token=<token>
+// Public. Lets the teacher-signup page validate an invite link and prefill the
+// form. Returns the invite's email, optional name, institution and status.
+func (h *Handler) GetTeacherInvite(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		middleware.BadRequest(w, "token is required")
+		return
+	}
+	inv, err := h.svc.GetTeacherInviteByToken(r.Context(), token)
+	if err != nil {
+		middleware.NotFound(w, "invite")
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]interface{}{
+		"email":            inv.Email,
+		"name":             inv.Name,
+		"institution_name": inv.InstitutionName,
+		"status":           inv.Status,
+		"expires_at":       inv.ExpiresAt,
 	})
 }
 

@@ -1,0 +1,15 @@
+meta {
+  name: PATCH /users/me/notifications/{id}/read
+  type: http
+  seq: 25
+}
+
+patch {
+  url: {{baseUrl}}/users/me/notifications/:id/read
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

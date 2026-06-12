@@ -1,0 +1,15 @@
+meta {
+  name: GET /users/me/profile-views
+  type: http
+  seq: 12
+}
+
+get {
+  url: {{baseUrl}}/users/me/profile-views
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

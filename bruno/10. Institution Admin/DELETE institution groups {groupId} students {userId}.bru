@@ -1,0 +1,11 @@
+meta {
+  name: DELETE /institution/groups/{groupId}/students/{userId}
+  type: http
+  seq: 15
+}
+
+delete {
+  url: {{baseUrl}}/institution/groups/:groupId/students/:userId
+  body: none
+  auth: none
+}

@@ -1,0 +1,19 @@
+meta {
+  name: POST /admin/sponsorship-requests/{requestId}/reject
+  type: http
+  seq: 49
+}
+
+post {
+  url: {{baseUrl}}/admin/sponsorship-requests/:requestId/reject
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "reason": "Brand does not meet content guidelines." }
+}

@@ -1,0 +1,19 @@
+meta {
+  name: PATCH /users/me/domain
+  type: http
+  seq: 20
+}
+
+patch {
+  url: {{baseUrl}}/users/me/domain
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "domain": "Computer Science" }
+}

@@ -20,6 +20,7 @@ import (
 	"github.com/qwish/backend/internal/domain/institution"
 	"github.com/qwish/backend/internal/domain/leaderboard"
 	"github.com/qwish/backend/internal/domain/notification"
+	"github.com/qwish/backend/internal/domain/offline"
 	"github.com/qwish/backend/internal/domain/onboarding"
 	"github.com/qwish/backend/internal/domain/parent"
 	"github.com/qwish/backend/internal/domain/points"
@@ -27,6 +28,7 @@ import (
 	"github.com/qwish/backend/internal/domain/quiz"
 	"github.com/qwish/backend/internal/domain/scoring"
 	"github.com/qwish/backend/internal/domain/streak"
+	"github.com/qwish/backend/internal/domain/studygroup"
 	"github.com/qwish/backend/internal/domain/teacher"
 	"github.com/qwish/backend/internal/domain/topicrequest"
 	"github.com/qwish/backend/internal/domain/upload"
@@ -56,7 +58,9 @@ func main() {
 	})
 	attemptSvc.SetNotifier(notifSvc)
 	r2Client := storage.NewR2Client(cfg)
-	sched := scheduler.New(pool, streakSvc)
+	offlineSvc := offline.NewService(pool)
+	studyGroupSvc := studygroup.NewService(pool)
+	sched := scheduler.New(pool, streakSvc, pushSvc, notifSvc, userSvc)
 
 	// Handlers
 	authH := auth.NewHandler(authSvc)
@@ -69,13 +73,15 @@ func main() {
 	parentH := parent.NewHandler(pool)
 	topicH := topicrequest.NewHandler(pool)
 	uploadH := upload.NewHandler(r2Client)
-	institutionH := institution.NewHandler(pool, notifSvc)
+	institutionH := institution.NewHandler(pool, notifSvc, cfg.AppURL)
 	teacherH := teacher.NewHandler(pool)
 	adminH := admin.NewHandler(pool, cfg, notifSvc)
 	onboardingH := onboarding.NewHandler(pool)
 	contactH := contact.NewHandler(pool)
 	notifH := notification.NewHandler(notifSvc)
 	pushH := push.NewHandler(pool)
+	offlineH := offline.NewHandler(offlineSvc)
+	studyGroupH := studygroup.NewHandler(studyGroupSvc)
 
 	_ = notifSvc
 	_ = scoring.LoadConfig // referenced by services
@@ -84,7 +90,6 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
-	r.Use(chimw.Timeout(30 * time.Second))
 	allowedOrigins := buildOriginSet(cfg.AllowedOrigins)
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -115,8 +120,18 @@ func main() {
 	// ==========================================
 	r.Route("/api/v1", func(r chi.Router) {
 
-		// ------ Public Institution Onboarding ------
-		r.Route("/onboarding", func(r chi.Router) {
+		// Stream route must bypass the 30s timeout middleware
+		r.Group(func(r chi.Router) {
+			r.Use(mw.Authenticate(cfg.SupabaseJWTSecret, cfg.SupabaseURL, pool))
+			r.Get("/users/me/notifications/stream", notifH.Stream)
+		})
+
+		// Normal endpoints subject to 30s timeout
+		r.Group(func(r chi.Router) {
+			r.Use(chimw.Timeout(30 * time.Second))
+
+			// ------ Public Institution Onboarding ------
+			r.Route("/onboarding", func(r chi.Router) {
 			r.Post("/institution", onboardingH.RegisterInstitution)
 			r.Get("/institution/status", onboardingH.CheckStatus)
 		})
@@ -129,6 +144,7 @@ func main() {
 			r.Post("/send-otp", authH.SendOTP)
 			r.Post("/verify-otp", authH.VerifyOTP)
 			r.Post("/refresh", authH.Refresh)
+			r.Get("/teacher-invite", authH.GetTeacherInvite)
 
 			// JWT-only (user may not exist in DB yet)
 			r.Group(func(r chi.Router) {
@@ -177,6 +193,36 @@ func main() {
 			r.Get("/users/me/recommendations", userH.GetMyRecommendations)
 			r.Get("/users/me/report-card", userH.GetMyReportCardPDF)
 			r.Get("/users/{userId}/profile", userH.GetPublicProfile)
+
+			// Settings: dark mode (theme) + privacy (private-by-default / recruiter visibility)
+			r.Get("/users/me/settings", userH.GetMySettings)
+			r.Patch("/users/me/settings", userH.UpdateMySettings)
+
+			// Notification preferences (push alerts opt-in/out)
+			r.Get("/users/me/notification-preferences", userH.GetMyNotifPrefs)
+			r.Patch("/users/me/notification-preferences", userH.UpdateMyNotifPrefs)
+
+			// Weekly score insights
+			r.Get("/users/me/insights/weekly", userH.GetMyWeeklyInsights)
+
+			// Offline mode: prefetch practice pack + sync offline results
+			r.Get("/offline/pack", offlineH.GetPack)
+			r.Post("/offline/sync", offlineH.Sync)
+
+			// Social: batchmate follows
+			r.Post("/users/{userId}/follow", studyGroupH.Follow)
+			r.Delete("/users/{userId}/follow", studyGroupH.Unfollow)
+			r.Get("/users/me/following", studyGroupH.Following)
+			r.Get("/users/me/followers", studyGroupH.Followers)
+
+			// Study groups (private leagues)
+			r.Post("/study-groups", studyGroupH.Create)
+			r.Get("/study-groups", studyGroupH.ListMine)
+			r.Post("/study-groups/join", studyGroupH.Join)
+			r.Get("/study-groups/{groupId}", studyGroupH.Get)
+			r.Delete("/study-groups/{groupId}", studyGroupH.Archive)
+			r.Post("/study-groups/{groupId}/leave", studyGroupH.Leave)
+			r.Get("/study-groups/{groupId}/leaderboard", studyGroupH.Leaderboard)
 
 			// Quiz browser (student / teacher)
 			r.Get("/quizzes", quizH.List)
@@ -237,6 +283,7 @@ func main() {
 			r.Route("/upload", func(r chi.Router) {
 				r.Use(mw.RequireRole("teacher", "super_admin", "moderator"))
 				r.Post("/image", uploadH.UploadImage)
+				r.Post("/presign", uploadH.PresignUpload)
 			})
 
 			// ---- Institution Admin routes ----
@@ -359,37 +406,68 @@ func main() {
 			})
 		})
 
-		// ---- Internal cron endpoints ----
-		r.Route("/internal/cron", func(r chi.Router) {
-			r.Use(mw.RequireCronSecret(cfg.CronSecret))
-			r.Post("/expire-points", func(w http.ResponseWriter, r *http.Request) {
-				if err := sched.ExpirePoints(r.Context()); err != nil {
-					mw.InternalError(w)
-					return
-				}
-				mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+		// ---- Internal cron endpoints (development/manual trigger only) ----
+		if cfg.AppEnv != "production" {
+			r.Route("/internal/cron", func(r chi.Router) {
+				r.Use(mw.RequireCronSecret(cfg.CronSecret))
+				r.Post("/expire-points", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.ExpirePoints(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/reset-streaks", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.ResetStreaks(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/snapshot-leaderboard", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.SnapshotLeaderboard(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/close-expired-quizzes", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.CloseExpiredQuizzes(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/streak-nudges", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.SendStreakNudges(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/weekly-digests", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.SendWeeklyDigests(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/rank-change-alerts", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.SendRankChangeAlerts(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/weekly-insights-email", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.SendWeeklyInsightsEmail(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
 			})
-			r.Post("/reset-streaks", func(w http.ResponseWriter, r *http.Request) {
-				if err := sched.ResetStreaks(r.Context()); err != nil {
-					mw.InternalError(w)
-					return
-				}
-				mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-			})
-			r.Post("/snapshot-leaderboard", func(w http.ResponseWriter, r *http.Request) {
-				if err := sched.SnapshotLeaderboard(r.Context()); err != nil {
-					mw.InternalError(w)
-					return
-				}
-				mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-			})
-			r.Post("/close-expired-quizzes", func(w http.ResponseWriter, r *http.Request) {
-				if err := sched.CloseExpiredQuizzes(r.Context()); err != nil {
-					mw.InternalError(w)
-					return
-				}
-				mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-			})
+		}
 		})
 	})
 
@@ -494,6 +572,44 @@ func runInProcessCron(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
 			next := time.Date(now.Year(), now.Month(), now.Day()+daysUntilMonday, 0, 1, 0, 0, time.UTC)
 			time.Sleep(time.Until(next))
 			sched.SnapshotLeaderboard(context.Background())
+		}
+	}()
+
+	// Rank-change alerts daily at 00:10 UTC (after streaks/points settle)
+	go func() {
+		for {
+			now := time.Now().UTC()
+			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 10, 0, 0, time.UTC)
+			time.Sleep(time.Until(next))
+			sched.SendRankChangeAlerts(context.Background())
+		}
+	}()
+
+	// Streak nudges daily at 14:00 UTC (evening across IST users)
+	go func() {
+		for {
+			now := time.Now().UTC()
+			next := time.Date(now.Year(), now.Month(), now.Day(), 14, 0, 0, 0, time.UTC)
+			if !next.After(now) {
+				next = next.AddDate(0, 0, 1)
+			}
+			time.Sleep(time.Until(next))
+			sched.SendStreakNudges(context.Background())
+		}
+	}()
+
+	// Weekly digest push + insights email every Monday 08:00 UTC
+	go func() {
+		for {
+			now := time.Now().UTC()
+			daysUntilMonday := (8 - int(now.Weekday())) % 7
+			if daysUntilMonday == 0 {
+				daysUntilMonday = 7
+			}
+			next := time.Date(now.Year(), now.Month(), now.Day()+daysUntilMonday, 8, 0, 0, 0, time.UTC)
+			time.Sleep(time.Until(next))
+			sched.SendWeeklyDigests(context.Background())
+			sched.SendWeeklyInsightsEmail(context.Background())
 		}
 	}()
 }

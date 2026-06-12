@@ -1,0 +1,15 @@
+meta {
+  name: GET /users/me/education
+  type: http
+  seq: 14
+}
+
+get {
+  url: {{baseUrl}}/users/me/education
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

@@ -740,6 +740,157 @@ No content.
 
 ---
 
+## GET `/users/me/notifications/stream`
+**Auth required:** Yes
+
+Streams real-time in-app notifications to the client using Server-Sent Events (SSE).
+
+### Response `200`
+`Content-Type: text/event-stream`
+
+Event payload:
+```json
+{
+  "id": "uuid",
+  "kind": "streak_milestone",
+  "title": "Streak Milestone!",
+  "body": "You have reached a 7-day streak!",
+  "icon": "fire",
+  "color": "#FF5733",
+  "reference": "streak_id",
+  "read_at": null,
+  "created_at": "2026-06-12T10:00:00Z"
+}
+```
+
+---
+
+## GET `/users/me/notifications`
+**Auth required:** Yes
+
+Returns a paginated list of in-app notifications and the unread notification count.
+
+### Query Params
+`page`, `limit`
+
+### Response `200` (paginated)
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "kind": "streak_milestone",
+      "title": "Streak Milestone!",
+      "body": "You have reached a 7-day streak!",
+      "icon": "fire",
+      "color": "#FF5733",
+      "reference": "streak_id",
+      "read_at": null,
+      "created_at": "2026-06-12T10:00:00Z"
+    }
+  ],
+  "unread": 1
+}
+```
+
+---
+
+## GET `/users/me/notifications/unread-count`
+**Auth required:** Yes
+
+Returns the count of unread notifications.
+
+### Response `200`
+```json
+{
+  "unread": 1
+}
+```
+
+---
+
+## PATCH `/users/me/notifications/read-all`
+**Auth required:** Yes
+
+Marks all of the user's notifications as read.
+
+### Response `204`
+No content.
+
+---
+
+## PATCH `/users/me/notifications/{id}/read`
+**Auth required:** Yes
+
+Marks a specific notification as read.
+
+### Response `204`
+No content.
+
+---
+
+## POST `/users/me/devices`
+**Auth required:** Yes
+
+Registers or refreshes a push device token (FCM token) for mobile push notifications.
+
+### Request Body
+```json
+{
+  "token": "fcm_token_string",
+  "platform": "ios",
+  "app_version": "1.0.0",
+  "locale": "en-US"
+}
+```
+
+`platform` should be one of `ios`, `android`, or `web` (defaults to `unknown` if unrecognized).
+
+### Response `204`
+No content.
+
+---
+
+## DELETE `/users/me/devices/{token}`
+**Auth required:** Yes
+
+Unregisters a device token (e.g. on logout or app uninstall).
+
+### Response `204`
+No content.
+
+---
+
+## GET `/users/me/recommendations`
+**Auth required:** Yes
+
+Returns a list of up to 5 personalized quiz recommendations (quizzes in the user's institution or public that the user has not completed).
+
+### Response `200`
+```json
+[
+  {
+    "id": "uuid",
+    "title": "Introduction to Geometry",
+    "description": "Basic concepts of geometry, lines, and angles.",
+    "question_count": 10,
+    "type": "practice"
+  }
+]
+```
+
+---
+
+## GET `/users/me/report-card`
+**Auth required:** Yes
+
+Generates and downloads a verified PDF report card for the user.
+
+### Response `200`
+`Content-Type: application/pdf` with PDF binary data.
+
+---
+
 # 3. Quizzes
 
 ## GET `/quizzes`
@@ -1163,6 +1314,33 @@ Revokes an active parent-student link.
 
 # 8. Upload
 
+## POST `/upload/presign`
+**Auth required:** Yes (teacher, super_admin, moderator)
+
+Generates a presigned S3 PUT URL for uploading files directly to cloud storage (R2).
+
+### Request Body
+```json
+{
+  "content_type": "image/jpeg",
+  "prefix": "quiz-images"
+}
+```
+
+`prefix` is optional (defaults to `quiz-images`). `content_type` must be one of `image/jpeg`, `image/png`, or `image/webp`.
+
+### Response `200`
+```json
+{
+  "upload_url": "https://<bucket>.r2.cloudflarestorage.com/quiz-images/uuid.jpg?X-Amz-...",
+  "public_url": "https://media.yourdomain.com/quiz-images/uuid.jpg",
+  "key": "quiz-images/uuid.jpg",
+  "expires_in": 300
+}
+```
+
+---
+
 ## POST `/upload/image`
 **Auth required:** Yes (teacher, super_admin, moderator)
 **Content-Type:** `multipart/form-data`
@@ -1328,8 +1506,247 @@ Array of topic requests from students in the same institution.
 ```
 
 ### Response `200`
-```json
 { "message": "updated" }
+
+---
+
+## GET `/teacher/overview`
+**Auth required:** Yes (teacher)
+
+Returns a summary overview for the teacher dashboard.
+
+### Response `200`
+```json
+{
+  "drafts": 3,
+  "pending_review": 1,
+  "published": 5,
+  "total_attempts": 42,
+  "average_score": 78.5,
+  "open_topic_requests": 2,
+  "recent_attempts": [
+    {
+      "attempt_id": "uuid",
+      "quiz_id": "uuid",
+      "quiz_title": "Math Quiz",
+      "student_id": "uuid",
+      "student_name": "John Doe",
+      "score_pct": 90.0,
+      "completed_at": "2026-06-12T10:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+## DELETE `/teacher/quizzes/{quizId}`
+**Auth required:** Yes (teacher - own quizzes only)
+
+Deletes a quiz.
+
+### Response `200`
+```json
+{ "message": "quiz deleted" }
+```
+
+---
+
+## POST `/teacher/quizzes/{quizId}/unpublish`
+**Auth required:** Yes (teacher - own quizzes only)
+
+Unpublishes a quiz, changing its status back to `draft`.
+
+### Response `200`
+```json
+{ "status": "draft" }
+```
+
+---
+
+## PATCH `/teacher/quizzes/{quizId}/questions/order`
+**Auth required:** Yes (teacher - own quizzes only)
+
+Reorders the questions in a quiz.
+
+### Request Body
+```json
+{
+  "order": ["question-uuid-1", "question-uuid-2", "question-uuid-3"]
+}
+```
+
+All question UUIDs in the quiz must be provided in the desired order.
+
+### Response `200`
+```json
+{ "message": "questions reordered" }
+```
+
+---
+
+## GET `/teacher/students`
+**Auth required:** Yes (teacher)
+
+List students in the institution. If the teacher is assigned to specific groups, this list is restricted to students in those groups.
+
+### Query Params
+`page`, `limit`, `search` (name or email), `class_id` (restrict to a specific group/class), `sort` (`total_points`, `average_score`, `last_active`)
+
+### Response `200` (paginated)
+```json
+[
+  {
+    "id": "uuid",
+    "display_name": "Jane Doe",
+    "email": "jane@example.com",
+    "total_points": 1500,
+    "current_streak": 5,
+    "last_active_at": "2026-06-12T10:00:00Z",
+    "status": "active",
+    "average_score": 85.5
+  }
+]
+```
+
+---
+
+## GET `/teacher/students/{userId}`
+**Auth required:** Yes (teacher)
+
+Returns detailed information about a student, including stats and quiz history restricted to this teacher's quizzes.
+
+### Response `200`
+```json
+{
+  "id": "uuid",
+  "display_name": "Jane Doe",
+  "email": "jane@example.com",
+  "status": "active",
+  "total_points": 1500,
+  "current_streak": 5,
+  "longest_streak": 10,
+  "average_score": 85.5,
+  "quizzes_taken": 8,
+  "member_since": "2026-01-01T00:00:00Z",
+  "quiz_history": [
+    {
+      "id": "attempt-uuid",
+      "quiz_id": "quiz-uuid",
+      "quiz_title": "Math Quiz",
+      "score_pct": 90.0,
+      "points_delta": 50,
+      "completed_at": "2026-06-12T10:00:00Z"
+    }
+  ],
+  "classes": [
+    {
+      "id": "class-uuid",
+      "name": "Class 10-A"
+    }
+  ]
+}
+```
+
+---
+
+## GET `/teacher/classes`
+**Auth required:** Yes (teacher)
+
+Returns a list of classes (groups) assigned to the teacher.
+
+### Response `200`
+```json
+[
+  {
+    "id": "uuid",
+    "name": "Class 10-A",
+    "description": "Sophomore Math class",
+    "invite_code": "INV123",
+    "created_at": "2026-01-01T00:00:00Z",
+    "student_count": 25
+  }
+]
+```
+
+---
+
+## GET `/teacher/classes/{classId}`
+**Auth required:** Yes (teacher)
+
+Returns details of a specific class, including the list of students in the class.
+
+### Response `200`
+```json
+{
+  "id": "uuid",
+  "name": "Class 10-A",
+  "description": "Sophomore Math class",
+  "invite_code": "INV123",
+  "created_at": "2026-01-01T00:00:00Z",
+  "student_count": 25,
+  "average_score": 78.2,
+  "students": [
+    {
+      "id": "uuid",
+      "display_name": "Jane Doe",
+      "email": "jane@example.com",
+      "total_points": 1500,
+      "current_streak": 5,
+      "last_active_at": "2026-06-12T10:00:00Z",
+      "status": "active",
+      "average_score": 85.5
+    }
+  ]
+}
+```
+
+---
+
+## GET `/teacher/reports/quiz-analytics`
+**Auth required:** Yes (teacher)
+
+Returns an analytical report for quizzes created by the teacher.
+
+### Query Params
+`page`, `limit`, `date_from` (ISO date `YYYY-MM-DD`), `date_to` (ISO date `YYYY-MM-DD`)
+
+### Response `200` (paginated)
+```json
+[
+  {
+    "quiz_id": "uuid",
+    "title": "Math Quiz",
+    "completion_rate": 88.0,
+    "score_dist_high": 15,
+    "score_dist_mid": 7,
+    "score_dist_low": 3
+  }
+]
+```
+
+---
+
+## GET `/teacher/reports/student-performance`
+**Auth required:** Yes (teacher)
+
+Returns a performance report for students under the teacher's instruction.
+
+### Query Params
+`class_id`, `date_from` (ISO date `YYYY-MM-DD`), `date_to` (ISO date `YYYY-MM-DD`)
+
+### Response `200`
+```json
+[
+  {
+    "id": "uuid",
+    "display_name": "Jane Doe",
+    "total_points": 1500,
+    "current_streak": 5,
+    "quizzes_taken": 8,
+    "average_score": 85.5
+  }
+]
 ```
 
 ---
@@ -2704,7 +3121,7 @@ Sends an email invitation to join the institution as a teacher.
 
 ### Notes
 - A duplicate invite for the same email + institution is rejected while a **pending, non-expired** invite exists.
-- The invite link is `https://app.quizapp.in/auth/teacher-signup?token=<token>`.
+- The invite link is `https://app.qwish.in/auth/teacher-signup?token=<token>`.
 
 ---
 
@@ -2759,3 +3176,157 @@ Returns a paginated list of all outbound email send attempts (newest first).
 | `institution_rejection` | Admin rejects an institution |
 | `password_reset` | Admin triggers a password reset |
 | `teacher_invite:<uuid>` | Institution admin sends a teacher invite |
+
+---
+
+# App Features (Offline · Push Alerts · Dark Mode · Study Groups · Privacy · Insights)
+
+All endpoints below require a Bearer token unless noted. Standard response shape applies.
+
+## Settings — Dark Mode & Privacy
+
+### GET `/users/me/settings`
+```json
+{ "theme": "auto", "profile_private": true, "recruiter_visible": false }
+```
+`theme` ∈ `auto | light | dark`. Profiles are **private by default**; `recruiter_visible=true` opts the user into public/recruiter discovery.
+
+### PATCH `/users/me/settings`
+Body (all fields optional):
+```json
+{ "theme": "dark", "profile_private": false, "recruiter_visible": true }
+```
+Returns the updated settings. `400 BAD_REQUEST` for an invalid `theme`.
+
+> Privacy enforcement: `GET /users/{userId}/profile` returns `403 PROFILE_PRIVATE` unless the viewer is the owner, a follower, or the target has `recruiter_visible=true`.
+
+## Push Alerts — Notification Preferences
+
+### GET `/users/me/notification-preferences`
+```json
+{
+  "push_rank_changes": true,
+  "push_weekly_digest": true,
+  "push_streak_nudge": true,
+  "push_study_group": true,
+  "email_weekly_insights": true
+}
+```
+Missing row ⇒ all categories enabled by default.
+
+### PATCH `/users/me/notification-preferences`
+Body: any subset of the boolean keys above. Returns the merged preferences.
+
+Push alerts are delivered via FCM (existing `/users/me/devices` registration) and also stored as in-app notifications. Cron-driven categories:
+- **Rank changes** — daily; fires when global rank improves.
+- **Streak nudges** — daily evening; fires if an active streak hasn't been continued today.
+- **Weekly digest** — Mondays; weekly recap push.
+
+## Score Insights
+
+### GET `/users/me/insights/weekly`
+```json
+{
+  "week_start": "2026-06-05T00:00:00Z",
+  "week_end": "2026-06-12T00:00:00Z",
+  "points_this_week": 420,
+  "points_last_week": 300,
+  "points_delta_pct": 40,
+  "quizzes_this_week": 7,
+  "avg_score_this_week": 78.5,
+  "current_streak": 5,
+  "domain": "Software",
+  "domain_rank": 12,
+  "suggestion": "Strong week! Keep the streak alive and aim to climb your domain leaderboard."
+}
+```
+The same breakdown is emailed weekly to users with `email_weekly_insights=true`.
+
+## Offline Mode
+
+### GET `/offline/pack?since=<version>`
+Returns the bundle of practice quizzes (`type=knowledge_check`, published, visible to the user) **including correct answers** so grading happens on-device. Practice is non-competitive (no points, no leaderboard).
+```json
+{
+  "version": "2026-06-10T11:02:33.21Z",
+  "count": 24,
+  "quizzes": [
+    {
+      "id": "uuid", "title": "Arithmetic Basics", "type": "knowledge_check",
+      "question_count": 10, "updated_at": "2026-06-10T11:02:33Z",
+      "questions": [
+        { "id": "uuid", "position": 1, "type": "mcq", "prompt": "2+2?",
+          "options": [...], "correct_answer": [...], "time_limit_seconds": 30, "clues": [...] }
+      ]
+    }
+  ],
+  "changed": true
+}
+```
+Pass the last `version` as `?since=`; if unchanged the response has `changed=false` and an empty `quizzes` array (keep your cache).
+
+### POST `/offline/sync`
+Uploads practice sessions completed offline. Idempotent on `id` (client-generated UUID). Max 200 per batch.
+```json
+{
+  "results": [
+    {
+      "id": "client-uuid", "quiz_id": "uuid",
+      "total_questions": 10, "correct_count": 8, "score_pct": 80,
+      "answers": [ ... ], "completed_at": "2026-06-12T09:00:00Z"
+    }
+  ]
+}
+```
+Response: `{ "received": 1, "stored": 1 }` (`stored` counts only newly-persisted, not re-syncs).
+
+## Study Groups (Private Leagues) & Follows
+
+### POST `/study-groups`
+Body: `{ "name": "Batch 2026", "description": "optional" }` → creates a group, caller becomes owner & first member. Returns the group with a unique `invite_code`.
+
+### GET `/study-groups`
+Lists groups the caller belongs to (each with `member_count` and the caller's `role`).
+
+### GET `/study-groups/{groupId}`
+Group detail. `404` if the caller isn't a member.
+
+### POST `/study-groups/join`
+Body: `{ "invite_code": "ABC12XYZ" }` → joins the group. Returns the group. `404` if code invalid.
+
+### POST `/study-groups/{groupId}/leave`
+Leaves the group. `403 OWNER_CANNOT_LEAVE` for the owner (archive instead).
+
+### DELETE `/study-groups/{groupId}`
+Archives the group (owner only, `403` otherwise).
+
+### GET `/study-groups/{groupId}/leaderboard`
+Members ranked by total points (private league). `403` if not a member.
+```json
+[ { "user_id": "uuid", "display_name": "Asha", "role": "owner",
+    "total_points": 5200, "current_streak": 9, "joined_at": "..." } ]
+```
+
+### Follows (batchmates)
+- `POST /users/{userId}/follow` — follow a user (`400` self, `404` unknown). `204`.
+- `DELETE /users/{userId}/follow` — unfollow. `204`.
+- `GET /users/me/following` — users you follow.
+- `GET /users/me/followers` — users following you, each with `is_following` (follow-back flag).
+
+## GET `/auth/teacher-invite?token=<token>` (public)
+Validates a teacher invite link and returns details for the signup page:
+```json
+{ "email": "teacher@school.edu", "name": "Anil Mehta",
+  "institution_name": "Springfield High", "status": "pending",
+  "expires_at": "2026-06-19T10:00:00Z" }
+```
+`status` ∈ `pending | accepted | expired | revoked`. `404` for unknown token.
+
+## Accepting a teacher invite
+The invited teacher authenticates via OTP (`/auth/send-otp` → `/auth/verify-otp`) **with the invited email**, then calls `POST /auth/create-profile` with:
+```json
+{ "full_name": "Anil Mehta", "invite_token": "<token from the email link>" }
+```
+The account is created with `role=teacher` linked to the inviting institution, and the invite is marked `accepted`.
+Errors: `404 NOT_FOUND` (bad token) · `410 INVITE_EXPIRED|INVITE_ACCEPTED|INVITE_REVOKED` · `403 INVITE_EMAIL_MISMATCH` (session email ≠ invited email).
+`invite_token` takes precedence over `referral_code` when both are sent.

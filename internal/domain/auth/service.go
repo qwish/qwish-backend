@@ -139,6 +139,43 @@ func (s *Service) CreateUser(ctx context.Context, supabaseUID, fullName, email, 
 	return u, nil
 }
 
+// TeacherInvite is a pending teacher invitation looked up by its email token.
+type TeacherInvite struct {
+	ID              string    `json:"id"`
+	InstitutionID   string    `json:"institution_id"`
+	InstitutionName string    `json:"institution_name"`
+	Email           string    `json:"email"`
+	Name            *string   `json:"name,omitempty"`
+	Status          string    `json:"status"` // 'pending' | 'accepted' | 'expired' | 'revoked'
+	ExpiresAt       time.Time `json:"expires_at"`
+}
+
+// GetTeacherInviteByToken fetches an invite (any status) by its token. A
+// pending invite past expires_at is reported with status 'expired'.
+func (s *Service) GetTeacherInviteByToken(ctx context.Context, token string) (*TeacherInvite, error) {
+	inv := &TeacherInvite{}
+	err := s.db.QueryRow(ctx,
+		`SELECT ti.id, ti.institution_id, i.name, ti.email, ti.name, ti.status, ti.expires_at
+		 FROM teacher_invites ti
+		 JOIN institutions i ON i.id = ti.institution_id
+		 WHERE ti.token = $1`, token,
+	).Scan(&inv.ID, &inv.InstitutionID, &inv.InstitutionName, &inv.Email, &inv.Name, &inv.Status, &inv.ExpiresAt)
+	if err != nil {
+		return nil, err
+	}
+	if inv.Status == "pending" && time.Now().After(inv.ExpiresAt) {
+		inv.Status = "expired"
+	}
+	return inv, nil
+}
+
+// MarkTeacherInviteAccepted flags the invite consumed.
+func (s *Service) MarkTeacherInviteAccepted(ctx context.Context, inviteID string) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE teacher_invites SET status='accepted', accepted_at=now() WHERE id=$1`, inviteID)
+	return err
+}
+
 // FindInstitutionByReferralCode looks up an institution by student or teacher code.
 func (s *Service) FindInstitutionByReferralCode(ctx context.Context, code string) (string, string, error) {
 	var instID, role string

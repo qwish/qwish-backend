@@ -1,0 +1,15 @@
+meta {
+  name: POST /admin/brands/{brandId}/approve
+  type: http
+  seq: 44
+}
+
+post {
+  url: {{baseUrl}}/admin/brands/:brandId/approve
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

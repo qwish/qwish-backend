@@ -1,0 +1,15 @@
+meta {
+  name: GET /users/me/recommendations
+  type: http
+  seq: 28
+}
+
+get {
+  url: {{baseUrl}}/users/me/recommendations
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

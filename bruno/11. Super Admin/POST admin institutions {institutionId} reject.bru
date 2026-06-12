@@ -1,0 +1,19 @@
+meta {
+  name: POST /admin/institutions/{institutionId}/reject
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseUrl}}/admin/institutions/:institutionId/reject
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "reason": "Incomplete documentation" }
+}

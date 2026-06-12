@@ -1,0 +1,19 @@
+meta {
+  name: PATCH /admin/promos/{promoId}
+  type: http
+  seq: 40
+}
+
+patch {
+  url: {{baseUrl}}/admin/promos/:promoId
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "status": "active" }
+}

@@ -1,0 +1,15 @@
+meta {
+  name: GET /admin/admin-accounts
+  type: http
+  seq: 34
+}
+
+get {
+  url: {{baseUrl}}/admin/admin-accounts
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

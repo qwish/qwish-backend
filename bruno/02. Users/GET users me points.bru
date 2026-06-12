@@ -1,0 +1,15 @@
+meta {
+  name: GET /users/me/points
+  type: http
+  seq: 7
+}
+
+get {
+  url: {{baseUrl}}/users/me/points
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

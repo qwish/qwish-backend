@@ -1,0 +1,15 @@
+meta {
+  name: POST /admin/quizzes/{quizId}/approve
+  type: http
+  seq: 22
+}
+
+post {
+  url: {{baseUrl}}/admin/quizzes/:quizId/approve
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

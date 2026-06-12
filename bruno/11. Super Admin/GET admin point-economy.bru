@@ -1,0 +1,15 @@
+meta {
+  name: GET /admin/point-economy
+  type: http
+  seq: 28
+}
+
+get {
+  url: {{baseUrl}}/admin/point-economy
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

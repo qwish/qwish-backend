@@ -1,0 +1,22 @@
+meta {
+  name: POST /upload/presign
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/upload/presign
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  {
+    "content_type": "image/jpeg",
+    "prefix": "quiz-images"
+  }
+}

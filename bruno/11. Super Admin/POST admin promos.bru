@@ -1,0 +1,28 @@
+meta {
+  name: POST /admin/promos
+  type: http
+  seq: 39
+}
+
+post {
+  url: {{baseUrl}}/admin/promos
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  {
+    "title":      "Summer Challenge",
+    "body":       "Complete 5 quizzes this week!",
+    "cta_label":  "Start Now",
+    "cta_url":    "https://...",
+    "placement":  "home_banner",
+    "target":     "all",
+    "start_date": "2024-06-01T00:00:00Z",
+    "end_date":   "2024-06-30T23:59:59Z"
+  }
+}

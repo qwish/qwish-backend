@@ -1,0 +1,15 @@
+meta {
+  name: GET /users/me/notifications/stream
+  type: http
+  seq: 21
+}
+
+get {
+  url: {{baseUrl}}/users/me/notifications/stream
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

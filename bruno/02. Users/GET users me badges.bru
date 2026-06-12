@@ -1,0 +1,15 @@
+meta {
+  name: GET /users/me/badges
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseUrl}}/users/me/badges
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

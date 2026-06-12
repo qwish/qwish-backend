@@ -1,0 +1,15 @@
+meta {
+  name: DELETE /admin/admin-accounts/{adminId}
+  type: http
+  seq: 37
+}
+
+delete {
+  url: {{baseUrl}}/admin/admin-accounts/:adminId
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

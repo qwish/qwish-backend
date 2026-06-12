@@ -1,0 +1,20 @@
+meta {
+  name: PATCH /institution/settings/point-rules
+  type: http
+  seq: 25
+}
+
+patch {
+  url: {{baseUrl}}/institution/settings/point-rules
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "point_multiplier":      1.5,
+    "streak_grace_enabled":  true,
+    "play_win_score_hidden": false,
+    "point_expiry_months":   12
+  }
+}

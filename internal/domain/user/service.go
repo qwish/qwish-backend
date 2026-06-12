@@ -2,10 +2,17 @@ package user
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ErrProfilePrivate is returned when a viewer is not allowed to see a private
+// profile (the owner has not enabled recruiter visibility and the viewer is
+// neither the owner nor a follower).
+var ErrProfilePrivate = errors.New("profile is private")
 
 type Service struct {
 	db *pgxpool.Pool
@@ -93,17 +100,33 @@ func (s *Service) GetProfile(ctx context.Context, userID string) (*Profile, erro
 	return p, nil
 }
 
-func (s *Service) GetPublicProfile(ctx context.Context, userID string) (*PublicProfile, error) {
+// GetPublicProfile returns the public view of targetID's profile, enforcing
+// privacy: a profile is private by default and only visible to the owner, to
+// followers, or once the owner enables recruiter visibility. Returns
+// ErrProfilePrivate otherwise.
+func (s *Service) GetPublicProfile(ctx context.Context, viewerID, targetID string) (*PublicProfile, error) {
 	p := &PublicProfile{}
 	var instName *string
+	var recruiterVisible bool
 	err := s.db.QueryRow(ctx,
-		`SELECT u.id, u.display_name, i.name, u.total_points, u.current_streak, u.longest_streak
+		`SELECT u.id, u.display_name, i.name, u.total_points, u.current_streak, u.longest_streak,
+		        u.recruiter_visible
 		 FROM users u
 		 LEFT JOIN institutions i ON i.id = u.institution_id
-		 WHERE u.id = $1 AND u.deleted_at IS NULL AND u.status = 'active'`, userID,
-	).Scan(&p.ID, &p.DisplayName, &instName, &p.TotalPoints, &p.CurrentStreak, &p.LongestStreak)
+		 WHERE u.id = $1 AND u.deleted_at IS NULL AND u.status = 'active'`, targetID,
+	).Scan(&p.ID, &p.DisplayName, &instName, &p.TotalPoints, &p.CurrentStreak, &p.LongestStreak, &recruiterVisible)
 	if err != nil {
 		return nil, err
+	}
+
+	if viewerID != targetID && !recruiterVisible {
+		var followsTarget bool
+		s.db.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM user_follows WHERE follower_id=$1 AND followee_id=$2)`,
+			viewerID, targetID).Scan(&followsTarget)
+		if !followsTarget {
+			return nil, ErrProfilePrivate
+		}
 	}
 	if instName != nil {
 		p.Institution = *instName
@@ -111,12 +134,12 @@ func (s *Service) GetPublicProfile(ctx context.Context, userID string) (*PublicP
 
 	// Quizzes completed
 	s.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM quiz_attempts WHERE user_id = $1 AND status = 'completed'`, userID,
+		`SELECT COUNT(*) FROM quiz_attempts WHERE user_id = $1 AND status = 'completed'`, targetID,
 	).Scan(&p.QuizzesCompleted)
 
 	// Badges
 	rows, _ := s.db.Query(ctx,
-		`SELECT badge_type FROM badges WHERE user_id = $1 ORDER BY earned_at`, userID)
+		`SELECT badge_type FROM badges WHERE user_id = $1 ORDER BY earned_at`, targetID)
 	defer rows.Close()
 	for rows.Next() {
 		var bt string
@@ -487,6 +510,198 @@ type RecommendedQuiz struct {
 	Description   *string `json:"description,omitempty"`
 	QuestionCount int     `json:"question_count"`
 	Type          string  `json:"type"`
+}
+
+// ── Settings: theme (dark mode) + privacy ──────────────────────────────────────
+
+type Settings struct {
+	Theme            string `json:"theme"`             // 'auto' | 'light' | 'dark'
+	ProfilePrivate   bool   `json:"profile_private"`   // private by default
+	RecruiterVisible bool   `json:"recruiter_visible"` // opt-in recruiter discovery
+}
+
+func (s *Service) GetSettings(ctx context.Context, userID string) (*Settings, error) {
+	st := &Settings{}
+	err := s.db.QueryRow(ctx,
+		`SELECT theme, profile_private, recruiter_visible FROM users WHERE id=$1`, userID,
+	).Scan(&st.Theme, &st.ProfilePrivate, &st.RecruiterVisible)
+	if err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+// UpdateSettings applies the non-nil fields. Returns ErrInvalidTheme for a bad
+// theme value.
+func (s *Service) UpdateSettings(ctx context.Context, userID string, theme *string, private, recruiter *bool) (*Settings, error) {
+	if theme != nil {
+		switch *theme {
+		case "auto", "light", "dark":
+		default:
+			return nil, ErrInvalidTheme
+		}
+		s.db.Exec(ctx, `UPDATE users SET theme=$1, updated_at=now() WHERE id=$2`, *theme, userID)
+	}
+	if private != nil {
+		s.db.Exec(ctx, `UPDATE users SET profile_private=$1, updated_at=now() WHERE id=$2`, *private, userID)
+	}
+	if recruiter != nil {
+		s.db.Exec(ctx, `UPDATE users SET recruiter_visible=$1, updated_at=now() WHERE id=$2`, *recruiter, userID)
+	}
+	return s.GetSettings(ctx, userID)
+}
+
+var ErrInvalidTheme = errors.New("theme must be one of: auto, light, dark")
+
+// ── Notification preferences ────────────────────────────────────────────────
+
+type NotifPrefs struct {
+	PushRankChanges     bool `json:"push_rank_changes"`
+	PushWeeklyDigest    bool `json:"push_weekly_digest"`
+	PushStreakNudge     bool `json:"push_streak_nudge"`
+	PushStudyGroup      bool `json:"push_study_group"`
+	EmailWeeklyInsights bool `json:"email_weekly_insights"`
+}
+
+func defaultNotifPrefs() *NotifPrefs {
+	return &NotifPrefs{true, true, true, true, true}
+}
+
+// GetNotifPrefs returns the user's preferences, falling back to all-enabled
+// defaults when no row exists yet.
+func (s *Service) GetNotifPrefs(ctx context.Context, userID string) (*NotifPrefs, error) {
+	p := &NotifPrefs{}
+	err := s.db.QueryRow(ctx,
+		`SELECT push_rank_changes, push_weekly_digest, push_streak_nudge, push_study_group, email_weekly_insights
+		 FROM notification_preferences WHERE user_id=$1`, userID,
+	).Scan(&p.PushRankChanges, &p.PushWeeklyDigest, &p.PushStreakNudge, &p.PushStudyGroup, &p.EmailWeeklyInsights)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return defaultNotifPrefs(), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// UpdateNotifPrefs upserts the user's preferences, applying only the supplied
+// (non-nil) fields over the current values.
+func (s *Service) UpdateNotifPrefs(ctx context.Context, userID string, in map[string]bool) (*NotifPrefs, error) {
+	cur, err := s.GetNotifPrefs(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if v, ok := in["push_rank_changes"]; ok {
+		cur.PushRankChanges = v
+	}
+	if v, ok := in["push_weekly_digest"]; ok {
+		cur.PushWeeklyDigest = v
+	}
+	if v, ok := in["push_streak_nudge"]; ok {
+		cur.PushStreakNudge = v
+	}
+	if v, ok := in["push_study_group"]; ok {
+		cur.PushStudyGroup = v
+	}
+	if v, ok := in["email_weekly_insights"]; ok {
+		cur.EmailWeeklyInsights = v
+	}
+	_, err = s.db.Exec(ctx,
+		`INSERT INTO notification_preferences
+		   (user_id, push_rank_changes, push_weekly_digest, push_streak_nudge, push_study_group, email_weekly_insights, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6, now())
+		 ON CONFLICT (user_id) DO UPDATE SET
+		   push_rank_changes=EXCLUDED.push_rank_changes,
+		   push_weekly_digest=EXCLUDED.push_weekly_digest,
+		   push_streak_nudge=EXCLUDED.push_streak_nudge,
+		   push_study_group=EXCLUDED.push_study_group,
+		   email_weekly_insights=EXCLUDED.email_weekly_insights,
+		   updated_at=now()`,
+		userID, cur.PushRankChanges, cur.PushWeeklyDigest, cur.PushStreakNudge, cur.PushStudyGroup, cur.EmailWeeklyInsights)
+	if err != nil {
+		return nil, err
+	}
+	return cur, nil
+}
+
+// ── Weekly score insights ────────────────────────────────────────────────────
+
+type WeeklyInsights struct {
+	WeekStart       time.Time `json:"week_start"`
+	WeekEnd         time.Time `json:"week_end"`
+	PointsThisWeek  int64     `json:"points_this_week"`
+	PointsLastWeek  int64     `json:"points_last_week"`
+	PointsDeltaPct  float64   `json:"points_delta_pct"`
+	QuizzesThisWeek int       `json:"quizzes_this_week"`
+	AvgScoreThisWeek float64  `json:"avg_score_this_week"`
+	CurrentStreak   int       `json:"current_streak"`
+	Domain          *string   `json:"domain,omitempty"`
+	DomainRank      *int      `json:"domain_rank,omitempty"`
+	Suggestion      string    `json:"suggestion"`
+}
+
+// GetWeeklyInsights computes the user's last-7-days performance breakdown plus a
+// week-over-week comparison and a coaching suggestion.
+func (s *Service) GetWeeklyInsights(ctx context.Context, userID, instID string) (*WeeklyInsights, error) {
+	now := time.Now().UTC()
+	weekStart := now.AddDate(0, 0, -7)
+	prevStart := now.AddDate(0, 0, -14)
+
+	wi := &WeeklyInsights{WeekStart: weekStart, WeekEnd: now}
+
+	// Points earned this week vs the week before (from the ledger).
+	s.db.QueryRow(ctx,
+		`SELECT
+		   COALESCE(SUM(amount) FILTER (WHERE created_at >= $2 AND amount > 0),0),
+		   COALESCE(SUM(amount) FILTER (WHERE created_at >= $3 AND created_at < $2 AND amount > 0),0)
+		 FROM points_ledger WHERE user_id=$1`,
+		userID, weekStart, prevStart,
+	).Scan(&wi.PointsThisWeek, &wi.PointsLastWeek)
+	if wi.PointsLastWeek > 0 {
+		wi.PointsDeltaPct = float64(wi.PointsThisWeek-wi.PointsLastWeek) / float64(wi.PointsLastWeek) * 100
+	} else if wi.PointsThisWeek > 0 {
+		wi.PointsDeltaPct = 100
+	}
+
+	// Quizzes completed + average score this week.
+	s.db.QueryRow(ctx,
+		`SELECT COUNT(*), COALESCE(AVG(score_pct),0)
+		 FROM quiz_attempts WHERE user_id=$1 AND status='completed' AND completed_at >= $2`,
+		userID, weekStart,
+	).Scan(&wi.QuizzesThisWeek, &wi.AvgScoreThisWeek)
+
+	// Streak + domain.
+	var domain *string
+	s.db.QueryRow(ctx, `SELECT current_streak, domain FROM users WHERE id=$1`, userID).
+		Scan(&wi.CurrentStreak, &domain)
+	if domain != nil && *domain != "" {
+		wi.Domain = domain
+		var rank int
+		var myPoints int64
+		s.db.QueryRow(ctx, `SELECT total_points FROM users WHERE id=$1`, userID).Scan(&myPoints)
+		s.db.QueryRow(ctx,
+			`SELECT COUNT(*)+1 FROM users WHERE domain=$1 AND status='active' AND total_points > $2`,
+			*domain, myPoints).Scan(&rank)
+		wi.DomainRank = &rank
+	}
+
+	wi.Suggestion = buildSuggestion(wi)
+	return wi, nil
+}
+
+func buildSuggestion(wi *WeeklyInsights) string {
+	switch {
+	case wi.QuizzesThisWeek == 0:
+		return "You didn't practice this week — take one quiz today to restart your momentum."
+	case wi.CurrentStreak == 0:
+		return "Your streak reset. Complete a quiz today and tomorrow to rebuild it."
+	case wi.AvgScoreThisWeek < 60:
+		return "Your average score dipped below 60%. Slow down and review explanations after each quiz."
+	case wi.PointsDeltaPct < 0:
+		return "You earned fewer points than last week. Try two short quizzes a day to bounce back."
+	default:
+		return "Strong week! Keep the streak alive and aim to climb your domain leaderboard."
+	}
 }
 
 func (s *Service) GetRecommendations(ctx context.Context, userID, instID string) ([]RecommendedQuiz, error) {

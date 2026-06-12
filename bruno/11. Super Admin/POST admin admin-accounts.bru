@@ -1,0 +1,19 @@
+meta {
+  name: POST /admin/admin-accounts
+  type: http
+  seq: 35
+}
+
+post {
+  url: {{baseUrl}}/admin/admin-accounts
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "name": "Jane Mod", "email": "jane@qwish.com", "role": "moderator" }
+}

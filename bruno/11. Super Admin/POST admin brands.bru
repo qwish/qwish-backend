@@ -1,0 +1,25 @@
+meta {
+  name: POST /admin/brands
+  type: http
+  seq: 43
+}
+
+post {
+  url: {{baseUrl}}/admin/brands
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  {
+    "name":          "Acme Corp",
+    "industry":      "EdTech",
+    "contact_email": "partners@acme.com",
+    "website":       "https://acme.com",
+    "reward_pool":   5000.00
+  }
+}

@@ -1,0 +1,15 @@
+meta {
+  name: GET /admin/brands/{brandId}/sponsorship-requests
+  type: http
+  seq: 47
+}
+
+get {
+  url: {{baseUrl}}/admin/brands/:brandId/sponsorship-requests
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

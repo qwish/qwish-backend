@@ -1,0 +1,15 @@
+meta {
+  name: POST /upload/image
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/upload/image
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

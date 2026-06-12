@@ -1,0 +1,15 @@
+meta {
+  name: GET /admin/audit-log
+  type: http
+  seq: 33
+}
+
+get {
+  url: {{baseUrl}}/admin/audit-log
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

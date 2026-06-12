@@ -1,0 +1,15 @@
+meta {
+  name: GET /parent/children/{studentId}/overview
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{baseUrl}}/parent/children/:studentId/overview
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

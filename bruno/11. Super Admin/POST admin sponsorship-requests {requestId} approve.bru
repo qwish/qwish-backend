@@ -1,0 +1,15 @@
+meta {
+  name: POST /admin/sponsorship-requests/{requestId}/approve
+  type: http
+  seq: 48
+}
+
+post {
+  url: {{baseUrl}}/admin/sponsorship-requests/:requestId/approve
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

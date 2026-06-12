@@ -1,0 +1,15 @@
+meta {
+  name: GET /teacher/reports/quiz-analytics
+  type: http
+  seq: 19
+}
+
+get {
+  url: {{baseUrl}}/teacher/reports/quiz-analytics
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

@@ -1,0 +1,26 @@
+meta {
+  name: POST /onboarding/institution
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/onboarding/institution
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "name": "Springfield High",
+    "type": "school",
+    "contact_email": "principal@springfield.edu",
+    "admin_name": "Seymour Skinner",
+    "timezone": "America/New_York",
+    "phone": "555-0199",
+    "website": "https://springfield.edu",
+    "city": "Springfield",
+    "state": "IL",
+    "country": "US"
+  }
+}

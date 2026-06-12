@@ -1,0 +1,19 @@
+meta {
+  name: PATCH /admin/point-economy/{key}
+  type: http
+  seq: 29
+}
+
+patch {
+  url: {{baseUrl}}/admin/point-economy/:key
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "value": 15, "reason": "Adjusted for Q2 engagement campaign" }
+}

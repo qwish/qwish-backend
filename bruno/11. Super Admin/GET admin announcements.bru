@@ -1,0 +1,15 @@
+meta {
+  name: GET /admin/announcements
+  type: http
+  seq: 30
+}
+
+get {
+  url: {{baseUrl}}/admin/announcements
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

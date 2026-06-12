@@ -83,6 +83,25 @@ func (c *R2Client) PresignURL(ctx context.Context, key string, ttl time.Duration
 	return req.URL, nil
 }
 
+// PresignUpload generates a temporary pre-signed PUT URL for direct client upload, along with the expected public URL.
+func (c *R2Client) PresignUpload(ctx context.Context, prefix, contentType string, ttl time.Duration) (string, string, string, error) {
+	ext := extensionFromContentType(contentType)
+	key := path.Join(prefix, uuid.New().String()+ext)
+
+	presigner := s3.NewPresignClient(c.client)
+	req, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(c.bucket),
+		Key:         aws.String(key),
+		ContentType: aws.String(contentType),
+	}, s3.WithPresignExpires(ttl))
+	if err != nil {
+		return "", "", "", err
+	}
+
+	publicURL := c.publicURL + "/" + key
+	return req.URL, publicURL, key, nil
+}
+
 func extensionFromContentType(ct string) string {
 	switch ct {
 	case "image/jpeg":

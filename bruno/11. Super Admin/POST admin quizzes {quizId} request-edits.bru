@@ -1,0 +1,19 @@
+meta {
+  name: POST /admin/quizzes/{quizId}/request-edits
+  type: http
+  seq: 24
+}
+
+post {
+  url: {{baseUrl}}/admin/quizzes/:quizId/request-edits
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "feedback": "Please add at least one image to question 3." }
+}

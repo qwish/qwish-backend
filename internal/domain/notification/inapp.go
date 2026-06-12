@@ -2,6 +2,8 @@ package notification
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -49,10 +51,39 @@ func (s *Service) Emit(ctx context.Context, userID, kind, title, body string, op
 	for _, fn := range opts {
 		fn(&o)
 	}
-	s.db.Exec(ctx,
+
+	var notifID string
+	var createdAt time.Time
+	err := s.db.QueryRow(ctx,
 		`INSERT INTO user_notifications (user_id, kind, title, body, icon, color, reference)
-		 VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''))`,
-		userID, kind, title, body, o.icon, o.color, o.reference)
+		 VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''))
+		 RETURNING id, created_at`,
+		userID, kind, title, body, o.icon, o.color, o.reference).Scan(&notifID, &createdAt)
+
+	if err == nil {
+		var iconPtr *string
+		if o.icon != "" {
+			iconPtr = &o.icon
+		}
+		var colorPtr *string
+		if o.color != "" {
+			colorPtr = &o.color
+		}
+		var refPtr *string
+		if o.reference != "" {
+			refPtr = &o.reference
+		}
+		s.Publish(userID, Notification{
+			ID:        notifID,
+			Kind:      kind,
+			Title:     title,
+			Body:      body,
+			Icon:      iconPtr,
+			Color:     colorPtr,
+			Reference: refPtr,
+			CreatedAt: createdAt,
+		})
+	}
 
 	if s.push != nil {
 		data := map[string]string{"kind": kind}
@@ -179,4 +210,44 @@ func (h *Handler) MarkAllRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// GET /api/v1/users/me/notifications/stream
+func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	userID := middleware.GetUserID(r)
+	ch := h.svc.Subscribe(userID)
+	defer h.svc.Unsubscribe(userID, ch)
+
+	fmt.Fprintf(w, "event: connected\ndata: {}\n\n")
+	flusher.Flush()
+
+	ticker := time.NewTicker(25 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case n := <-ch:
+			data, err := json.Marshal(n)
+			if err == nil {
+				fmt.Fprintf(w, "data: %s\n\n", string(data))
+				flusher.Flush()
+			}
+		case <-ticker.C:
+			fmt.Fprintf(w, ": ping\n\n")
+			flusher.Flush()
+		}
+	}
 }

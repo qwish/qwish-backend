@@ -17,12 +17,13 @@ import (
 )
 
 type Handler struct {
-	db    *pgxpool.Pool
-	notif *notification.Service
+	db     *pgxpool.Pool
+	notif  *notification.Service
+	appURL string
 }
 
-func NewHandler(db *pgxpool.Pool, notif *notification.Service) *Handler {
-	return &Handler{db: db, notif: notif}
+func NewHandler(db *pgxpool.Pool, notif *notification.Service, appURL string) *Handler {
+	return &Handler{db: db, notif: notif, appURL: appURL}
 }
 
 // GET /api/v1/institution/overview
@@ -417,7 +418,7 @@ func (h *Handler) InviteTeacher(w http.ResponseWriter, r *http.Request) {
 		`SELECT 1 FROM users WHERE email=$1 AND institution_id=$2 AND role='teacher' AND deleted_at IS NULL`,
 		req.Email, instID).Scan(&existing)
 	if existing != 0 {
-		middleware.BadRequest(w, "a teacher with this email is already part of your institution")
+		middleware.Error(w, http.StatusConflict, "DUPLICATE_EMAIL", "a teacher with this email is already part of your institution")
 		return
 	}
 
@@ -428,7 +429,7 @@ func (h *Handler) InviteTeacher(w http.ResponseWriter, r *http.Request) {
 		 WHERE email=$1 AND institution_id=$2 AND status='pending' AND expires_at > now()`,
 		req.Email, instID).Scan(&pendingID)
 	if pendingID != "" {
-		middleware.BadRequest(w, "a pending invite for this email already exists")
+		middleware.Error(w, http.StatusConflict, "DUPLICATE_INVITE", "a pending invite for this email already exists")
 		return
 	}
 
@@ -459,9 +460,9 @@ func (h *Handler) InviteTeacher(w http.ResponseWriter, r *http.Request) {
 
 	// Send invite email (non-blocking on error — invite is already created)
 	if h.notif != nil {
-		// APP_URL is embedded in institution settings; fall back to a sensible default
-		appURL := "https://app.quizapp.in"
-		_ = h.notif.SendTeacherInvite(r.Context(), req.Email, req.Name, instName, token, appURL, inviteID)
+		if err := h.notif.SendTeacherInvite(r.Context(), req.Email, req.Name, instName, token, h.appURL, inviteID); err != nil {
+			fmt.Printf("[institution] teacher invite email to %s failed: %v\n", req.Email, err)
+		}
 	}
 
 	logAudit(r.Context(), h.db, loggedInUser, "invite_teacher", "teacher_invite", inviteID, req.Email)

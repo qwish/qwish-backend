@@ -1,0 +1,15 @@
+meta {
+  name: DELETE /quizzes/{quizId}/save
+  type: http
+  seq: 4
+}
+
+delete {
+  url: {{baseUrl}}/quizzes/:quizId/save
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

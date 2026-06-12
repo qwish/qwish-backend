@@ -1,0 +1,15 @@
+meta {
+  name: POST /teacher/quizzes/{quizId}/publish
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseUrl}}/teacher/quizzes/:quizId/publish
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

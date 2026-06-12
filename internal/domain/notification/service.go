@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -17,13 +18,17 @@ type Service struct {
 	apiKey    string
 	fromEmail string
 	push      pusherAdapter
+
+	mu          sync.RWMutex
+	subscribers map[string][]chan Notification
 }
 
 func NewService(db *pgxpool.Pool, apiKey string) *Service {
 	return &Service{
-		db:        db,
-		apiKey:    apiKey,
-		fromEmail: "QuizApp <noreply@quizapp.in>",
+		db:          db,
+		apiKey:      apiKey,
+		fromEmail:   "Qwish <noreply@qwish.in>",
+		subscribers: make(map[string][]chan Notification),
 	}
 }
 
@@ -182,6 +187,32 @@ func (s *Service) SendAdminInvite(ctx context.Context, to, name, role, inviteLin
 <p style="font-size:12px;color:#888">Or copy this link: %s</p>
 `, greeting, role, inviteLink, inviteLink)
 	return s.SendEmail(ctx, to, "You're invited to join QuizApp as an Admin", html, "admin_invite")
+}
+
+// SendWeeklyInsights emails the user their weekly score breakdown.
+func (s *Service) SendWeeklyInsights(ctx context.Context, to, name string, pointsThisWeek int64, deltaPct float64, quizzes int, avgScore float64, streak int, domain, suggestion string) error {
+	greeting := "Hi"
+	if name != "" {
+		greeting = "Hi " + name
+	}
+	trend := fmt.Sprintf("%+.0f%% vs last week", deltaPct)
+	domainLine := ""
+	if domain != "" {
+		domainLine = fmt.Sprintf(`<tr><td style="padding:6px 0">Domain</td><td style="text-align:right"><strong>%s</strong></td></tr>`, domain)
+	}
+	html := fmt.Sprintf(`
+<h2>Your week on QuizApp 📊</h2>
+<p>%s, here's how your week went:</p>
+<table style="width:100%%;max-width:420px;border-collapse:collapse;font-size:15px">
+  <tr><td style="padding:6px 0">Points earned</td><td style="text-align:right"><strong>%d</strong> <span style="color:#888">(%s)</span></td></tr>
+  <tr><td style="padding:6px 0">Quizzes completed</td><td style="text-align:right"><strong>%d</strong></td></tr>
+  <tr><td style="padding:6px 0">Average score</td><td style="text-align:right"><strong>%.0f%%</strong></td></tr>
+  <tr><td style="padding:6px 0">Current streak</td><td style="text-align:right"><strong>%d days</strong></td></tr>
+  %s
+</table>
+<p style="margin-top:20px;padding:14px;background:#F1F5F9;border-radius:8px">💡 <strong>What to do next:</strong> %s</p>
+`, greeting, pointsThisWeek, trend, quizzes, avgScore, streak, domainLine, suggestion)
+	return s.SendEmail(ctx, to, "Your weekly QuizApp insights", html, "weekly_insights")
 }
 
 func (s *Service) SendAdminWelcome(ctx context.Context, to, name, role string) error {

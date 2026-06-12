@@ -1,0 +1,15 @@
+meta {
+  name: GET /admin/institutions/{institutionId}
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseUrl}}/admin/institutions/:institutionId
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

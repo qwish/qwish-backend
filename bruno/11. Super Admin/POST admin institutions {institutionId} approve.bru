@@ -1,0 +1,15 @@
+meta {
+  name: POST /admin/institutions/{institutionId}/approve
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/admin/institutions/:institutionId/approve
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

@@ -1,0 +1,15 @@
+meta {
+  name: GET /users/me/rank
+  type: http
+  seq: 11
+}
+
+get {
+  url: {{baseUrl}}/users/me/rank
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

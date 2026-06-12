@@ -2,6 +2,7 @@ package user
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -95,12 +96,16 @@ func (h *Handler) GetMyAttempts(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/users/:userId/profile
 func (h *Handler) GetPublicProfile(w http.ResponseWriter, r *http.Request) {
 	targetID := chi.URLParam(r, "userId")
-	profile, err := h.svc.GetPublicProfile(r.Context(), targetID)
+	viewerID := middleware.GetUserID(r)
+	profile, err := h.svc.GetPublicProfile(r.Context(), viewerID, targetID)
+	if errors.Is(err, ErrProfilePrivate) {
+		middleware.Error(w, http.StatusForbidden, "PROFILE_PRIVATE", "this profile is private")
+		return
+	}
 	if err != nil {
 		middleware.NotFound(w, "user")
 		return
 	}
-	viewerID := middleware.GetUserID(r)
 	if viewerID != targetID {
 		h.svc.RecordProfileView(r.Context(), viewerID, targetID)
 	}
@@ -247,6 +252,74 @@ func (h *Handler) DeleteMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "account deleted"})
+}
+
+// GET /api/v1/users/me/settings
+func (h *Handler) GetMySettings(w http.ResponseWriter, r *http.Request) {
+	st, err := h.svc.GetSettings(r.Context(), middleware.GetUserID(r))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, st)
+}
+
+// PATCH /api/v1/users/me/settings — update theme (dark mode) and privacy flags.
+func (h *Handler) UpdateMySettings(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Theme            *string `json:"theme"`
+		ProfilePrivate   *bool   `json:"profile_private"`
+		RecruiterVisible *bool   `json:"recruiter_visible"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid request body")
+		return
+	}
+	st, err := h.svc.UpdateSettings(r.Context(), middleware.GetUserID(r), req.Theme, req.ProfilePrivate, req.RecruiterVisible)
+	if errors.Is(err, ErrInvalidTheme) {
+		middleware.BadRequest(w, err.Error())
+		return
+	}
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, st)
+}
+
+// GET /api/v1/users/me/notification-preferences
+func (h *Handler) GetMyNotifPrefs(w http.ResponseWriter, r *http.Request) {
+	p, err := h.svc.GetNotifPrefs(r.Context(), middleware.GetUserID(r))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, p)
+}
+
+// PATCH /api/v1/users/me/notification-preferences
+func (h *Handler) UpdateMyNotifPrefs(w http.ResponseWriter, r *http.Request) {
+	var raw map[string]bool
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		middleware.BadRequest(w, "invalid request body")
+		return
+	}
+	p, err := h.svc.UpdateNotifPrefs(r.Context(), middleware.GetUserID(r), raw)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, p)
+}
+
+// GET /api/v1/users/me/insights/weekly
+func (h *Handler) GetMyWeeklyInsights(w http.ResponseWriter, r *http.Request) {
+	wi, err := h.svc.GetWeeklyInsights(r.Context(), middleware.GetUserID(r), middleware.GetInstitutionID(r))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, wi)
 }
 
 // GET /api/v1/users/me/recommendations

@@ -1,0 +1,19 @@
+meta {
+  name: PATCH /admin/admin-accounts/{adminId}
+  type: http
+  seq: 36
+}
+
+patch {
+  url: {{baseUrl}}/admin/admin-accounts/:adminId
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "role": "support_agent", "status": "active" }
+}

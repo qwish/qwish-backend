@@ -1,0 +1,15 @@
+meta {
+  name: GET /admin/institutions/queue
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/admin/institutions/queue
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

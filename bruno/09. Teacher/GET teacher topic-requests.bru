@@ -1,0 +1,15 @@
+meta {
+  name: GET /teacher/topic-requests
+  type: http
+  seq: 9
+}
+
+get {
+  url: {{baseUrl}}/teacher/topic-requests
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

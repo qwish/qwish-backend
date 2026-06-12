@@ -1,0 +1,15 @@
+meta {
+  name: PATCH /institution/groups/{groupId}
+  type: http
+  seq: 12
+}
+
+patch {
+  url: {{baseUrl}}/institution/groups/:groupId
+  body: json
+  auth: none
+}
+
+body:json {
+  { "name": "Class 10B", "description": "Updated description" }
+}

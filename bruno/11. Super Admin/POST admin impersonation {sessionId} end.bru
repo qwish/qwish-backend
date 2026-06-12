@@ -1,0 +1,15 @@
+meta {
+  name: POST /admin/impersonation/{sessionId}/end
+  type: http
+  seq: 19
+}
+
+post {
+  url: {{baseUrl}}/admin/impersonation/:sessionId/end
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

@@ -1,0 +1,22 @@
+meta {
+  name: POST /quizzes/{quizId}/reports
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/quizzes/:quizId/reports
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  {
+    "reason":      "inappropriate_content",
+    "description": "Optional extra detail"
+  }
+}

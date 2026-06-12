@@ -1,0 +1,19 @@
+meta {
+  name: POST /users/me/skills
+  type: http
+  seq: 18
+}
+
+post {
+  url: {{baseUrl}}/users/me/skills
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "skill": "Go" }
+}

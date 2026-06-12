@@ -1,0 +1,15 @@
+meta {
+  name: POST /admin/brands/{brandId}/reactivate
+  type: http
+  seq: 46
+}
+
+post {
+  url: {{baseUrl}}/admin/brands/:brandId/reactivate
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

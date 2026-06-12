@@ -16,16 +16,18 @@ import (
 	"github.com/qwish/backend/internal/config"
 	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/middleware"
+	"github.com/qwish/backend/internal/supabase"
 )
 
 type Handler struct {
-	db    *pgxpool.Pool
-	cfg   *config.Config
-	notif *notification.Service
+	db     *pgxpool.Pool
+	cfg    *config.Config
+	notif  *notification.Service
+	invite *supabase.InviteClient
 }
 
 func NewHandler(db *pgxpool.Pool, cfg *config.Config, notif *notification.Service) *Handler {
-	return &Handler{db: db, cfg: cfg, notif: notif}
+	return &Handler{db: db, cfg: cfg, notif: notif, invite: supabase.NewInviteClient(db, cfg)}
 }
 
 // GET /api/v1/admin/overview
@@ -804,72 +806,18 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 		createdBy = &adminID
 	}
 
-	var supabaseUID string
-	var inviteLink string
-	var userExistsInSupabase bool
-
-	// Call Supabase generate_link API to create the user and get the action link
-	linkBody, _ := json.Marshal(map[string]interface{}{
-		"type":  "invite",
-		"email": req.Email,
-	})
-	linkReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-		h.cfg.SupabaseURL+"/auth/v1/admin/generate_link", bytes.NewReader(linkBody))
-
-	if err == nil {
-		linkReq.Header.Set("Content-Type", "application/json")
-		linkReq.Header.Set("apikey", h.cfg.SupabaseServiceKey)
-		linkReq.Header.Set("Authorization", "Bearer "+h.cfg.SupabaseServiceKey)
-
-		linkResp, err := http.DefaultClient.Do(linkReq)
-		if err == nil {
-			defer linkResp.Body.Close()
-			rawResp, _ := io.ReadAll(linkResp.Body)
-
-			if linkResp.StatusCode < 400 {
-				var generateResp struct {
-					ActionLink string `json:"action_link"`
-					ID         string `json:"id"`
-					User       struct {
-						ID string `json:"id"`
-					} `json:"user"`
-				}
-				json.Unmarshal(rawResp, &generateResp)
-				inviteLink = generateResp.ActionLink
-				if generateResp.ID != "" {
-					supabaseUID = generateResp.ID
-				} else if generateResp.User.ID != "" {
-					supabaseUID = generateResp.User.ID
-				}
-			} else {
-				fmt.Printf("[admin] Supabase generate_link failed (status %d): %s\n", linkResp.StatusCode, string(rawResp))
-				if linkResp.StatusCode == 422 || bytes.Contains(rawResp, []byte("already")) {
-					userExistsInSupabase = true
-				}
-			}
-		} else {
-			fmt.Printf("[admin] Failed to execute Supabase generate_link request: %v\n", err)
-		}
-	} else {
-		fmt.Printf("[admin] Failed to create Supabase generate_link request: %v\n", err)
+	// Provision the Supabase auth user via the shared invite client. On failure
+	// it returns an error rather than a placeholder UID, so we never create an
+	// unauthenticatable orphan admin_accounts row.
+	inv, err := h.invite.Invite(r.Context(), req.Email, h.cfg.SuperAdminURL,
+		map[string]string{"role": req.Role, "name": req.Name})
+	if err != nil {
+		fmt.Printf("[admin] Supabase invite failed for %s: %v\n", req.Email, err)
+		middleware.Error(w, http.StatusBadGateway, "INVITE_FAILED",
+			"failed to create Supabase invite for this email; admin account was not created")
+		return
 	}
-
-	// If the invite call failed or didn't return an ID, check if they already exist in auth.users
-	if supabaseUID == "" {
-		err = h.db.QueryRow(r.Context(), `SELECT id FROM auth.users WHERE email = $1`, req.Email).Scan(&supabaseUID)
-		if err == nil {
-			userExistsInSupabase = true
-			fmt.Printf("[admin] Found existing user in auth.users with UID: %s\n", supabaseUID)
-		} else {
-			fmt.Printf("[admin] User not found in auth.users database table: %v\n", err)
-		}
-	}
-
-	// Fallback to generating a random UUID if not found anywhere else
-	if supabaseUID == "" {
-		supabaseUID = uuid.New().String()
-		fmt.Printf("[admin] Generated fallback placeholder UUID for admin account: %s\n", supabaseUID)
-	}
+	supabaseUID := inv.UID
 
 	// An email may already exist in admin_accounts from a prior invite or a
 	// soft-deleted account (DeleteAdminAccount only flags status='deleted').
@@ -900,12 +848,18 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send email via Resend
+	// Send email via Resend. Failures don't roll back the account, but they are
+	// logged (and recorded in notification_log) so "invite never arrived" is
+	// diagnosable.
 	if h.notif != nil {
-		if inviteLink != "" {
-			_ = h.notif.SendAdminInvite(r.Context(), req.Email, req.Name, req.Role, inviteLink)
-		} else if userExistsInSupabase {
-			_ = h.notif.SendAdminWelcome(r.Context(), req.Email, req.Name, req.Role)
+		var mailErr error
+		if inv.ActionLink != "" {
+			mailErr = h.notif.SendAdminInvite(r.Context(), req.Email, req.Name, req.Role, inv.ActionLink)
+		} else if inv.AlreadyExisted {
+			mailErr = h.notif.SendAdminWelcome(r.Context(), req.Email, req.Name, req.Role)
+		}
+		if mailErr != nil {
+			fmt.Printf("[admin] invite email to %s failed: %v\n", req.Email, mailErr)
 		}
 	}
 
@@ -1499,54 +1453,20 @@ func (h *Handler) ProvisionAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Invite user via Supabase Admin API — sends a magic-link/invite email
-	// which lets the admin set their password and log in.
-	inviteBody, _ := json.Marshal(map[string]interface{}{
-		"email": adminEmail,
-		"data": map[string]string{
-			"role":           "institution_admin",
-			"institution_id": instID,
-			"full_name":      adminName,
-		},
+	// Provision the Supabase auth user via the shared invite client — same path
+	// internal admin invites use, so UID resolution and duplicate handling match.
+	inv, err := h.invite.Invite(r.Context(), adminEmail, h.cfg.InstituteURL, map[string]string{
+		"role":           "institution_admin",
+		"institution_id": instID,
+		"full_name":      adminName,
 	})
-	inviteReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-		h.cfg.SupabaseURL+"/auth/v1/admin/invite", bytes.NewReader(inviteBody))
 	if err != nil {
-		middleware.InternalError(w)
+		fmt.Printf("[admin] Supabase invite failed for institution admin %s: %v\n", adminEmail, err)
+		middleware.Error(w, http.StatusBadGateway, "INVITE_FAILED",
+			"failed to create Supabase invite for this email; institution admin was not provisioned")
 		return
 	}
-	inviteReq.Header.Set("Content-Type", "application/json")
-	inviteReq.Header.Set("apikey", h.cfg.SupabaseServiceKey)
-	inviteReq.Header.Set("Authorization", "Bearer "+h.cfg.SupabaseServiceKey)
-
-	inviteResp, err := http.DefaultClient.Do(inviteReq)
-	if err != nil {
-		middleware.InternalError(w)
-		return
-	}
-	defer inviteResp.Body.Close()
-	rawResp, _ := io.ReadAll(inviteResp.Body)
-
-	if inviteResp.StatusCode >= 400 {
-		middleware.JSON(w, http.StatusBadGateway, map[string]string{
-			"error": fmt.Sprintf("supabase invite failed: %s", string(rawResp)),
-		})
-		return
-	}
-
-	// Extract the Supabase UID from the invite response
-	var supabaseResp struct {
-		ID string `json:"id"`
-	}
-	json.Unmarshal(rawResp, &supabaseResp)
-
-	var supabaseUID string
-	if supabaseResp.ID != "" {
-		supabaseUID = supabaseResp.ID
-	} else {
-		// Fallback: generate a placeholder UID; actual UID will be updated on first login
-		supabaseUID = uuid.New().String()
-	}
+	supabaseUID := inv.UID
 
 	// Create the institution_admin user record in our DB
 	var userID string
@@ -1564,6 +1484,20 @@ func (h *Handler) ProvisionAdmin(w http.ResponseWriter, r *http.Request) {
 	// Also initialise streak row
 	h.db.Exec(r.Context(),
 		`INSERT INTO streaks (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, userID)
+
+	// Send the branded invite/welcome email via Resend (generate_link, unlike the
+	// old /admin/invite endpoint, does not send mail itself).
+	if h.notif != nil {
+		var mailErr error
+		if inv.ActionLink != "" {
+			mailErr = h.notif.SendAdminInvite(r.Context(), adminEmail, adminName, "institution_admin", inv.ActionLink)
+		} else if inv.AlreadyExisted {
+			mailErr = h.notif.SendAdminWelcome(r.Context(), adminEmail, adminName, "institution_admin")
+		}
+		if mailErr != nil {
+			fmt.Printf("[admin] institution-admin invite email to %s failed: %v\n", adminEmail, mailErr)
+		}
+	}
 
 	logAudit(r.Context(), h.db, requesterAdminID, "provision_institution_admin", "institution", instID,
 		fmt.Sprintf("admin_user_id=%s email=%s", userID, adminEmail))

@@ -1,0 +1,27 @@
+meta {
+  name: POST /teacher/quizzes/{quizId}/questions
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/teacher/quizzes/:quizId/questions
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  {
+    "prompt":         "What is the powerhouse of the cell?",
+    "type":           "multiple_choice",
+    "options":        ["Nucleus", "Mitochondria", "Ribosome", "Golgi body"],
+    "correct_answer": "Mitochondria",
+    "position":       1,
+    "points":         10,
+    "time_limit":     20
+  }
+}

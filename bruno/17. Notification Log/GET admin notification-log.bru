@@ -1,0 +1,15 @@
+meta {
+  name: GET /admin/notification-log
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/admin/notification-log
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

@@ -1,0 +1,15 @@
+meta {
+  name: GET /users/me/report-card
+  type: http
+  seq: 29
+}
+
+get {
+  url: {{baseUrl}}/users/me/report-card
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

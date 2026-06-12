@@ -1,0 +1,15 @@
+meta {
+  name: POST /admin/brands/{brandId}/suspend
+  type: http
+  seq: 45
+}
+
+post {
+  url: {{baseUrl}}/admin/brands/:brandId/suspend
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

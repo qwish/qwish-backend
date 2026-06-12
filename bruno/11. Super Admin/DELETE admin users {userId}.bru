@@ -1,0 +1,15 @@
+meta {
+  name: DELETE /admin/users/{userId}
+  type: http
+  seq: 16
+}
+
+delete {
+  url: {{baseUrl}}/admin/users/:userId
+  body: none
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}

@@ -1,0 +1,15 @@
+meta {
+  name: POST /institution/groups
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{baseUrl}}/institution/groups
+  body: json
+  auth: none
+}
+
+body:json {
+  { "name": "Class 10A", "description": "Optional" }
+}

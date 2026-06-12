@@ -1,0 +1,15 @@
+meta {
+  name: POST /auth/send-otp
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/auth/send-otp
+  body: json
+  auth: none
+}
+
+body:json {
+  { "email": "alice@example.com" }
+}

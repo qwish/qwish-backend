@@ -1,0 +1,24 @@
+meta {
+  name: POST /users/me/devices
+  type: http
+  seq: 26
+}
+
+post {
+  url: {{baseUrl}}/users/me/devices
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  {
+    "token": "fcm_token_string",
+    "platform": "ios",
+    "app_version": "1.0.0",
+    "locale": "en-US"
+  }
+}

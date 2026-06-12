@@ -1,0 +1,22 @@
+meta {
+  name: POST /contact
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/contact
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "topic":    "partnership",
+    "name":     "Priya Sharma",
+    "email":    "priya@example.com",
+    "phone":    "+91 9876543210",
+    "message":  "We'd love to explore a partnership opportunity.",
+    "metadata": {}
+  }
+}

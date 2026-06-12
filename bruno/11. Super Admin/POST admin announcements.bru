@@ -1,0 +1,28 @@
+meta {
+  name: POST /admin/announcements
+  type: http
+  seq: 32
+}
+
+post {
+  url: {{baseUrl}}/admin/announcements
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  {
+    "title":          "Platform Update",
+    "body":           "We've added new question types!",
+    "cta_label":      "Learn More",
+    "cta_url":        "https://...",
+    "delivery_types": ["in_app"],
+    "audience":       "all",
+    "institution_id": null,
+    "scheduled_at":   "2024-04-01T09:00:00Z"
+  }
+}

@@ -1,0 +1,19 @@
+meta {
+  name: POST /admin/contact-submissions/{id}/resolve
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/admin/contact-submissions/:id/resolve
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+body:json {
+  { "status": "resolved" }
+}

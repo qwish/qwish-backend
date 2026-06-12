@@ -110,7 +110,7 @@ func (s *Service) logSend(ctx context.Context, to, subject, status, errMsg, refe
 
 func (s *Service) SendInstitutionApproval(ctx context.Context, contactEmail, instName, adminEmail, adminPassword, sCode, tCode string) error {
 	html := fmt.Sprintf(`
-<h2>Welcome to QuizApp!</h2>
+<h2>Welcome to Qwish!</h2>
 <p>Your institution <strong>%s</strong> has been approved.</p>
 <h3>Admin Credentials</h3>
 <p>Email: <strong>%s</strong></p>
@@ -120,17 +120,17 @@ func (s *Service) SendInstitutionApproval(ctx context.Context, contactEmail, ins
 <p>Teacher Code: <strong>%s</strong></p>
 <p>Please change your password after first login.</p>
 `, instName, adminEmail, adminPassword, sCode, tCode)
-	return s.SendEmail(ctx, contactEmail, "Your QuizApp Institution Has Been Approved", html, "institution_approval")
+	return s.SendEmail(ctx, contactEmail, "Your Qwish Institution Has Been Approved", html, "institution_approval")
 }
 
 func (s *Service) SendInstitutionRejection(ctx context.Context, contactEmail, instName, reason string) error {
 	html := fmt.Sprintf(`
-<h2>QuizApp Institution Application</h2>
+<h2>Qwish Institution Application</h2>
 <p>We're sorry, but your application for <strong>%s</strong> was not approved.</p>
 <p><strong>Reason:</strong> %s</p>
 <p>You may reapply after addressing the above issues.</p>
 `, instName, reason)
-	return s.SendEmail(ctx, contactEmail, "QuizApp Institution Application Update", html, "institution_rejection")
+	return s.SendEmail(ctx, contactEmail, "Qwish Institution Application Update", html, "institution_rejection")
 }
 
 func (s *Service) SendPasswordReset(ctx context.Context, email, resetLink string) error {
@@ -140,7 +140,7 @@ func (s *Service) SendPasswordReset(ctx context.Context, email, resetLink string
 <p><a href="%s">Reset Password</a></p>
 <p>If you did not request this, please ignore this email.</p>
 `, resetLink)
-	return s.SendEmail(ctx, email, "QuizApp Password Reset", html, "password_reset")
+	return s.SendEmail(ctx, email, "Qwish Password Reset", html, "password_reset")
 }
 
 // SendTeacherInvite emails a teacher invite link to the given address.
@@ -151,9 +151,9 @@ func (s *Service) SendTeacherInvite(ctx context.Context, to, name, instName, inv
 		greeting = "Hi " + name
 	}
 	html := fmt.Sprintf(`
-<h2>You're invited to join QuizApp as a Teacher</h2>
+<h2>You're invited to join Qwish as a Teacher</h2>
 <p>%s,</p>
-<p><strong>%s</strong> has invited you to join their institution on QuizApp as a teacher.</p>
+<p><strong>%s</strong> has invited you to join their institution on Qwish as a teacher.</p>
 <p>Click the button below to set up your account. This invite expires in 7 days.</p>
 <p style="margin:24px 0">
   <a href="%s"
@@ -164,7 +164,7 @@ func (s *Service) SendTeacherInvite(ctx context.Context, to, name, instName, inv
 <p style="font-size:12px;color:#888">Or copy this link: %s</p>
 <p style="font-size:12px;color:#888">If you weren't expecting this invitation, you can safely ignore this email.</p>
 `, greeting, instName, inviteLink, inviteLink)
-	return s.SendEmail(ctx, to, "You're invited to teach on QuizApp", html,
+	return s.SendEmail(ctx, to, "You're invited to teach on Qwish", html,
 		fmt.Sprintf("teacher_invite:%s", inviteID))
 }
 
@@ -174,9 +174,9 @@ func (s *Service) SendAdminInvite(ctx context.Context, to, name, role, inviteLin
 		greeting = "Hi " + name
 	}
 	html := fmt.Sprintf(`
-<h2>You're invited to join QuizApp as an Admin</h2>
+<h2>You're invited to join Qwish as an Admin</h2>
 <p>%s,</p>
-<p>You have been invited to join QuizApp as a <strong>%s</strong>.</p>
+<p>You have been invited to join Qwish as a <strong>%s</strong>.</p>
 <p>Click the button below to set up your account and access the Admin Dashboard.</p>
 <p style="margin:24px 0">
   <a href="%s"
@@ -186,7 +186,7 @@ func (s *Service) SendAdminInvite(ctx context.Context, to, name, role, inviteLin
 </p>
 <p style="font-size:12px;color:#888">Or copy this link: %s</p>
 `, greeting, role, inviteLink, inviteLink)
-	return s.SendEmail(ctx, to, "You're invited to join QuizApp as an Admin", html, "admin_invite")
+	return s.SendEmail(ctx, to, "You're invited to join Qwish as an Admin", html, "admin_invite")
 }
 
 // SendWeeklyInsights emails the user their weekly score breakdown.
@@ -201,7 +201,7 @@ func (s *Service) SendWeeklyInsights(ctx context.Context, to, name string, point
 		domainLine = fmt.Sprintf(`<tr><td style="padding:6px 0">Domain</td><td style="text-align:right"><strong>%s</strong></td></tr>`, domain)
 	}
 	html := fmt.Sprintf(`
-<h2>Your week on QuizApp 📊</h2>
+<h2>Your week on Qwish 📊</h2>
 <p>%s, here's how your week went:</p>
 <table style="width:100%%;max-width:420px;border-collapse:collapse;font-size:15px">
   <tr><td style="padding:6px 0">Points earned</td><td style="text-align:right"><strong>%d</strong> <span style="color:#888">(%s)</span></td></tr>
@@ -212,7 +212,7 @@ func (s *Service) SendWeeklyInsights(ctx context.Context, to, name string, point
 </table>
 <p style="margin-top:20px;padding:14px;background:#F1F5F9;border-radius:8px">💡 <strong>What to do next:</strong> %s</p>
 `, greeting, pointsThisWeek, trend, quizzes, avgScore, streak, domainLine, suggestion)
-	return s.SendEmail(ctx, to, "Your weekly QuizApp insights", html, "weekly_insights")
+	return s.SendEmail(ctx, to, "Your weekly Qwish insights", html, "weekly_insights")
 }
 
 func (s *Service) SendAdminWelcome(ctx context.Context, to, name, role string) error {
@@ -221,10 +221,10 @@ func (s *Service) SendAdminWelcome(ctx context.Context, to, name, role string) e
 		greeting = "Hi " + name
 	}
 	html := fmt.Sprintf(`
-<h2>Welcome to QuizApp Admins!</h2>
+<h2>Welcome to Qwish Admins!</h2>
 <p>%s,</p>
-<p>You have been granted <strong>%s</strong> privileges on QuizApp.</p>
+<p>You have been granted <strong>%s</strong> privileges on Qwish.</p>
 <p>You can now log in using your existing credentials at the Admin Dashboard.</p>
 `, greeting, role)
-	return s.SendEmail(ctx, to, "QuizApp Admin Access Granted", html, "admin_welcome")
+	return s.SendEmail(ctx, to, "Qwish Admin Access Granted", html, "admin_welcome")
 }

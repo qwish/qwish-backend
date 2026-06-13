@@ -120,6 +120,23 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 			if u.InstitutionID != nil {
 				ctx = context.WithValue(ctx, ContextKeyInstID, *u.InstitutionID)
 			}
+
+			// A super_admin/moderator/support_agent may be resolved here via the
+			// users table (it's checked first) while also having an admin_accounts
+			// row. Admin handlers write the actor into admin_accounts FK columns and
+			// the audit log, so surface that admin id when one exists. Best-effort:
+			// when there's no admin_accounts row, GetAdminID stays empty and the
+			// handlers fall back to NULL.
+			if u.Role == "super_admin" || u.Role == "moderator" || u.Role == "support_agent" {
+				var adminID string
+				if e := db.QueryRow(r.Context(),
+					`SELECT id FROM admin_accounts WHERE supabase_uid = $1 AND deleted_at IS NULL`,
+					supabaseUID,
+				).Scan(&adminID); e == nil {
+					ctx = context.WithValue(ctx, ContextKeyAdminID, adminID)
+				}
+			}
+
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

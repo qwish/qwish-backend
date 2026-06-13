@@ -219,11 +219,20 @@ func (h *Handler) ApproveInstitution(w http.ResponseWriter, r *http.Request) {
 	sCode := "S" + uuid.New().String()[:7]
 	tCode := "T" + uuid.New().String()[:7]
 
+	// verified_by is a nullable FK to admin_accounts.id. A super_admin resolved
+	// via the users table (not admin_accounts) has an empty GetAdminID; pass NULL
+	// rather than "" which fails uuid parsing (22P02), and rather than the users.id
+	// which would violate the admin_accounts FK (23503).
+	var verifiedBy *string
+	if adminID != "" {
+		verifiedBy = &adminID
+	}
+
 	_, err := h.db.Exec(r.Context(),
 		`UPDATE institutions SET status='verified', verified_at=now(), verified_by=$1,
 		 student_referral_code=$2, teacher_referral_code=$3, updated_at=now()
 		 WHERE id=$4 AND status='pending'`,
-		adminID, sCode, tCode, instID)
+		verifiedBy, sCode, tCode, instID)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -485,10 +494,21 @@ func (h *Handler) AdjustPoints(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Impersonate(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "userId")
 	adminID := middleware.GetAdminID(r)
+	// impersonation_sessions.admin_id is NOT NULL and FK-constrained to
+	// admin_accounts. A super_admin authenticated via the users table has no such
+	// row, so the session can't be attributed — reject clearly rather than 500.
+	if adminID == "" {
+		middleware.Error(w, http.StatusConflict, "NO_ADMIN_ACCOUNT",
+			"impersonation requires an admin_accounts profile for the acting admin")
+		return
+	}
 	var sessionID string
-	h.db.QueryRow(r.Context(),
+	if err := h.db.QueryRow(r.Context(),
 		`INSERT INTO impersonation_sessions (admin_id, user_id) VALUES ($1,$2) RETURNING id`, adminID, userID,
-	).Scan(&sessionID)
+	).Scan(&sessionID); err != nil {
+		middleware.InternalError(w)
+		return
+	}
 	logAudit(r.Context(), h.db, adminID, "impersonate_user", "user", userID, "")
 	middleware.JSON(w, http.StatusOK, map[string]string{"session_id": sessionID, "message": "impersonation session started"})
 }
@@ -533,7 +553,7 @@ func (h *Handler) ApproveQuiz(w http.ResponseWriter, r *http.Request) {
 	adminID := middleware.GetAdminID(r)
 	h.db.Exec(r.Context(),
 		`UPDATE quizzes SET status='published', published_at=now(), approved_by=$1, approved_at=now(), updated_at=now()
-		 WHERE id=$2 AND status='pending_approval'`, adminID, quizID)
+		 WHERE id=$2 AND status='pending_approval'`, nullableAdmin(adminID), quizID)
 	logAudit(r.Context(), h.db, adminID, "approve_quiz", "quiz", quizID, "")
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "quiz approved"})
 }
@@ -632,7 +652,7 @@ func (h *Handler) ResolveReport(w http.ResponseWriter, r *http.Request) {
 	adminID := middleware.GetAdminID(r)
 	h.db.Exec(r.Context(),
 		`UPDATE reports SET status='resolved', resolution=$1, reviewed_by=$2, resolved_at=now() WHERE id=$3`,
-		req.Resolution, adminID, reportID)
+		req.Resolution, nullableAdmin(adminID), reportID)
 
 	// If remove_quiz, unpublish it
 	if req.Resolution == "remove_quiz" {
@@ -689,17 +709,20 @@ func (h *Handler) UpdatePointEconomy(w http.ResponseWriter, r *http.Request) {
 
 	_, err := h.db.Exec(r.Context(),
 		`UPDATE point_economy_config SET value=$1, updated_by=$2, updated_at=now() WHERE key=$3`,
-		req.Value, adminID, key)
+		req.Value, nullableAdmin(adminID), key)
 	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
 
-	// Audit with old/new values and optional reason
-	h.db.Exec(r.Context(),
-		`INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, reason, old_value, new_value)
-		 VALUES ($1,(SELECT name FROM admin_accounts WHERE id=$1),(SELECT role FROM admin_accounts WHERE id=$1),'update_point_config','config',$2,$3,$4,$5)`,
-		adminID, key, req.Reason, oldVal, req.Value)
+	// Audit with old/new values and optional reason. audit_log.admin_id is NOT
+	// NULL, so only record when the actor maps to an admin_accounts row.
+	if adminID != "" {
+		h.db.Exec(r.Context(),
+			`INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, reason, old_value, new_value)
+			 VALUES ($1,(SELECT name FROM admin_accounts WHERE id=$1),(SELECT role FROM admin_accounts WHERE id=$1),'update_point_config','config',$2,$3,$4,$5)`,
+			adminID, key, req.Reason, oldVal, req.Value)
+	}
 
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "config updated"})
 }
@@ -742,7 +765,7 @@ func (h *Handler) CreateAnnouncement(w http.ResponseWriter, r *http.Request) {
 	h.db.QueryRow(r.Context(),
 		`INSERT INTO announcements (title, body, cta_label, cta_url, delivery_types, audience, institution_id, status, scheduled_at, created_by)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-		req.Title, req.Body, req.CTALabel, req.CTAURL, deliveryJSON, req.Audience, req.InstitutionID, status, req.ScheduledAt, adminID,
+		req.Title, req.Body, req.CTALabel, req.CTAURL, deliveryJSON, req.Audience, req.InstitutionID, status, req.ScheduledAt, nullableAdmin(adminID),
 	).Scan(&id)
 	middleware.JSON(w, http.StatusCreated, map[string]string{"id": id, "status": status})
 }
@@ -1258,7 +1281,7 @@ func (h *Handler) CreatePromo(w http.ResponseWriter, r *http.Request) {
 	err := h.db.QueryRow(r.Context(),
 		`INSERT INTO promotional_content (title, body, cta_label, cta_url, type, audience, starts_at, ends_at, created_by)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-		req.Title, req.Body, req.CTALabel, req.CTAURL, req.Placement, req.Target, req.StartDate, req.EndDate, adminID,
+		req.Title, req.Body, req.CTALabel, req.CTAURL, req.Placement, req.Target, req.StartDate, req.EndDate, nullableAdmin(adminID),
 	).Scan(&id)
 	if err != nil {
 		middleware.InternalError(w)
@@ -1390,7 +1413,7 @@ func (h *Handler) CreateBrand(w http.ResponseWriter, r *http.Request) {
 	err := h.db.QueryRow(r.Context(),
 		`INSERT INTO brands (name, industry, contact_email, website, reward_pool, created_by)
 		 VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-		req.Name, req.Industry, req.ContactEmail, req.Website, req.RewardPool, adminID,
+		req.Name, req.Industry, req.ContactEmail, req.Website, req.RewardPool, nullableAdmin(adminID),
 	).Scan(&id)
 	if err != nil {
 		middleware.InternalError(w)
@@ -1406,7 +1429,7 @@ func (h *Handler) ApproveBrand(w http.ResponseWriter, r *http.Request) {
 	adminID := middleware.GetAdminID(r)
 	tag, err := h.db.Exec(r.Context(),
 		`UPDATE brands SET status='active', approved_by=$1, approved_at=now(), updated_at=now()
-		 WHERE id=$2 AND status='pending'`, adminID, id)
+		 WHERE id=$2 AND status='pending'`, nullableAdmin(adminID), id)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -1475,7 +1498,7 @@ func (h *Handler) ApproveSponsorshipRequest(w http.ResponseWriter, r *http.Reque
 	adminID := middleware.GetAdminID(r)
 	tag, err := h.db.Exec(r.Context(),
 		`UPDATE sponsorship_requests SET status='approved', reviewed_by=$1, reviewed_at=now()
-		 WHERE id=$2 AND status='pending'`, adminID, id)
+		 WHERE id=$2 AND status='pending'`, nullableAdmin(adminID), id)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -1498,7 +1521,7 @@ func (h *Handler) RejectSponsorshipRequest(w http.ResponseWriter, r *http.Reques
 	adminID := middleware.GetAdminID(r)
 	tag, err := h.db.Exec(r.Context(),
 		`UPDATE sponsorship_requests SET status='rejected', reason=$1, reviewed_by=$2, reviewed_at=now()
-		 WHERE id=$3 AND status='pending'`, req.Reason, adminID, id)
+		 WHERE id=$3 AND status='pending'`, req.Reason, nullableAdmin(adminID), id)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -1714,7 +1737,24 @@ func (h *Handler) ListNotificationLog(w http.ResponseWriter, r *http.Request) {
 }
 
 // logAudit writes an entry to the audit_log table.
+// nullableAdmin maps an actor id to a nullable admin_accounts FK value. A
+// super_admin/moderator resolved via the users table (not admin_accounts) has an
+// empty GetAdminID; persist NULL rather than "" (which fails uuid parsing, 22P02)
+// or a users.id (which would violate the admin_accounts FK, 23503).
+func nullableAdmin(adminID string) *string {
+	if adminID == "" {
+		return nil
+	}
+	return &adminID
+}
+
 func logAudit(ctx context.Context, db *pgxpool.Pool, adminID, action, targetType, targetID, reason string) {
+	// audit_log.admin_id is NOT NULL. When the actor isn't an admin_accounts row
+	// (e.g. a super_admin on the users table) there's no id to attribute the
+	// entry to, so skip rather than fail the insert with 22P02.
+	if adminID == "" {
+		return
+	}
 	var adminName, adminRole string
 	db.QueryRow(ctx, `SELECT name, role FROM admin_accounts WHERE id=$1`, adminID).Scan(&adminName, &adminRole)
 	db.Exec(ctx,

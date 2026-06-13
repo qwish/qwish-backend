@@ -350,7 +350,7 @@ func (h *Handler) GetMyReportCardPDF(w http.ResponseWriter, r *http.Request) {
 	streamContent := fmt.Sprintf(`BT
 /F1 22 Tf
 50 750 Td
-(NumPie Verified Skill Report Card) Tj
+(Qwish Verified Skill Report Card) Tj
 /F1 12 Tf
 0 -40 Td
 (Name: %s) Tj

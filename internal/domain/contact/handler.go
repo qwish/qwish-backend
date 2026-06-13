@@ -13,7 +13,7 @@ import (
 )
 
 // validTopics is the set of accepted contact form topics.
-// Keep in sync with the CHECK constraint in 014_contact_topics_align.sql and the
+// Keep in sync with the CHECK constraint in 015_contact_topic_demo.sql and the
 // brand-website contact form (qwish-brand-website ContactClient.tsx).
 var validTopics = map[string]bool{
 	"institution": true,
@@ -22,6 +22,7 @@ var validTopics = map[string]bool{
 	"calibration": true,
 	"press":       true,
 	"support":     true,
+	"demo":        true,
 	"other":       true,
 }
 
@@ -65,7 +66,7 @@ func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validTopics[req.Topic] {
-		middleware.BadRequest(w, "topic must be one of: institution, partnership, recruiter, calibration, press, support, other")
+		middleware.BadRequest(w, "topic must be one of: institution, partnership, recruiter, calibration, press, support, demo, other")
 		return
 	}
 

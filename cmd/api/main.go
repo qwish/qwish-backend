@@ -14,9 +14,9 @@ import (
 	"github.com/qwish/backend/internal/config"
 	"github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/domain/admin"
-	"github.com/qwish/backend/internal/domain/contact"
 	"github.com/qwish/backend/internal/domain/attempt"
 	"github.com/qwish/backend/internal/domain/auth"
+	"github.com/qwish/backend/internal/domain/contact"
 	"github.com/qwish/backend/internal/domain/institution"
 	"github.com/qwish/backend/internal/domain/leaderboard"
 	"github.com/qwish/backend/internal/domain/notification"
@@ -132,342 +132,343 @@ func main() {
 
 			// ------ Public Institution Onboarding ------
 			r.Route("/onboarding", func(r chi.Router) {
-			r.Post("/institution", onboardingH.RegisterInstitution)
-			r.Get("/institution/status", onboardingH.CheckStatus)
-		})
-
-		// ------ Public Contact Form ------
-		r.Post("/contact", contactH.Submit)
-
-		// ------ AUTH (public) ------
-		r.Route("/auth", func(r chi.Router) {
-			r.Post("/send-otp", authH.SendOTP)
-			r.Post("/verify-otp", authH.VerifyOTP)
-			r.Post("/refresh", authH.Refresh)
-			r.Get("/teacher-invite", authH.GetTeacherInvite)
-
-			// JWT-only (user may not exist in DB yet)
-			r.Group(func(r chi.Router) {
-				r.Use(mw.AuthenticateJWTOnly(cfg.SupabaseJWTSecret, cfg.SupabaseURL))
-				r.Post("/create-profile", authH.CreateProfile)
+				r.Post("/institution", onboardingH.RegisterInstitution)
+				r.Get("/institution/status", onboardingH.CheckStatus)
 			})
 
-			// Protected auth routes
+			// ------ Public Contact Form ------
+			r.Post("/contact", contactH.Submit)
+
+			// ------ AUTH (public) ------
+			r.Route("/auth", func(r chi.Router) {
+				r.Post("/send-otp", authH.SendOTP)
+				r.Post("/verify-otp", authH.VerifyOTP)
+				r.Post("/refresh", authH.Refresh)
+				r.Get("/teacher-invite", authH.GetTeacherInvite)
+
+				// JWT-only (user may not exist in DB yet)
+				r.Group(func(r chi.Router) {
+					r.Use(mw.AuthenticateJWTOnly(cfg.SupabaseJWTSecret, cfg.SupabaseURL))
+					r.Post("/create-profile", authH.CreateProfile)
+				})
+
+				// Protected auth routes
+				r.Group(func(r chi.Router) {
+					r.Use(mw.Authenticate(cfg.SupabaseJWTSecret, cfg.SupabaseURL, pool))
+					r.Post("/logout", authH.Logout)
+					r.Patch("/referral-code", authH.UpdateReferralCode)
+				})
+			})
+
+			// ------ Protected routes (all require auth) ------
 			r.Group(func(r chi.Router) {
 				r.Use(mw.Authenticate(cfg.SupabaseJWTSecret, cfg.SupabaseURL, pool))
-				r.Post("/logout", authH.Logout)
-				r.Patch("/referral-code", authH.UpdateReferralCode)
-			})
-		})
 
-		// ------ Protected routes (all require auth) ------
-		r.Group(func(r chi.Router) {
-			r.Use(mw.Authenticate(cfg.SupabaseJWTSecret, cfg.SupabaseURL, pool))
+				// Users (self)
+				r.Get("/users/me", userH.GetMe)
+				r.Patch("/users/me", userH.UpdateMe)
+				r.Delete("/users/me", userH.DeleteMe)
+				r.Get("/users/me/stats", userH.GetMyStats)
+				r.Get("/users/me/badges", userH.GetMyBadges)
+				r.Get("/users/me/attempts", userH.GetMyAttempts)
+				r.Get("/users/me/points", pointsH.GetBalance)
+				r.Get("/users/me/points/ledger", pointsH.GetLedger)
+				r.Get("/users/me/streak", streakH.GetStreak)
+				r.Get("/users/me/rank", userH.GetMyRank)
+				r.Get("/users/me/profile-views", userH.GetMyProfileViews)
+				r.Get("/users/me/milestones", userH.GetMyMilestones)
+				r.Get("/users/me/education", userH.GetMyEducation)
+				r.Post("/users/me/education", userH.AddMyEducation)
+				r.Delete("/users/me/education/{id}", userH.DeleteMyEducation)
+				r.Get("/users/me/notifications", notifH.List)
+				r.Get("/users/me/notifications/unread-count", notifH.UnreadCount)
+				r.Patch("/users/me/notifications/read-all", notifH.MarkAllRead)
+				r.Patch("/users/me/notifications/{id}/read", notifH.MarkRead)
+				r.Post("/users/me/devices", pushH.Register)
+				r.Delete("/users/me/devices/{token}", pushH.Unregister)
+				r.Get("/users/me/skills", userH.GetMySkills)
+				r.Post("/users/me/skills", userH.AddMySkill)
+				r.Delete("/users/me/skills/{skill}", userH.DeleteMySkill)
+				r.Patch("/users/me/domain", userH.UpdateMyDomain)
+				r.Get("/users/me/recommendations", userH.GetMyRecommendations)
+				r.Get("/users/me/report-card", userH.GetMyReportCardPDF)
+				r.Get("/users/{userId}/profile", userH.GetPublicProfile)
 
-			// Users (self)
-			r.Get("/users/me", userH.GetMe)
-			r.Patch("/users/me", userH.UpdateMe)
-			r.Delete("/users/me", userH.DeleteMe)
-			r.Get("/users/me/stats", userH.GetMyStats)
-			r.Get("/users/me/badges", userH.GetMyBadges)
-			r.Get("/users/me/attempts", userH.GetMyAttempts)
-			r.Get("/users/me/points", pointsH.GetBalance)
-			r.Get("/users/me/points/ledger", pointsH.GetLedger)
-			r.Get("/users/me/streak", streakH.GetStreak)
-			r.Get("/users/me/rank", userH.GetMyRank)
-			r.Get("/users/me/profile-views", userH.GetMyProfileViews)
-			r.Get("/users/me/milestones", userH.GetMyMilestones)
-			r.Get("/users/me/education", userH.GetMyEducation)
-			r.Post("/users/me/education", userH.AddMyEducation)
-			r.Delete("/users/me/education/{id}", userH.DeleteMyEducation)
-			r.Get("/users/me/notifications", notifH.List)
-			r.Get("/users/me/notifications/unread-count", notifH.UnreadCount)
-			r.Patch("/users/me/notifications/read-all", notifH.MarkAllRead)
-			r.Patch("/users/me/notifications/{id}/read", notifH.MarkRead)
-			r.Post("/users/me/devices", pushH.Register)
-			r.Delete("/users/me/devices/{token}", pushH.Unregister)
-			r.Get("/users/me/skills", userH.GetMySkills)
-			r.Post("/users/me/skills", userH.AddMySkill)
-			r.Delete("/users/me/skills/{skill}", userH.DeleteMySkill)
-			r.Patch("/users/me/domain", userH.UpdateMyDomain)
-			r.Get("/users/me/recommendations", userH.GetMyRecommendations)
-			r.Get("/users/me/report-card", userH.GetMyReportCardPDF)
-			r.Get("/users/{userId}/profile", userH.GetPublicProfile)
+				// Settings: dark mode (theme) + privacy (private-by-default / recruiter visibility)
+				r.Get("/users/me/settings", userH.GetMySettings)
+				r.Patch("/users/me/settings", userH.UpdateMySettings)
 
-			// Settings: dark mode (theme) + privacy (private-by-default / recruiter visibility)
-			r.Get("/users/me/settings", userH.GetMySettings)
-			r.Patch("/users/me/settings", userH.UpdateMySettings)
+				// Notification preferences (push alerts opt-in/out)
+				r.Get("/users/me/notification-preferences", userH.GetMyNotifPrefs)
+				r.Patch("/users/me/notification-preferences", userH.UpdateMyNotifPrefs)
 
-			// Notification preferences (push alerts opt-in/out)
-			r.Get("/users/me/notification-preferences", userH.GetMyNotifPrefs)
-			r.Patch("/users/me/notification-preferences", userH.UpdateMyNotifPrefs)
+				// Weekly score insights
+				r.Get("/users/me/insights/weekly", userH.GetMyWeeklyInsights)
 
-			// Weekly score insights
-			r.Get("/users/me/insights/weekly", userH.GetMyWeeklyInsights)
+				// Offline mode: prefetch practice pack + sync offline results
+				r.Get("/offline/pack", offlineH.GetPack)
+				r.Post("/offline/sync", offlineH.Sync)
 
-			// Offline mode: prefetch practice pack + sync offline results
-			r.Get("/offline/pack", offlineH.GetPack)
-			r.Post("/offline/sync", offlineH.Sync)
+				// Social: batchmate follows
+				r.Post("/users/{userId}/follow", studyGroupH.Follow)
+				r.Delete("/users/{userId}/follow", studyGroupH.Unfollow)
+				r.Get("/users/me/following", studyGroupH.Following)
+				r.Get("/users/me/followers", studyGroupH.Followers)
 
-			// Social: batchmate follows
-			r.Post("/users/{userId}/follow", studyGroupH.Follow)
-			r.Delete("/users/{userId}/follow", studyGroupH.Unfollow)
-			r.Get("/users/me/following", studyGroupH.Following)
-			r.Get("/users/me/followers", studyGroupH.Followers)
+				// Study groups (private leagues)
+				r.Post("/study-groups", studyGroupH.Create)
+				r.Get("/study-groups", studyGroupH.ListMine)
+				r.Post("/study-groups/join", studyGroupH.Join)
+				r.Get("/study-groups/{groupId}", studyGroupH.Get)
+				r.Delete("/study-groups/{groupId}", studyGroupH.Archive)
+				r.Post("/study-groups/{groupId}/leave", studyGroupH.Leave)
+				r.Get("/study-groups/{groupId}/leaderboard", studyGroupH.Leaderboard)
 
-			// Study groups (private leagues)
-			r.Post("/study-groups", studyGroupH.Create)
-			r.Get("/study-groups", studyGroupH.ListMine)
-			r.Post("/study-groups/join", studyGroupH.Join)
-			r.Get("/study-groups/{groupId}", studyGroupH.Get)
-			r.Delete("/study-groups/{groupId}", studyGroupH.Archive)
-			r.Post("/study-groups/{groupId}/leave", studyGroupH.Leave)
-			r.Get("/study-groups/{groupId}/leaderboard", studyGroupH.Leaderboard)
-
-			// Quiz browser (student / teacher)
-			r.Get("/quizzes", quizH.List)
-			r.Get("/quizzes/{quizId}", quizH.Get)
-			r.Post("/quizzes/{quizId}/save", quizH.Save)
-			r.Delete("/quizzes/{quizId}/save", quizH.Unsave)
-			r.Get("/quizzes/{quizId}/share", quizH.Share)
-			r.Post("/quizzes/{quizId}/reports", quizH.ReportQuiz)
-			r.Post("/quizzes/{quizId}/questions/{questionId}/reports", quizH.ReportQuestion)
-
-			// Attempts
-			r.Post("/quizzes/{quizId}/attempts", attemptH.Start)
-			r.Post("/attempts/{attemptId}/answers", attemptH.SubmitAnswer)
-			r.Post("/attempts/{attemptId}/complete", attemptH.Complete)
-			r.Get("/attempts/{attemptId}", attemptH.GetResult)
-
-			// Leaderboard
-			r.Get("/leaderboard", leaderboardH.Get)
-
-			// Topic requests (student)
-			r.Post("/topic-requests", topicH.Create)
-			r.Get("/topic-requests/mine", topicH.ListMine)
-
-			// Parent
-			r.Post("/parent/link-invite", parentH.GenerateInvite)
-			r.Post("/parent/link", parentH.Link)
-			r.Post("/parent/link/{linkId}/accept", parentH.Accept)
-			r.Delete("/parent/link/{linkId}", parentH.Revoke)
-			r.Get("/parent/children", parentH.ListChildren)
-			r.Get("/parent/children/{studentId}/overview", parentH.ChildOverview)
-
-			// ---- Teacher routes ----
-			r.Route("/teacher", func(r chi.Router) {
-				r.Use(mw.RequireRole("teacher"))
-				r.Get("/overview", teacherH.Overview)
-				r.Get("/quizzes", quizH.TeacherList)
-				r.Post("/quizzes", quizH.TeacherCreate)
-				r.Patch("/quizzes/{quizId}", quizH.TeacherUpdate)
-				r.Delete("/quizzes/{quizId}", quizH.TeacherDelete)
-				r.Post("/quizzes/{quizId}/publish", quizH.TeacherPublish)
-				r.Post("/quizzes/{quizId}/unpublish", quizH.TeacherUnpublish)
-				r.Get("/quizzes/{quizId}/results", quizH.TeacherResults)
-				r.Post("/quizzes/{quizId}/questions", quizH.TeacherAddQuestion)
-				r.Patch("/quizzes/{quizId}/questions/order", quizH.TeacherReorderQuestions)
-				r.Patch("/quizzes/{quizId}/questions/{questionId}", quizH.TeacherUpdateQuestion)
-				r.Delete("/quizzes/{quizId}/questions/{questionId}", quizH.TeacherDeleteQuestion)
-				r.Get("/students", teacherH.ListStudents)
-				r.Get("/students/{userId}", teacherH.GetStudent)
-				r.Get("/classes", teacherH.ListClasses)
-				r.Get("/classes/{classId}", teacherH.GetClass)
-				r.Get("/reports/quiz-analytics", teacherH.QuizAnalyticsReport)
-				r.Get("/reports/student-performance", teacherH.StudentPerformanceReport)
-				r.Get("/topic-requests", topicH.TeacherList)
-				r.Patch("/topic-requests/{requestId}", topicH.TeacherUpdate)
-			})
-
-			// Upload
-			r.Route("/upload", func(r chi.Router) {
-				r.Use(mw.RequireRole("teacher", "super_admin", "moderator"))
-				r.Post("/image", uploadH.UploadImage)
-				r.Post("/presign", uploadH.PresignUpload)
-			})
-
-			// ---- Institution Admin routes ----
-			r.Route("/institution", func(r chi.Router) {
-				r.Use(mw.RequireRole("institution_admin"))
-				r.Get("/overview", institutionH.Overview)
-				r.Get("/students", institutionH.ListStudents)
-				r.Get("/students/{userId}", institutionH.GetStudent)
-				r.Patch("/students/{userId}/status", institutionH.UpdateStudentStatus)
-				r.Get("/teachers", institutionH.ListTeachers)
-				r.Get("/teachers/{userId}", institutionH.GetTeacher)
-				r.Patch("/teachers/{userId}/status", institutionH.UpdateTeacherStatus)
-				r.Delete("/teachers/{userId}", institutionH.RemoveTeacher)
-				r.Post("/teachers/invite", institutionH.InviteTeacher)
-				r.Get("/groups", institutionH.ListGroups)
-				r.Post("/groups", institutionH.CreateGroup)
-				r.Get("/groups/{groupId}", institutionH.GetGroup)
-				r.Patch("/groups/{groupId}", institutionH.UpdateGroup)
-				r.Delete("/groups/{groupId}", institutionH.ArchiveGroup)
-				r.Post("/groups/{groupId}/students", institutionH.AddStudentToGroup)
-				r.Delete("/groups/{groupId}/students/{userId}", institutionH.RemoveStudentFromGroup)
-				r.Post("/groups/{groupId}/teachers", institutionH.AddTeacherToGroup)
+				// Quiz browser (student / teacher)
 				r.Get("/quizzes", quizH.List)
 				r.Get("/quizzes/{quizId}", quizH.Get)
-				r.Get("/topic-requests", topicH.TeacherList)
-				r.Patch("/topic-requests/{requestId}", topicH.InstitutionUpdate)
-				r.Get("/reports/student-performance", institutionH.StudentPerformanceReport)
-				r.Get("/reports/teacher-activity", institutionH.TeacherActivityReport)
-				r.Get("/reports/quiz-analytics", institutionH.QuizAnalyticsReport)
-				r.Get("/reports/streak-health", institutionH.StreakHealthReport)
-				r.Get("/reports/points-summary", institutionH.PointsSummaryReport)
-				r.Get("/quizzes/{quizId}/results", institutionH.QuizResults)
-				r.Get("/settings", institutionH.GetSettings)
-				r.Patch("/settings", institutionH.UpdateSettings)
-				r.Patch("/settings/point-rules", institutionH.UpdatePointRules)
-				r.Get("/audit-log", institutionH.AuditLog)
+				r.Post("/quizzes/{quizId}/save", quizH.Save)
+				r.Delete("/quizzes/{quizId}/save", quizH.Unsave)
+				r.Get("/quizzes/{quizId}/share", quizH.Share)
+				r.Post("/quizzes/{quizId}/reports", quizH.ReportQuiz)
+				r.Post("/quizzes/{quizId}/questions/{questionId}/reports", quizH.ReportQuestion)
+
+				// Attempts
+				r.Post("/quizzes/{quizId}/attempts", attemptH.Start)
+				r.Post("/attempts/{attemptId}/answers", attemptH.SubmitAnswer)
+				r.Post("/attempts/{attemptId}/complete", attemptH.Complete)
+				r.Get("/attempts/{attemptId}", attemptH.GetResult)
+
+				// Leaderboard
+				r.Get("/leaderboard", leaderboardH.Get)
+
+				// Topic requests (student)
+				r.Post("/topic-requests", topicH.Create)
+				r.Get("/topic-requests/mine", topicH.ListMine)
+
+				// Parent
+				r.Post("/parent/link-invite", parentH.GenerateInvite)
+				r.Post("/parent/link", parentH.Link)
+				r.Post("/parent/link/{linkId}/accept", parentH.Accept)
+				r.Delete("/parent/link/{linkId}", parentH.Revoke)
+				r.Get("/parent/children", parentH.ListChildren)
+				r.Get("/parent/children/{studentId}/overview", parentH.ChildOverview)
+
+				// ---- Teacher routes ----
+				r.Route("/teacher", func(r chi.Router) {
+					r.Use(mw.RequireRole("teacher"))
+					r.Get("/overview", teacherH.Overview)
+					r.Get("/quizzes", quizH.TeacherList)
+					r.Post("/quizzes", quizH.TeacherCreate)
+					r.Patch("/quizzes/{quizId}", quizH.TeacherUpdate)
+					r.Delete("/quizzes/{quizId}", quizH.TeacherDelete)
+					r.Post("/quizzes/{quizId}/publish", quizH.TeacherPublish)
+					r.Post("/quizzes/{quizId}/unpublish", quizH.TeacherUnpublish)
+					r.Get("/quizzes/{quizId}/results", quizH.TeacherResults)
+					r.Post("/quizzes/{quizId}/questions", quizH.TeacherAddQuestion)
+					r.Patch("/quizzes/{quizId}/questions/order", quizH.TeacherReorderQuestions)
+					r.Patch("/quizzes/{quizId}/questions/{questionId}", quizH.TeacherUpdateQuestion)
+					r.Delete("/quizzes/{quizId}/questions/{questionId}", quizH.TeacherDeleteQuestion)
+					r.Get("/students", teacherH.ListStudents)
+					r.Get("/students/{userId}", teacherH.GetStudent)
+					r.Get("/classes", teacherH.ListClasses)
+					r.Get("/classes/{classId}", teacherH.GetClass)
+					r.Get("/reports/quiz-analytics", teacherH.QuizAnalyticsReport)
+					r.Get("/reports/student-performance", teacherH.StudentPerformanceReport)
+					r.Get("/topic-requests", topicH.TeacherList)
+					r.Patch("/topic-requests/{requestId}", topicH.TeacherUpdate)
+				})
+
+				// Upload
+				r.Route("/upload", func(r chi.Router) {
+					r.Use(mw.RequireRole("teacher", "super_admin", "moderator"))
+					r.Post("/image", uploadH.UploadImage)
+					r.Post("/presign", uploadH.PresignUpload)
+				})
+
+				// ---- Institution Admin routes ----
+				r.Route("/institution", func(r chi.Router) {
+					r.Use(mw.RequireRole("institution_admin"))
+					r.Get("/overview", institutionH.Overview)
+					r.Get("/students", institutionH.ListStudents)
+					r.Get("/students/{userId}", institutionH.GetStudent)
+					r.Patch("/students/{userId}/status", institutionH.UpdateStudentStatus)
+					r.Get("/teachers", institutionH.ListTeachers)
+					r.Get("/teachers/{userId}", institutionH.GetTeacher)
+					r.Patch("/teachers/{userId}/status", institutionH.UpdateTeacherStatus)
+					r.Delete("/teachers/{userId}", institutionH.RemoveTeacher)
+					r.Post("/teachers/invite", institutionH.InviteTeacher)
+					r.Get("/groups", institutionH.ListGroups)
+					r.Post("/groups", institutionH.CreateGroup)
+					r.Get("/groups/{groupId}", institutionH.GetGroup)
+					r.Patch("/groups/{groupId}", institutionH.UpdateGroup)
+					r.Delete("/groups/{groupId}", institutionH.ArchiveGroup)
+					r.Post("/groups/{groupId}/students", institutionH.AddStudentToGroup)
+					r.Delete("/groups/{groupId}/students/{userId}", institutionH.RemoveStudentFromGroup)
+					r.Post("/groups/{groupId}/teachers", institutionH.AddTeacherToGroup)
+					r.Get("/quizzes", quizH.List)
+					r.Get("/quizzes/{quizId}", quizH.Get)
+					r.Get("/topic-requests", topicH.TeacherList)
+					r.Patch("/topic-requests/{requestId}", topicH.InstitutionUpdate)
+					r.Get("/reports/student-performance", institutionH.StudentPerformanceReport)
+					r.Get("/reports/teacher-activity", institutionH.TeacherActivityReport)
+					r.Get("/reports/quiz-analytics", institutionH.QuizAnalyticsReport)
+					r.Get("/reports/streak-health", institutionH.StreakHealthReport)
+					r.Get("/reports/points-summary", institutionH.PointsSummaryReport)
+					r.Get("/quizzes/{quizId}/results", institutionH.QuizResults)
+					r.Get("/settings", institutionH.GetSettings)
+					r.Patch("/settings", institutionH.UpdateSettings)
+					r.Patch("/settings/point-rules", institutionH.UpdatePointRules)
+					r.Get("/audit-log", institutionH.AuditLog)
+				})
+
+				// ---- Super Admin routes ----
+				r.Route("/admin", func(r chi.Router) {
+					r.Use(mw.RequireRole("super_admin", "moderator", "support_agent"))
+
+					// Overview (all roles)
+					r.Get("/overview", adminH.Overview)
+					r.Get("/activity-feed", adminH.ActivityFeed)
+
+					// Institutions (Super Admin + Moderator read)
+					r.Get("/institutions", adminH.ListInstitutions)
+					r.Get("/institutions/queue", adminH.InstitutionQueue)
+					r.Get("/institutions/{institutionId}", adminH.GetInstitution)
+					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/approve", adminH.ApproveInstitution)
+					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/reject", adminH.RejectInstitution)
+					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/suspend", adminH.SuspendInstitution)
+					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/reactivate", adminH.ReactivateInstitution)
+					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/reset-referral-codes", adminH.ResetReferralCodes)
+					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/provision-admin", adminH.ProvisionAdmin)
+
+					// Users
+					r.Get("/users", adminH.ListUsers)
+					r.Get("/users/{userId}", adminH.GetUser)
+					r.Patch("/users/{userId}/suspend", adminH.SuspendUser)
+					r.Patch("/users/{userId}/reactivate", adminH.ReactivateUser)
+					r.With(mw.RequireRole("super_admin")).Delete("/users/{userId}", adminH.DeleteUser)
+					r.With(mw.RequireRole("super_admin")).Post("/users/{userId}/points", adminH.AdjustPoints)
+					r.Post("/users/{userId}/impersonate", adminH.Impersonate)
+					r.Post("/impersonation/{sessionId}/end", adminH.EndImpersonation)
+					r.With(mw.RequireRole("super_admin")).Post("/users/{userId}/reset-password", adminH.ResetPassword)
+
+					// Quizzes moderation
+					r.Get("/quizzes/moderation-queue", adminH.ModerationQueue)
+					r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/approve", adminH.ApproveQuiz)
+					r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/reject", adminH.RejectQuiz)
+					r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/request-edits", adminH.RequestEdits)
+					r.With(mw.RequireRole("super_admin")).Post("/quizzes/{quizId}/unpublish", adminH.UnpublishQuiz)
+
+					// Reports
+					r.Get("/reports", adminH.ListReports)
+					r.Post("/reports/{reportId}/resolve", adminH.ResolveReport)
+
+					// Point economy (super_admin only)
+					r.With(mw.RequireRole("super_admin")).Get("/point-economy", adminH.GetPointEconomy)
+					r.With(mw.RequireRole("super_admin")).Patch("/point-economy/{key}", adminH.UpdatePointEconomy)
+
+					// Announcements
+					r.Get("/announcements", adminH.ListAnnouncements)
+					r.Post("/announcements", adminH.CreateAnnouncement)
+					r.With(mw.RequireRole("super_admin", "moderator")).Patch("/announcements/{announcementId}/retract", adminH.RetractAnnouncement)
+
+					// Promos
+					r.Get("/promos", adminH.ListPromos)
+					r.With(mw.RequireRole("super_admin", "moderator")).Post("/promos", adminH.CreatePromo)
+					r.With(mw.RequireRole("super_admin", "moderator")).Patch("/promos/{promoId}", adminH.UpdatePromoStatus)
+					r.With(mw.RequireRole("super_admin")).Delete("/promos/{promoId}", adminH.DeletePromo)
+
+					// Brands
+					r.Get("/brands", adminH.ListBrands)
+					r.With(mw.RequireRole("super_admin")).Post("/brands", adminH.CreateBrand)
+					r.With(mw.RequireRole("super_admin")).Post("/brands/{brandId}/approve", adminH.ApproveBrand)
+					r.With(mw.RequireRole("super_admin")).Post("/brands/{brandId}/suspend", adminH.SuspendBrand)
+					r.With(mw.RequireRole("super_admin")).Post("/brands/{brandId}/reactivate", adminH.ReactivateBrand)
+					r.Get("/brands/{brandId}/sponsorship-requests", adminH.ListSponsorshipRequests)
+					r.With(mw.RequireRole("super_admin", "moderator")).Post("/sponsorship-requests/{requestId}/approve", adminH.ApproveSponsorshipRequest)
+					r.With(mw.RequireRole("super_admin", "moderator")).Post("/sponsorship-requests/{requestId}/reject", adminH.RejectSponsorshipRequest)
+
+					// Contact form submissions
+					r.Get("/contact-submissions", contactH.List)
+					r.Post("/contact-submissions/{id}/resolve", contactH.Resolve)
+
+					// Notification log (super_admin only)
+					r.With(mw.RequireRole("super_admin")).Get("/notification-log", adminH.ListNotificationLog)
+
+					// Audit log (super_admin only)
+					r.With(mw.RequireRole("super_admin")).Get("/audit-log", adminH.AuditLog)
+
+					// Admin account management (super_admin only)
+					r.With(mw.RequireRole("super_admin")).Get("/admin-accounts", adminH.ListAdminAccounts)
+					r.With(mw.RequireRole("super_admin")).Post("/admin-accounts", adminH.CreateAdminAccount)
+					r.With(mw.RequireRole("super_admin")).Patch("/admin-accounts/{adminId}", adminH.UpdateAdminAccount)
+					r.With(mw.RequireRole("super_admin")).Delete("/admin-accounts/{adminId}", adminH.DeleteAdminAccount)
+					r.With(mw.RequireRole("super_admin")).Post("/admin-accounts/{adminId}/resend", adminH.ResendAdminInvite)
+				})
 			})
 
-			// ---- Super Admin routes ----
-			r.Route("/admin", func(r chi.Router) {
-				r.Use(mw.RequireRole("super_admin", "moderator", "support_agent"))
-
-				// Overview (all roles)
-				r.Get("/overview", adminH.Overview)
-				r.Get("/activity-feed", adminH.ActivityFeed)
-
-				// Institutions (Super Admin + Moderator read)
-				r.Get("/institutions", adminH.ListInstitutions)
-				r.Get("/institutions/queue", adminH.InstitutionQueue)
-				r.Get("/institutions/{institutionId}", adminH.GetInstitution)
-				r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/approve", adminH.ApproveInstitution)
-				r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/reject", adminH.RejectInstitution)
-				r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/suspend", adminH.SuspendInstitution)
-				r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/reactivate", adminH.ReactivateInstitution)
-				r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/reset-referral-codes", adminH.ResetReferralCodes)
-				r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/provision-admin", adminH.ProvisionAdmin)
-
-				// Users
-				r.Get("/users", adminH.ListUsers)
-				r.Get("/users/{userId}", adminH.GetUser)
-				r.Patch("/users/{userId}/suspend", adminH.SuspendUser)
-				r.Patch("/users/{userId}/reactivate", adminH.ReactivateUser)
-				r.With(mw.RequireRole("super_admin")).Delete("/users/{userId}", adminH.DeleteUser)
-				r.With(mw.RequireRole("super_admin")).Post("/users/{userId}/points", adminH.AdjustPoints)
-				r.Post("/users/{userId}/impersonate", adminH.Impersonate)
-				r.Post("/impersonation/{sessionId}/end", adminH.EndImpersonation)
-				r.With(mw.RequireRole("super_admin")).Post("/users/{userId}/reset-password", adminH.ResetPassword)
-
-				// Quizzes moderation
-				r.Get("/quizzes/moderation-queue", adminH.ModerationQueue)
-				r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/approve", adminH.ApproveQuiz)
-				r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/reject", adminH.RejectQuiz)
-				r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/request-edits", adminH.RequestEdits)
-				r.With(mw.RequireRole("super_admin")).Post("/quizzes/{quizId}/unpublish", adminH.UnpublishQuiz)
-
-				// Reports
-				r.Get("/reports", adminH.ListReports)
-				r.Post("/reports/{reportId}/resolve", adminH.ResolveReport)
-
-				// Point economy (super_admin only)
-				r.With(mw.RequireRole("super_admin")).Get("/point-economy", adminH.GetPointEconomy)
-				r.With(mw.RequireRole("super_admin")).Patch("/point-economy/{key}", adminH.UpdatePointEconomy)
-
-				// Announcements
-				r.Get("/announcements", adminH.ListAnnouncements)
-				r.Post("/announcements", adminH.CreateAnnouncement)
-				r.With(mw.RequireRole("super_admin", "moderator")).Patch("/announcements/{announcementId}/retract", adminH.RetractAnnouncement)
-
-				// Promos
-				r.Get("/promos", adminH.ListPromos)
-				r.With(mw.RequireRole("super_admin", "moderator")).Post("/promos", adminH.CreatePromo)
-				r.With(mw.RequireRole("super_admin", "moderator")).Patch("/promos/{promoId}", adminH.UpdatePromoStatus)
-				r.With(mw.RequireRole("super_admin")).Delete("/promos/{promoId}", adminH.DeletePromo)
-
-				// Brands
-				r.Get("/brands", adminH.ListBrands)
-				r.With(mw.RequireRole("super_admin")).Post("/brands", adminH.CreateBrand)
-				r.With(mw.RequireRole("super_admin")).Post("/brands/{brandId}/approve", adminH.ApproveBrand)
-				r.With(mw.RequireRole("super_admin")).Post("/brands/{brandId}/suspend", adminH.SuspendBrand)
-				r.With(mw.RequireRole("super_admin")).Post("/brands/{brandId}/reactivate", adminH.ReactivateBrand)
-				r.Get("/brands/{brandId}/sponsorship-requests", adminH.ListSponsorshipRequests)
-				r.With(mw.RequireRole("super_admin", "moderator")).Post("/sponsorship-requests/{requestId}/approve", adminH.ApproveSponsorshipRequest)
-				r.With(mw.RequireRole("super_admin", "moderator")).Post("/sponsorship-requests/{requestId}/reject", adminH.RejectSponsorshipRequest)
-
-				// Contact form submissions
-				r.Get("/contact-submissions", contactH.List)
-				r.Post("/contact-submissions/{id}/resolve", contactH.Resolve)
-
-				// Notification log (super_admin only)
-				r.With(mw.RequireRole("super_admin")).Get("/notification-log", adminH.ListNotificationLog)
-
-				// Audit log (super_admin only)
-				r.With(mw.RequireRole("super_admin")).Get("/audit-log", adminH.AuditLog)
-
-				// Admin account management (super_admin only)
-				r.With(mw.RequireRole("super_admin")).Get("/admin-accounts", adminH.ListAdminAccounts)
-				r.With(mw.RequireRole("super_admin")).Post("/admin-accounts", adminH.CreateAdminAccount)
-				r.With(mw.RequireRole("super_admin")).Patch("/admin-accounts/{adminId}", adminH.UpdateAdminAccount)
-				r.With(mw.RequireRole("super_admin")).Delete("/admin-accounts/{adminId}", adminH.DeleteAdminAccount)
-			})
-		})
-
-		// ---- Internal cron endpoints (development/manual trigger only) ----
-		if cfg.AppEnv != "production" {
-			r.Route("/internal/cron", func(r chi.Router) {
-				r.Use(mw.RequireCronSecret(cfg.CronSecret))
-				r.Post("/expire-points", func(w http.ResponseWriter, r *http.Request) {
-					if err := sched.ExpirePoints(r.Context()); err != nil {
-						mw.InternalError(w)
-						return
-					}
-					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+			// ---- Internal cron endpoints (development/manual trigger only) ----
+			if cfg.AppEnv != "production" {
+				r.Route("/internal/cron", func(r chi.Router) {
+					r.Use(mw.RequireCronSecret(cfg.CronSecret))
+					r.Post("/expire-points", func(w http.ResponseWriter, r *http.Request) {
+						if err := sched.ExpirePoints(r.Context()); err != nil {
+							mw.InternalError(w)
+							return
+						}
+						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+					})
+					r.Post("/reset-streaks", func(w http.ResponseWriter, r *http.Request) {
+						if err := sched.ResetStreaks(r.Context()); err != nil {
+							mw.InternalError(w)
+							return
+						}
+						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+					})
+					r.Post("/snapshot-leaderboard", func(w http.ResponseWriter, r *http.Request) {
+						if err := sched.SnapshotLeaderboard(r.Context()); err != nil {
+							mw.InternalError(w)
+							return
+						}
+						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+					})
+					r.Post("/close-expired-quizzes", func(w http.ResponseWriter, r *http.Request) {
+						if err := sched.CloseExpiredQuizzes(r.Context()); err != nil {
+							mw.InternalError(w)
+							return
+						}
+						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+					})
+					r.Post("/streak-nudges", func(w http.ResponseWriter, r *http.Request) {
+						if err := sched.SendStreakNudges(r.Context()); err != nil {
+							mw.InternalError(w)
+							return
+						}
+						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+					})
+					r.Post("/weekly-digests", func(w http.ResponseWriter, r *http.Request) {
+						if err := sched.SendWeeklyDigests(r.Context()); err != nil {
+							mw.InternalError(w)
+							return
+						}
+						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+					})
+					r.Post("/rank-change-alerts", func(w http.ResponseWriter, r *http.Request) {
+						if err := sched.SendRankChangeAlerts(r.Context()); err != nil {
+							mw.InternalError(w)
+							return
+						}
+						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+					})
+					r.Post("/weekly-insights-email", func(w http.ResponseWriter, r *http.Request) {
+						if err := sched.SendWeeklyInsightsEmail(r.Context()); err != nil {
+							mw.InternalError(w)
+							return
+						}
+						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+					})
 				})
-				r.Post("/reset-streaks", func(w http.ResponseWriter, r *http.Request) {
-					if err := sched.ResetStreaks(r.Context()); err != nil {
-						mw.InternalError(w)
-						return
-					}
-					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-				})
-				r.Post("/snapshot-leaderboard", func(w http.ResponseWriter, r *http.Request) {
-					if err := sched.SnapshotLeaderboard(r.Context()); err != nil {
-						mw.InternalError(w)
-						return
-					}
-					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-				})
-				r.Post("/close-expired-quizzes", func(w http.ResponseWriter, r *http.Request) {
-					if err := sched.CloseExpiredQuizzes(r.Context()); err != nil {
-						mw.InternalError(w)
-						return
-					}
-					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-				})
-				r.Post("/streak-nudges", func(w http.ResponseWriter, r *http.Request) {
-					if err := sched.SendStreakNudges(r.Context()); err != nil {
-						mw.InternalError(w)
-						return
-					}
-					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-				})
-				r.Post("/weekly-digests", func(w http.ResponseWriter, r *http.Request) {
-					if err := sched.SendWeeklyDigests(r.Context()); err != nil {
-						mw.InternalError(w)
-						return
-					}
-					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-				})
-				r.Post("/rank-change-alerts", func(w http.ResponseWriter, r *http.Request) {
-					if err := sched.SendRankChangeAlerts(r.Context()); err != nil {
-						mw.InternalError(w)
-						return
-					}
-					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-				})
-				r.Post("/weekly-insights-email", func(w http.ResponseWriter, r *http.Request) {
-					if err := sched.SendWeeklyInsightsEmail(r.Context()); err != nil {
-						mw.InternalError(w)
-						return
-					}
-					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-				})
-			})
-		}
+			}
 		})
 	})
 

@@ -2642,22 +2642,52 @@ Array of full audit entries with `id`, `timestamp`, `admin_name`, `admin_role`, 
 **Roles:** super_admin only
 
 ### Response `200`
-Array with `id`, `name`, `email`, `role`, `status`, `created_at`.
+Array with `id`, `name`, `email`, `role`, `status`, `created_at`, `accepted_at`.
+
+**Status lifecycle:**
+| Status | Meaning |
+|--------|---------|
+| `pending` | Invite sent, awaiting the admin's first sign-in (acceptance). |
+| `invite_failed` | The invite email could not be delivered. Resend to retry. |
+| `active` | Invite accepted (first successful sign-in) — full access for their role. |
+| `suspended` | Access revoked; can be reactivated. |
+
+`accepted_at` is the timestamp of acceptance (first sign-in); it is `null` while `pending`/`invite_failed`. A `pending`/`invite_failed` admin is automatically promoted to `active` the first time they authenticate.
 
 ---
 
 ## POST `/admin/admin-accounts`
 **Roles:** super_admin only
 
+Provisions a Supabase invite and emails the admin an invite link. The new row is
+created `pending` (or `active` if the email already had a Supabase account). If the
+invite email fails to send, the row is created `invite_failed`.
+
 ### Request Body
 ```json
-{ "name": "Jane Mod", "email": "jane@qwish.com", "role": "moderator" }
+{ "name": "Jane Mod", "email": "jane@qwish.in", "role": "moderator" }
 ```
 
 ### Response `201`
 ```json
-{ "id": "uuid", "message": "admin account created, invite sent" }
+{ "id": "uuid", "status": "pending", "message": "admin account created, invite sent" }
 ```
+`status` is one of `pending`, `active`, or `invite_failed`. On `invite_failed` the
+`message` reads `"admin account created, but the invite email failed to send"`.
+
+---
+
+## POST `/admin/admin-accounts/{adminId}/resend`
+**Roles:** super_admin only
+
+Re-issues the Supabase invite and email for a `pending` or `invite_failed` admin.
+Returns `400` if the account is not in an invitable state (e.g. already `active`).
+
+### Response `200`
+```json
+{ "status": "pending", "message": "invite resent" }
+```
+`status` is `pending` on success, or `invite_failed` if the email failed again.
 
 ---
 
@@ -2683,7 +2713,9 @@ All fields optional.
 ## DELETE `/admin/admin-accounts/{adminId}`
 **Roles:** super_admin only
 
-Cannot delete your own account.
+Soft-deletes the account (status → `deleted`). Also used to **revoke** a `pending`
+invite — the invite link stops working and the admin cannot join. Cannot delete your
+own account.
 
 ### Response `200`
 ```json

@@ -106,7 +106,9 @@ func (h *Handler) ActivityFeed(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&item.ID, &item.Timestamp, &item.AdminName, &item.ActionType, &item.TargetType, &item.TargetID)
 		items = append(items, item)
 	}
-	if items == nil { items = []feedItem{} }
+	if items == nil {
+		items = []feedItem{}
+	}
 	middleware.JSON(w, http.StatusOK, items)
 }
 
@@ -115,8 +117,12 @@ func (h *Handler) ListInstitutions(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	if page < 1 { page = 1 }
-	if limit < 1 || limit > 50 { limit = 20 }
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
 	offset := (page - 1) * limit
 
 	search := q.Get("search")
@@ -171,7 +177,9 @@ func (h *Handler) ListInstitutions(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&i.ID, &i.Name, &i.Type, &i.Status, &i.ContactEmail, &i.VerifiedAt, &i.CreatedAt)
 		insts = append(insts, i)
 	}
-	if insts == nil { insts = []instRow{} }
+	if insts == nil {
+		insts = []instRow{}
+	}
 	middleware.JSONWithMeta(w, http.StatusOK, insts, &middleware.Meta{Page: page, Limit: limit, Total: total})
 }
 
@@ -197,7 +205,9 @@ func (h *Handler) InstitutionQueue(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&i.ID, &i.Name, &i.Type, &i.ContactEmail, &i.SubmittedAt)
 		queue = append(queue, i)
 	}
-	if queue == nil { queue = []qRow{} }
+	if queue == nil {
+		queue = []qRow{}
+	}
 	middleware.JSON(w, http.StatusOK, queue)
 }
 
@@ -221,7 +231,7 @@ func (h *Handler) ApproveInstitution(w http.ResponseWriter, r *http.Request) {
 
 	logAudit(r.Context(), h.db, adminID, "approve_institution", "institution", instID, "")
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
-		"message":              "institution approved",
+		"message":               "institution approved",
 		"student_referral_code": sCode,
 		"teacher_referral_code": tCode,
 	})
@@ -300,8 +310,12 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	if page < 1 { page = 1 }
-	if limit < 1 || limit > 50 { limit = 20 }
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
 	offset := (page - 1) * limit
 
 	args := []interface{}{}
@@ -356,7 +370,9 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&u.ID, &u.DisplayName, &u.Email, &u.Role, &u.Institution, &u.Status, &u.LastActiveAt, &u.TotalPoints, &u.CurrentStreak)
 		users = append(users, u)
 	}
-	if users == nil { users = []userRow{} }
+	if users == nil {
+		users = []userRow{}
+	}
 	middleware.JSONWithMeta(w, http.StatusOK, users, &middleware.Meta{Page: page, Limit: limit, Total: total})
 }
 
@@ -451,7 +467,9 @@ func (h *Handler) AdjustPoints(w http.ResponseWriter, r *http.Request) {
 	var currentBalance int64
 	h.db.QueryRow(r.Context(), `SELECT total_points FROM users WHERE id=$1`, userID).Scan(&currentBalance)
 	newBalance := currentBalance + req.Amount
-	if newBalance < 0 { newBalance = 0 }
+	if newBalance < 0 {
+		newBalance = 0
+	}
 
 	h.db.Exec(r.Context(), `UPDATE users SET total_points=$1, updated_at=now() WHERE id=$2`, newBalance, userID)
 	h.db.Exec(r.Context(),
@@ -503,7 +521,9 @@ func (h *Handler) ModerationQueue(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&i.ID, &i.Title, &i.Teacher, &i.Institution, &i.QuestionCount, &i.SubmittedAt)
 		queue = append(queue, i)
 	}
-	if queue == nil { queue = []item{} }
+	if queue == nil {
+		queue = []item{}
+	}
 	middleware.JSON(w, http.StatusOK, queue)
 }
 
@@ -548,8 +568,12 @@ func (h *Handler) ListReports(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	if page < 1 { page = 1 }
-	if limit < 1 || limit > 50 { limit = 20 }
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
 	offset := (page - 1) * limit
 
 	where := "1=1"
@@ -578,13 +602,13 @@ func (h *Handler) ListReports(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type repRow struct {
-		ID          string    `json:"id"`
-		Reporter    string    `json:"reporter"`
-		QuizTitle   string    `json:"quiz_title"`
-		Reason      string    `json:"reason"`
-		Status      string    `json:"status"`
-		Priority    string    `json:"priority"`
-		CreatedAt   time.Time `json:"created_at"`
+		ID        string    `json:"id"`
+		Reporter  string    `json:"reporter"`
+		QuizTitle string    `json:"quiz_title"`
+		Reason    string    `json:"reason"`
+		Status    string    `json:"status"`
+		Priority  string    `json:"priority"`
+		CreatedAt time.Time `json:"created_at"`
 	}
 	var reports []repRow
 	for rows.Next() {
@@ -592,7 +616,9 @@ func (h *Handler) ListReports(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&rr.ID, &rr.Reporter, &rr.QuizTitle, &rr.Reason, &rr.Status, &rr.Priority, &rr.CreatedAt)
 		reports = append(reports, rr)
 	}
-	if reports == nil { reports = []repRow{} }
+	if reports == nil {
+		reports = []repRow{}
+	}
 	middleware.JSONWithMeta(w, http.StatusOK, reports, &middleware.Meta{Page: page, Limit: limit, Total: total})
 }
 
@@ -637,7 +663,9 @@ func (h *Handler) GetPointEconomy(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&c.Key, &c.Value, &c.Description, &c.UpdatedAt)
 		configs = append(configs, c)
 	}
-	if configs == nil { configs = []cfg{} }
+	if configs == nil {
+		configs = []cfg{}
+	}
 	middleware.JSON(w, http.StatusOK, configs)
 }
 
@@ -679,13 +707,13 @@ func (h *Handler) UpdatePointEconomy(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/admin/announcements
 func (h *Handler) CreateAnnouncement(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Title         string   `json:"title"`
-		Body          string   `json:"body"`
-		CTALabel      *string  `json:"cta_label"`
-		CTAURL        *string  `json:"cta_url"`
-		DeliveryTypes []string `json:"delivery_types"`
-		Audience      string   `json:"audience"`
-		InstitutionID *string  `json:"institution_id"`
+		Title         string     `json:"title"`
+		Body          string     `json:"body"`
+		CTALabel      *string    `json:"cta_label"`
+		CTAURL        *string    `json:"cta_url"`
+		DeliveryTypes []string   `json:"delivery_types"`
+		Audience      string     `json:"audience"`
+		InstitutionID *string    `json:"institution_id"`
 		ScheduledAt   *time.Time `json:"scheduled_at"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Title == "" || req.Body == "" {
@@ -724,8 +752,12 @@ func (h *Handler) AuditLog(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	if page < 1 { page = 1 }
-	if limit < 1 || limit > 100 { limit = 50 }
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
 	offset := (page - 1) * limit
 
 	where := "1=1"
@@ -775,7 +807,9 @@ func (h *Handler) AuditLog(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&e.ID, &e.Timestamp, &e.AdminName, &e.AdminRole, &e.ActionType, &e.TargetType, &e.TargetID, &e.Reason, &e.OldValue, &e.NewValue)
 		entries = append(entries, e)
 	}
-	if entries == nil { entries = []logEntry{} }
+	if entries == nil {
+		entries = []logEntry{}
+	}
 	middleware.JSONWithMeta(w, http.StatusOK, entries, &middleware.Meta{Page: page, Limit: limit, Total: total})
 }
 
@@ -822,6 +856,16 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 	// An email may already exist in admin_accounts from a prior invite or a
 	// soft-deleted account (DeleteAdminAccount only flags status='deleted').
 	// Revive soft-deleted rows; reject genuine active duplicates with a clear message.
+	// A user who already had a Supabase account can authenticate immediately, so
+	// mark them active; a fresh invite stays 'pending' until first sign-in.
+	initialStatus := "pending"
+	var acceptedAt *time.Time
+	if inv.AlreadyExisted {
+		initialStatus = "active"
+		now := time.Now()
+		acceptedAt = &now
+	}
+
 	var id, existingStatus string
 	err = h.db.QueryRow(r.Context(),
 		`SELECT id, status FROM admin_accounts WHERE email=$1`, req.Email,
@@ -831,15 +875,16 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 		middleware.Error(w, http.StatusConflict, "DUPLICATE_EMAIL", "an admin account with this email already exists")
 		return
 	case err == nil:
-		// Revive soft-deleted account.
+		// Revive soft-deleted account as a fresh invite.
 		_, err = h.db.Exec(r.Context(),
-			`UPDATE admin_accounts SET supabase_uid=$1, name=$2, role=$3, status='active',
-			 deleted_at=NULL, created_by=$4 WHERE id=$5`,
-			supabaseUID, req.Name, req.Role, createdBy, id)
+			`UPDATE admin_accounts SET supabase_uid=$1, name=$2, role=$3, status=$4, accepted_at=$5,
+			 deleted_at=NULL, created_by=$6 WHERE id=$7`,
+			supabaseUID, req.Name, req.Role, initialStatus, acceptedAt, createdBy, id)
 	default:
 		err = h.db.QueryRow(r.Context(),
-			`INSERT INTO admin_accounts (supabase_uid, name, email, role, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-			supabaseUID, req.Name, req.Email, req.Role, createdBy,
+			`INSERT INTO admin_accounts (supabase_uid, name, email, role, status, accepted_at, created_by)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+			supabaseUID, req.Name, req.Email, req.Role, initialStatus, acceptedAt, createdBy,
 		).Scan(&id)
 	}
 	if err != nil {
@@ -848,11 +893,10 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send email via Resend. Failures don't roll back the account, but they are
-	// logged (and recorded in notification_log) so "invite never arrived" is
-	// diagnosable.
+	// Send email via Resend. A delivery failure on a fresh invite flips the row
+	// to 'invite_failed' so the dashboard can surface it and offer a resend.
+	var mailErr error
 	if h.notif != nil {
-		var mailErr error
 		if inv.ActionLink != "" {
 			mailErr = h.notif.SendAdminInvite(r.Context(), req.Email, req.Name, req.Role, inv.ActionLink)
 		} else if inv.AlreadyExisted {
@@ -862,31 +906,43 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 			fmt.Printf("[admin] invite email to %s failed: %v\n", req.Email, mailErr)
 		}
 	}
+	status := initialStatus
+	if mailErr != nil && initialStatus == "pending" {
+		status = "invite_failed"
+		h.db.Exec(r.Context(), `UPDATE admin_accounts SET status='invite_failed' WHERE id=$1`, id)
+	}
 
 	logAudit(r.Context(), h.db, adminID, "create_admin_account", "admin", id, "")
-	middleware.JSON(w, http.StatusCreated, map[string]string{"id": id, "message": "admin account created, invite sent"})
+	msg := "admin account created, invite sent"
+	if status == "invite_failed" {
+		msg = "admin account created, but the invite email failed to send"
+	}
+	middleware.JSON(w, http.StatusCreated, map[string]string{"id": id, "status": status, "message": msg})
 }
 
 // GET /api/v1/admin/admin-accounts
 func (h *Handler) ListAdminAccounts(w http.ResponseWriter, r *http.Request) {
 	rows, _ := h.db.Query(r.Context(),
-		`SELECT id, name, email, role, status, created_at FROM admin_accounts WHERE deleted_at IS NULL ORDER BY created_at DESC`)
+		`SELECT id, name, email, role, status, created_at, accepted_at FROM admin_accounts WHERE deleted_at IS NULL ORDER BY created_at DESC`)
 	defer rows.Close()
 	type aRow struct {
-		ID        string    `json:"id"`
-		Name      string    `json:"name"`
-		Email     string    `json:"email"`
-		Role      string    `json:"role"`
-		Status    string    `json:"status"`
-		CreatedAt time.Time `json:"created_at"`
+		ID         string     `json:"id"`
+		Name       string     `json:"name"`
+		Email      string     `json:"email"`
+		Role       string     `json:"role"`
+		Status     string     `json:"status"`
+		CreatedAt  time.Time  `json:"created_at"`
+		AcceptedAt *time.Time `json:"accepted_at,omitempty"`
 	}
 	var accounts []aRow
 	for rows.Next() {
 		var a aRow
-		rows.Scan(&a.ID, &a.Name, &a.Email, &a.Role, &a.Status, &a.CreatedAt)
+		rows.Scan(&a.ID, &a.Name, &a.Email, &a.Role, &a.Status, &a.CreatedAt, &a.AcceptedAt)
 		accounts = append(accounts, a)
 	}
-	if accounts == nil { accounts = []aRow{} }
+	if accounts == nil {
+		accounts = []aRow{}
+	}
 	middleware.JSON(w, http.StatusOK, accounts)
 }
 
@@ -924,6 +980,54 @@ func (h *Handler) DeleteAdminAccount(w http.ResponseWriter, r *http.Request) {
 	h.db.Exec(r.Context(), `UPDATE admin_accounts SET status='deleted', deleted_at=now() WHERE id=$1`, targetID)
 	logAudit(r.Context(), h.db, requestorID, "delete_admin_account", "admin", targetID, "")
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "admin account deleted"})
+}
+
+// POST /api/v1/admin/admin-accounts/:adminId/resend
+// Re-issues the Supabase invite + email for a pending or failed admin invite.
+func (h *Handler) ResendAdminInvite(w http.ResponseWriter, r *http.Request) {
+	targetID := chi.URLParam(r, "adminId")
+
+	var name, email, role, status string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT name, email, role, status FROM admin_accounts WHERE id=$1 AND deleted_at IS NULL`,
+		targetID,
+	).Scan(&name, &email, &role, &status)
+	if err != nil {
+		middleware.NotFound(w, "admin account")
+		return
+	}
+	if status != "pending" && status != "invite_failed" {
+		middleware.BadRequest(w, "only pending or failed invites can be resent")
+		return
+	}
+
+	inv, err := h.invite.Invite(r.Context(), email, h.cfg.SuperAdminURL,
+		map[string]string{"role": role, "name": name})
+	if err != nil {
+		h.db.Exec(r.Context(), `UPDATE admin_accounts SET status='invite_failed' WHERE id=$1`, targetID)
+		middleware.Error(w, http.StatusBadGateway, "INVITE_FAILED", "failed to create Supabase invite for this email")
+		return
+	}
+	// Keep supabase_uid in sync in case Supabase issued a fresh identity.
+	h.db.Exec(r.Context(), `UPDATE admin_accounts SET supabase_uid=$1, status='pending' WHERE id=$2`, inv.UID, targetID)
+
+	var mailErr error
+	if h.notif != nil {
+		if inv.ActionLink != "" {
+			mailErr = h.notif.SendAdminInvite(r.Context(), email, name, role, inv.ActionLink)
+		} else if inv.AlreadyExisted {
+			mailErr = h.notif.SendAdminWelcome(r.Context(), email, name, role)
+		}
+	}
+	newStatus := "pending"
+	if mailErr != nil {
+		newStatus = "invite_failed"
+		h.db.Exec(r.Context(), `UPDATE admin_accounts SET status='invite_failed' WHERE id=$1`, targetID)
+		fmt.Printf("[admin] resend invite email to %s failed: %v\n", email, mailErr)
+	}
+
+	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "resend_admin_invite", "admin", targetID, "")
+	middleware.JSON(w, http.StatusOK, map[string]string{"status": newStatus, "message": "invite resent"})
 }
 
 // POST /api/v1/admin/users/:userId/reset-password
@@ -999,8 +1103,12 @@ func (h *Handler) ListAnnouncements(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	if page < 1 { page = 1 }
-	if limit < 1 || limit > 50 { limit = 20 }
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
 	offset := (page - 1) * limit
 
 	where := "1=1"
@@ -1044,7 +1152,9 @@ func (h *Handler) ListAnnouncements(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&a.ID, &a.Title, &a.Body, &a.DeliveryTypes, &a.Audience, &a.Status, &a.ScheduledAt, &a.SentAt, &a.CreatedAt)
 		items = append(items, a)
 	}
-	if items == nil { items = []ann{} }
+	if items == nil {
+		items = []ann{}
+	}
 	middleware.JSONWithMeta(w, http.StatusOK, items, &middleware.Meta{Page: page, Limit: limit, Total: total})
 }
 
@@ -1070,8 +1180,12 @@ func (h *Handler) ListPromos(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	if page < 1 { page = 1 }
-	if limit < 1 || limit > 50 { limit = 20 }
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
 	offset := (page - 1) * limit
 
 	where := "1=1"
@@ -1117,7 +1231,9 @@ func (h *Handler) ListPromos(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&p.ID, &p.Type, &p.Title, &p.Body, &p.CTALabel, &p.CTAURL, &p.Audience, &p.Status, &p.StartsAt, &p.EndsAt, &p.CreatedAt)
 		promos = append(promos, p)
 	}
-	if promos == nil { promos = []promo{} }
+	if promos == nil {
+		promos = []promo{}
+	}
 	middleware.JSONWithMeta(w, http.StatusOK, promos, &middleware.Meta{Page: page, Limit: limit, Total: total})
 }
 
@@ -1197,8 +1313,12 @@ func (h *Handler) ListBrands(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	if page < 1 { page = 1 }
-	if limit < 1 || limit > 50 { limit = 20 }
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
 	offset := (page - 1) * limit
 
 	where := "1=1"
@@ -1246,7 +1366,9 @@ func (h *Handler) ListBrands(w http.ResponseWriter, r *http.Request) {
 		rows.Scan(&b.ID, &b.Name, &b.Industry, &b.ContactEmail, &b.Website, &b.RewardPool, &b.Status, &b.CreatedAt)
 		brands = append(brands, b)
 	}
-	if brands == nil { brands = []brand{} }
+	if brands == nil {
+		brands = []brand{}
+	}
 	middleware.JSONWithMeta(w, http.StatusOK, brands, &middleware.Meta{Page: page, Limit: limit, Total: total})
 }
 
@@ -1341,7 +1463,9 @@ func (h *Handler) ListSponsorshipRequests(w http.ResponseWriter, r *http.Request
 		rows.Scan(&s.ID, &s.QuizID, &s.QuizTitle, &s.Status, &s.Reason, &s.RequestedAt, &s.ReviewedAt)
 		items = append(items, s)
 	}
-	if items == nil { items = []sr{} }
+	if items == nil {
+		items = []sr{}
+	}
 	middleware.JSON(w, http.StatusOK, items)
 }
 
@@ -1413,8 +1537,8 @@ func (h *Handler) ProvisionAdmin(w http.ResponseWriter, r *http.Request) {
 
 	// Parse optional override body
 	var req struct {
-		AdminName    string `json:"admin_name"`    // overrides onboarding_admin_name if provided
-		AdminEmail   string `json:"admin_email"`   // overrides contact_email if provided
+		AdminName  string `json:"admin_name"`  // overrides onboarding_admin_name if provided
+		AdminEmail string `json:"admin_email"` // overrides contact_email if provided
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
@@ -1568,13 +1692,13 @@ func (h *Handler) ListNotificationLog(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type entry struct {
-		ID        string     `json:"id"`
-		ToEmail   string     `json:"to_email"`
-		Subject   string     `json:"subject"`
-		Status    string     `json:"status"`
-		Error     *string    `json:"error,omitempty"`
-		Reference *string    `json:"reference,omitempty"`
-		CreatedAt time.Time  `json:"created_at"`
+		ID        string    `json:"id"`
+		ToEmail   string    `json:"to_email"`
+		Subject   string    `json:"subject"`
+		Status    string    `json:"status"`
+		Error     *string   `json:"error,omitempty"`
+		Reference *string   `json:"reference,omitempty"`
+		CreatedAt time.Time `json:"created_at"`
 	}
 
 	var entries []entry

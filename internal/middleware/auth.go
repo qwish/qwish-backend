@@ -79,7 +79,14 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 					Unauthorized(w)
 					return
 				}
-				if adminStatus != "active" {
+				switch adminStatus {
+				case "active":
+					// proceed
+				case "pending", "invite_failed":
+					// First successful auth = invite accepted. Promote to active.
+					db.Exec(r.Context(),
+						`UPDATE admin_accounts SET status='active', accepted_at=now() WHERE id=$1`, adminID)
+				default: // suspended (deleted rows are excluded by the query)
 					Error(w, http.StatusForbidden, "ACCOUNT_SUSPENDED", "account is suspended")
 					return
 				}

@@ -132,16 +132,23 @@ func main() {
 
 			// ------ Public Institution Onboarding ------
 			r.Route("/onboarding", func(r chi.Router) {
-				r.Post("/institution", onboardingH.RegisterInstitution)
+				// Public + unauthenticated registration — rate-limit per IP.
+				r.With(mw.RateLimit(5, 10*time.Minute)).Post("/institution", onboardingH.RegisterInstitution)
 				r.Get("/institution/status", onboardingH.CheckStatus)
 			})
 
 			// ------ Public Contact Form ------
-			r.Post("/contact", contactH.Submit)
+			// Public + unauthenticated, so rate-limit per IP to curb spam/abuse.
+			r.With(mw.RateLimit(5, 10*time.Minute)).Post("/contact", contactH.Submit)
 
 			// ------ AUTH (public) ------
 			r.Route("/auth", func(r chi.Router) {
-				r.Post("/send-otp", authH.SendOTP)
+				// Sends an email per call — limit per-IP (burst/abuse) and per-email
+				// (targeted spam to one inbox) to curb OTP spam.
+				r.With(
+					mw.RateLimit(5, 15*time.Minute),
+					mw.RateLimitByJSONField(3, 15*time.Minute, "email"),
+				).Post("/send-otp", authH.SendOTP)
 				r.Post("/verify-otp", authH.VerifyOTP)
 				r.Post("/refresh", authH.Refresh)
 				r.Get("/teacher-invite", authH.GetTeacherInvite)

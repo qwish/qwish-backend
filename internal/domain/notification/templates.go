@@ -213,6 +213,20 @@ func tmplTeacherInvite(name, instName, inviteLink string) string {
 	return emailLayout(esc(instName)+" invited you to teach on Qwish", body)
 }
 
+func tmplInstitutionInvite(name, applyLink string) string {
+	greeting := "Hi"
+	if name != "" {
+		greeting = "Hi " + esc(name)
+	}
+	body := heading("Bring Qwish to your institution") +
+		paragraph(greeting+", thanks for your interest in Qwish — we’d love to have your institution on board.") +
+		paragraph("To get started, complete our short institution application. Once you submit, our team reviews the details and provisions your dashboard credentials.") +
+		primaryButton("Apply to join", applyLink) +
+		fallbackLink(applyLink) +
+		mutedNote("If you didn’t request this, you can safely ignore this email.")
+	return emailLayout("Bring Qwish to your institution — apply now", body)
+}
+
 func tmplAdminInvite(name, role, inviteLink string) string {
 	greeting := "Hi"
 	if name != "" {

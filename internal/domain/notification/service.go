@@ -147,6 +147,14 @@ func (s *Service) SendTeacherInvite(ctx context.Context, to, name, instName, inv
 		fmt.Sprintf("teacher_invite:%s", inviteID))
 }
 
+// SendInstitutionInvite emails a "bring Qwish to your institution" invite with a
+// link to the public application form. reference ties it back to the originating
+// contact submission (e.g. "institution_invite:<submissionID>").
+func (s *Service) SendInstitutionInvite(ctx context.Context, to, name, applyLink, reference string) error {
+	return s.SendEmail(ctx, to, "Bring Qwish to your institution",
+		tmplInstitutionInvite(name, applyLink), reference)
+}
+
 func (s *Service) SendAdminInvite(ctx context.Context, to, name, role, inviteLink string) error {
 	return s.SendEmail(ctx, to, "You're invited to join Qwish as an Admin",
 		tmplAdminInvite(name, role, inviteLink), "admin_invite")

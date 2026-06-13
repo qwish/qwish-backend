@@ -77,7 +77,7 @@ func main() {
 	teacherH := teacher.NewHandler(pool)
 	adminH := admin.NewHandler(pool, cfg, notifSvc)
 	onboardingH := onboarding.NewHandler(pool)
-	contactH := contact.NewHandler(pool)
+	contactH := contact.NewHandler(pool, notifSvc, cfg.BrandURL)
 	notifH := notification.NewHandler(notifSvc)
 	pushH := push.NewHandler(pool)
 	offlineH := offline.NewHandler(offlineSvc)
@@ -398,6 +398,7 @@ func main() {
 					// Contact form submissions
 					r.Get("/contact-submissions", contactH.List)
 					r.Post("/contact-submissions/{id}/resolve", contactH.Resolve)
+					r.Post("/contact-submissions/{id}/invite", contactH.InviteToApply)
 
 					// Notification log (super_admin only)
 					r.With(mw.RequireRole("super_admin")).Get("/notification-log", adminH.ListNotificationLog)

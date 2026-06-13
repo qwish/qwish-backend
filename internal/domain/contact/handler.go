@@ -3,12 +3,14 @@ package contact
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -28,12 +30,15 @@ var validTopics = map[string]bool{
 
 // Handler holds the database pool for all contact-form operations.
 type Handler struct {
-	db *pgxpool.Pool
+	db       *pgxpool.Pool
+	notif    *notification.Service
+	brandURL string // marketing site base; institution apply links point here
 }
 
-// NewHandler creates a new contact Handler.
-func NewHandler(db *pgxpool.Pool) *Handler {
-	return &Handler{db: db}
+// NewHandler creates a new contact Handler. notif may be nil (emails are then
+// skipped); brandURL is the marketing-site base used to build apply links.
+func NewHandler(db *pgxpool.Pool, notif *notification.Service, brandURL string) *Handler {
+	return &Handler{db: db, notif: notif, brandURL: strings.TrimRight(brandURL, "/")}
 }
 
 // ──────────────────────────────────────────────
@@ -217,6 +222,86 @@ func (h *Handler) Resolve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	middleware.JSON(w, http.StatusOK, map[string]string{"status": req.Status})
+}
+
+// ──────────────────────────────────────────────
+// POST /api/v1/admin/contact-submissions/{id}/invite
+// Roles: super_admin, moderator, support_agent
+//
+// Emails the submitter a "bring Qwish to your institution" invite with a link to
+// the public application form, pre-filled with their org/name/email. A "new"
+// submission is bumped to "in_progress" since it's now been actioned.
+// ──────────────────────────────────────────────
+
+func (h *Handler) InviteToApply(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var name, email, status string
+	var metadata json.RawMessage
+	err := h.db.QueryRow(r.Context(),
+		`SELECT name, email, status, metadata FROM contact_submissions WHERE id = $1`,
+		id,
+	).Scan(&name, &email, &status, &metadata)
+	if err != nil {
+		middleware.NotFound(w, "submission")
+		return
+	}
+
+	applyLink := h.buildApplyLink(name, email, metadata)
+
+	if h.notif != nil {
+		if err := h.notif.SendInstitutionInvite(r.Context(), email, name, applyLink, "institution_invite:"+id); err != nil {
+			middleware.Error(w, http.StatusBadGateway, "EMAIL_FAILED", "failed to send invite email")
+			return
+		}
+	}
+
+	// Move it out of the "new" bucket — it's been actioned.
+	if status == "new" {
+		h.db.Exec(r.Context(),
+			`UPDATE contact_submissions SET status='in_progress' WHERE id=$1 AND status='new'`, id)
+		status = "in_progress"
+	}
+
+	middleware.JSON(w, http.StatusOK, map[string]string{
+		"message": "invite sent",
+		"status":  status,
+	})
+}
+
+// buildApplyLink constructs the institution application URL, pre-filling org
+// (from submission metadata), name and email as query params when present.
+func (h *Handler) buildApplyLink(name, email string, metadata json.RawMessage) string {
+	q := url.Values{}
+	if org := organisationFrom(metadata); org != "" {
+		q.Set("org", org)
+	}
+	if name != "" {
+		q.Set("name", name)
+	}
+	if email != "" {
+		q.Set("email", email)
+	}
+	link := h.brandURL + "/institutions/apply"
+	if enc := q.Encode(); enc != "" {
+		link += "?" + enc
+	}
+	return link
+}
+
+// organisationFrom pulls the optional "organisation" field out of a submission's
+// metadata blob. Returns "" when absent or unparseable.
+func organisationFrom(metadata json.RawMessage) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	var m struct {
+		Organisation string `json:"organisation"`
+	}
+	if err := json.Unmarshal(metadata, &m); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(m.Organisation)
 }
 
 // ──────────────────────────────────────────────

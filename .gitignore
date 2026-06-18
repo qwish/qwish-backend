@@ -2,3 +2,10 @@
 .env
 api
 bin/
+
+# OS junk
+.DS_Store
+**/.DS_Store
+
+# generated email preview output
+email_previews.html

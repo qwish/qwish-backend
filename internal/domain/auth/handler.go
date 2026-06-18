@@ -85,7 +85,14 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 
 	// Not in users — check admin_accounts (invited admins have no users row)
 	if admin, aerr := h.svc.GetAdminForLogin(r.Context(), uid, req.Email); aerr == nil {
-		if admin.Status != "active" {
+		switch admin.Status {
+		case "active":
+			// proceed
+		case "pending", "invite_failed":
+			// First successful OTP = invite accepted. Promote to active so the
+			// admin isn't blocked before reaching the middleware that would.
+			h.svc.ActivateAdmin(r.Context(), admin.ID)
+		default: // suspended (deleted rows excluded by GetAdminForLogin)
 			middleware.Error(w, http.StatusForbidden, "ACCOUNT_SUSPENDED", "account is suspended")
 			return
 		}

@@ -122,6 +122,13 @@ func (s *Service) GetAdminForLogin(ctx context.Context, uid, email string) (*Adm
 	return &a, nil
 }
 
+// ActivateAdmin promotes a pending/invite_failed admin to active on their first
+// successful sign-in (invite accepted). Mirrors the middleware self-heal so an
+// invited admin isn't blocked at login before reaching a protected route.
+func (s *Service) ActivateAdmin(ctx context.Context, id string) {
+	s.db.Exec(ctx, `UPDATE admin_accounts SET status='active', accepted_at=now() WHERE id=$1`, id)
+}
+
 // CreateUser inserts a new user into the users table.
 func (s *Service) CreateUser(ctx context.Context, supabaseUID, fullName, email, role string, institutionID *string) (UserProfile, error) {
 	var u UserProfile

@@ -73,9 +73,16 @@ func (s *Service) ListForStudent(ctx context.Context, institutionID, quizType, s
 	offset := (page - 1) * limit
 	var total int
 
-	baseWhere := `q.institution_id = $1 AND q.status = 'published' AND q.deleted_at IS NULL`
-	args := []interface{}{institutionID}
-	argN := 2
+	var baseWhere string
+	var args []interface{}
+	if institutionID != "" {
+		baseWhere = `(q.institution_id = $1 OR q.visibility = 'public') AND q.status = 'published' AND q.deleted_at IS NULL`
+		args = []interface{}{institutionID}
+	} else {
+		baseWhere = `q.visibility = 'public' AND q.status = 'published' AND q.deleted_at IS NULL`
+		args = []interface{}{}
+	}
+	argN := len(args) + 1
 
 	if quizType != "" {
 		baseWhere += fmt.Sprintf(` AND q.type = $%d`, argN)

@@ -1,6 +1,6 @@
 .env.example
 .env
-api
+/api
 bin/
 
 # OS junk

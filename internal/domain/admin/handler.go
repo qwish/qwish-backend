@@ -153,7 +153,11 @@ func (h *Handler) ListInstitutions(w http.ResponseWriter, r *http.Request) {
 	args = append(args, limit, offset)
 
 	rows, err := h.db.Query(r.Context(),
-		`SELECT id, name, type, status, contact_email, verified_at, created_at FROM institutions WHERE `+where+
+		`SELECT id, name, type, status, contact_email, verified_at, created_at,
+			(SELECT COUNT(*) FROM users u WHERE u.institution_id = i.id AND u.role='student') AS student_count,
+			(SELECT COUNT(*) FROM users u WHERE u.institution_id = i.id AND u.role='teacher') AS teacher_count,
+			(SELECT COUNT(*) FROM quizzes q WHERE q.institution_id = i.id AND q.deleted_at IS NULL) AS quiz_count
+		 FROM institutions i WHERE `+where+
 			fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, n, n+1),
 		args...)
 	if err != nil {
@@ -170,11 +174,15 @@ func (h *Handler) ListInstitutions(w http.ResponseWriter, r *http.Request) {
 		ContactEmail string     `json:"contact_email"`
 		VerifiedAt   *time.Time `json:"verified_at,omitempty"`
 		CreatedAt    time.Time  `json:"created_at"`
+		StudentCount int        `json:"student_count"`
+		TeacherCount int        `json:"teacher_count"`
+		QuizCount    int        `json:"quiz_count"`
 	}
 	var insts []instRow
 	for rows.Next() {
 		var i instRow
-		rows.Scan(&i.ID, &i.Name, &i.Type, &i.Status, &i.ContactEmail, &i.VerifiedAt, &i.CreatedAt)
+		rows.Scan(&i.ID, &i.Name, &i.Type, &i.Status, &i.ContactEmail, &i.VerifiedAt, &i.CreatedAt,
+			&i.StudentCount, &i.TeacherCount, &i.QuizCount)
 		insts = append(insts, i)
 	}
 	if insts == nil {
@@ -311,6 +319,73 @@ func (h *Handler) ResetReferralCodes(w http.ResponseWriter, r *http.Request) {
 	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "reset_referral_codes", "institution", instID, "")
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"student_referral_code": sCode, "teacher_referral_code": tCode,
+	})
+}
+
+// POST /api/v1/admin/institutions/:institutionId/resend-credentials
+// Resets the institution admin's Supabase password to a fresh temporary one and
+// emails the institution's contact with the full credentials (admin login + the
+// current referral codes). The previous password stops working.
+func (h *Handler) ResendInstitutionCredentials(w http.ResponseWriter, r *http.Request) {
+	instID := chi.URLParam(r, "institutionId")
+
+	var instName, contactEmail, status, sCode, tCode string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT name, contact_email, status,
+			COALESCE(student_referral_code,''), COALESCE(teacher_referral_code,'')
+		 FROM institutions WHERE id=$1 AND deleted_at IS NULL`,
+		instID,
+	).Scan(&instName, &contactEmail, &status, &sCode, &tCode)
+	if err != nil {
+		middleware.NotFound(w, "institution")
+		return
+	}
+	if status != "verified" {
+		middleware.Error(w, http.StatusUnprocessableEntity, "NOT_VERIFIED",
+			"institution must be approved (status=verified) before resending credentials")
+		return
+	}
+
+	// Locate the provisioned institution admin (holds the Supabase login we reset).
+	var adminUID, adminEmail string
+	err = h.db.QueryRow(r.Context(),
+		`SELECT supabase_uid, email FROM users
+		 WHERE institution_id=$1 AND role='institution_admin' AND deleted_at IS NULL
+		 ORDER BY created_at LIMIT 1`,
+		instID,
+	).Scan(&adminUID, &adminEmail)
+	if err != nil {
+		middleware.Error(w, http.StatusUnprocessableEntity, "NO_ADMIN",
+			"no institution admin is provisioned yet; provision an admin before resending credentials")
+		return
+	}
+
+	// Fresh temporary password (meets Supabase complexity: length + mixed chars).
+	tempPassword := "Qw" + uuid.New().String()[:8] + "#7"
+	if err := h.invite.SetPassword(r.Context(), adminUID, tempPassword); err != nil {
+		fmt.Printf("[admin] resend-credentials password reset failed for %s: %v\n", adminEmail, err)
+		middleware.Error(w, http.StatusBadGateway, "PASSWORD_RESET_FAILED",
+			"failed to reset the institution admin password; credentials were not sent")
+		return
+	}
+
+	if h.notif == nil {
+		middleware.Error(w, http.StatusServiceUnavailable, "EMAIL_UNAVAILABLE",
+			"email service is not configured")
+		return
+	}
+	if err := h.notif.SendInstitutionApproval(r.Context(), contactEmail, instName, adminEmail, tempPassword, sCode, tCode); err != nil {
+		fmt.Printf("[admin] resend-credentials email to %s failed: %v\n", contactEmail, err)
+		middleware.Error(w, http.StatusBadGateway, "EMAIL_FAILED",
+			"password was reset but the credentials email failed to send")
+		return
+	}
+
+	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "resend_institution_credentials", "institution", instID,
+		fmt.Sprintf("admin_email=%s", adminEmail))
+	middleware.JSON(w, http.StatusOK, map[string]interface{}{
+		"message":     "Credentials resent to " + contactEmail,
+		"admin_email": adminEmail,
 	})
 }
 

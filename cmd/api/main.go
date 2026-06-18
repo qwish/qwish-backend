@@ -346,6 +346,7 @@ func main() {
 					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/suspend", adminH.SuspendInstitution)
 					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/reactivate", adminH.ReactivateInstitution)
 					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/reset-referral-codes", adminH.ResetReferralCodes)
+					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/resend-credentials", adminH.ResendInstitutionCredentials)
 					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/provision-admin", adminH.ProvisionAdmin)
 
 					// Users

@@ -109,3 +109,28 @@ func (c *InviteClient) Invite(ctx context.Context, email, redirectTo string, met
 	}
 	return res, nil
 }
+
+// SetPassword sets (resets) the password for an existing Supabase auth user via
+// the admin API. Used to (re)issue institution-admin login credentials.
+func (c *InviteClient) SetPassword(ctx context.Context, uid, password string) error {
+	body, _ := json.Marshal(map[string]interface{}{"password": password})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
+		c.cfg.SupabaseURL+"/auth/v1/admin/users/"+uid, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("apikey", c.cfg.SupabaseServiceKey)
+	req.Header.Set("Authorization", "Bearer "+c.cfg.SupabaseServiceKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase set-password failed (status %d): %s", resp.StatusCode, string(raw))
+	}
+	return nil
+}

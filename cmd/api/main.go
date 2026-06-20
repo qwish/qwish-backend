@@ -153,6 +153,14 @@ func main() {
 				r.Post("/refresh", authH.Refresh)
 				r.Get("/teacher-invite", authH.GetTeacherInvite)
 
+				// Passkey (WebAuthn) login — alternative to OTP. Public; the
+				// begin step is rate-limited per IP and per email to curb abuse.
+				r.With(
+					mw.RateLimit(10, 15*time.Minute),
+					mw.RateLimitByJSONField(5, 15*time.Minute, "email"),
+				).Post("/passkey/login/begin", authH.PasskeyLoginBegin)
+				r.Post("/passkey/login/finish", authH.PasskeyLoginFinish)
+
 				// JWT-only (user may not exist in DB yet)
 				r.Group(func(r chi.Router) {
 					r.Use(mw.AuthenticateJWTOnly(cfg.SupabaseJWTSecret, cfg.SupabaseURL))
@@ -164,6 +172,12 @@ func main() {
 					r.Use(mw.Authenticate(cfg.SupabaseJWTSecret, cfg.SupabaseURL, pool))
 					r.Post("/logout", authH.Logout)
 					r.Patch("/referral-code", authH.UpdateReferralCode)
+
+					// Passkey enrolment & management for the signed-in admin.
+					r.Post("/passkey/register/begin", authH.PasskeyRegisterBegin)
+					r.Post("/passkey/register/finish", authH.PasskeyRegisterFinish)
+					r.Get("/passkey/credentials", authH.PasskeyList)
+					r.Delete("/passkey/credentials/{id}", authH.PasskeyDelete)
 				})
 			})
 

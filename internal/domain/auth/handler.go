@@ -32,8 +32,8 @@ func (h *Handler) SendOTP(w http.ResponseWriter, r *http.Request) {
 	isNewUser := !h.svc.UserExistsByEmail(r.Context(), req.Email)
 	h.svc.SupabaseSendOTP(r.Context(), req.Email)
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
-		"message":      "OTP sent",
-		"is_new_user":  isNewUser,
+		"message":     "OTP sent",
+		"is_new_user": isNewUser,
 	})
 }
 
@@ -240,6 +240,16 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RefreshToken == "" {
 		middleware.BadRequest(w, "refresh_token is required")
+		return
+	}
+
+	// Passkey sessions are minted by us, not Supabase — renew them locally.
+	// Non-passkey tokens fall through to the Supabase refresh path below.
+	if access, refresh, ok := h.svc.TryPasskeyRefresh(req.RefreshToken); ok {
+		middleware.JSON(w, http.StatusOK, map[string]interface{}{
+			"access_token":  access,
+			"refresh_token": refresh,
+		})
 		return
 	}
 

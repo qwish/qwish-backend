@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/config"
 )
@@ -16,10 +19,29 @@ import (
 type Service struct {
 	db  *pgxpool.Pool
 	cfg *config.Config
+	wa  *webauthn.WebAuthn // nil if passkey config is invalid; endpoints then 503
 }
 
 func NewService(db *pgxpool.Pool, cfg *config.Config) *Service {
-	return &Service{db: db, cfg: cfg}
+	s := &Service{db: db, cfg: cfg}
+
+	origins := make([]string, 0, 2)
+	for _, o := range strings.Split(cfg.WebAuthnRPOrigins, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			origins = append(origins, o)
+		}
+	}
+	wa, err := webauthn.New(&webauthn.Config{
+		RPID:          cfg.WebAuthnRPID,
+		RPDisplayName: cfg.WebAuthnRPDisplayName,
+		RPOrigins:     origins,
+	})
+	if err != nil {
+		log.Printf("auth: passkey/WebAuthn disabled — invalid config: %v", err)
+	} else {
+		s.wa = wa
+	}
+	return s
 }
 
 // SupabaseSendOTP sends a magic-link / OTP email via Supabase.

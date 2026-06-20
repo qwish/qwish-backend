@@ -35,3 +35,11 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false
+      # Passkey / WebAuthn (super-admin login). RP_ID must be the registrable
+      # domain (e.g. qwish.in); RP_ORIGINS the exact admin origin(s) with scheme.
+      - key: WEBAUTHN_RP_ID
+        sync: false
+      - key: WEBAUTHN_RP_ORIGINS
+        sync: false
+      - key: WEBAUTHN_RP_DISPLAY_NAME
+        sync: false

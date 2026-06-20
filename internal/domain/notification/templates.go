@@ -242,7 +242,7 @@ func tmplAdminInvite(name, role, inviteLink string) string {
 	return emailLayout("You’re invited to join Qwish as an Admin", body)
 }
 
-func tmplInstitutionApproval(instName, adminEmail, adminPassword, sCode, tCode string) string {
+func tmplInstitutionApproval(instName, adminEmail, adminPassword, sCode, tCode, dashboardURL string) string {
 	body := heading("Welcome to Qwish! 🎉") +
 		paragraph("Your institution <strong>"+esc(instName)+"</strong> has been approved.") +
 		paragraph("Here are your admin credentials and referral codes:") +
@@ -252,7 +252,7 @@ func tmplInstitutionApproval(instName, adminEmail, adminPassword, sCode, tCode s
 			{"Student code", esc(sCode)},
 			{"Teacher code", esc(tCode)},
 		}) +
-		primaryButton("Go to dashboard", "https://qwish.in") +
+		primaryButton("Go to dashboard", dashboardURL) +
 		mutedNote("For security, please change your temporary password right after your first login.")
 	return emailLayout("Your Qwish institution has been approved", body)
 }
@@ -295,7 +295,7 @@ func tmplWeeklyInsights(name string, pointsThisWeek int64, trend string, quizzes
 	return emailLayout("Your weekly Qwish insights are ready", body)
 }
 
-func tmplAdminWelcome(name, role string) string {
+func tmplAdminWelcome(name, role, dashboardURL string) string {
 	greeting := "Hi"
 	if name != "" {
 		greeting = "Hi " + esc(name)
@@ -304,6 +304,6 @@ func tmplAdminWelcome(name, role string) string {
 		paragraph(greeting+",") +
 		paragraph("You’ve been granted <strong>"+esc(role)+"</strong> privileges on Qwish.") +
 		paragraph("You can now sign in with your existing credentials to access the Admin Dashboard.") +
-		primaryButton("Open dashboard", "https://qwish.in")
+		primaryButton("Open dashboard", dashboardURL)
 	return emailLayout("Your Qwish admin access is ready", body)
 }

@@ -52,7 +52,7 @@ func main() {
 	streakSvc := streak.NewService(pool)
 	attemptSvc := attempt.NewService(pool, quizSvc, streakSvc)
 	pushSvc := push.NewService(pool, cfg.FCMProjectID, cfg.FCMCredentialsJSON)
-	notifSvc := notification.NewService(pool, cfg.ResendAPIKey)
+	notifSvc := notification.NewService(pool, cfg.ResendAPIKey, cfg.InstituteURL, cfg.SuperAdminURL)
 	notifSvc.SetPusher(func(ctx context.Context, userID, title, body string, data map[string]string) {
 		pushSvc.SendToUser(ctx, userID, push.Payload{Title: title, Body: body, Data: data})
 	})

@@ -19,16 +19,22 @@ type Service struct {
 	fromEmail string
 	push      pusherAdapter
 
+	// Dashboard URLs used for "go to dashboard" buttons in emails.
+	instituteURL  string // institution admin dashboard
+	superAdminURL string // internal admin console
+
 	mu          sync.RWMutex
 	subscribers map[string][]chan Notification
 }
 
-func NewService(db *pgxpool.Pool, apiKey string) *Service {
+func NewService(db *pgxpool.Pool, apiKey, instituteURL, superAdminURL string) *Service {
 	return &Service{
-		db:          db,
-		apiKey:      apiKey,
-		fromEmail:   "Qwish <noreply@qwish.in>",
-		subscribers: make(map[string][]chan Notification),
+		db:            db,
+		apiKey:        apiKey,
+		fromEmail:     "Qwish <noreply@qwish.in>",
+		instituteURL:  instituteURL,
+		superAdminURL: superAdminURL,
+		subscribers:   make(map[string][]chan Notification),
 	}
 }
 
@@ -126,7 +132,16 @@ func (s *Service) SendLoginOTP(ctx context.Context, to, code string, expiryMinut
 
 func (s *Service) SendInstitutionApproval(ctx context.Context, contactEmail, instName, adminEmail, adminPassword, sCode, tCode string) error {
 	return s.SendEmail(ctx, contactEmail, "Your Qwish Institution Has Been Approved",
-		tmplInstitutionApproval(instName, adminEmail, adminPassword, sCode, tCode), "institution_approval")
+		tmplInstitutionApproval(instName, adminEmail, adminPassword, sCode, tCode, s.dashURL(s.instituteURL)), "institution_approval")
+}
+
+// dashURL returns u, falling back to the public brand site when the dashboard
+// URL hasn't been configured so email buttons never point at an empty href.
+func (s *Service) dashURL(u string) string {
+	if u == "" {
+		return "https://qwish.in"
+	}
+	return u
 }
 
 func (s *Service) SendInstitutionRejection(ctx context.Context, contactEmail, instName, reason string) error {
@@ -169,6 +184,12 @@ func (s *Service) SendWeeklyInsights(ctx context.Context, to, name string, point
 }
 
 func (s *Service) SendAdminWelcome(ctx context.Context, to, name, role string) error {
+	// Institution admins land on the institution dashboard; internal admin roles
+	// (super_admin/moderator/support_agent) land on the super-admin console.
+	dash := s.dashURL(s.superAdminURL)
+	if role == "institution_admin" {
+		dash = s.dashURL(s.instituteURL)
+	}
 	return s.SendEmail(ctx, to, "Qwish Admin Access Granted",
-		tmplAdminWelcome(name, role), "admin_welcome")
+		tmplAdminWelcome(name, role, dash), "admin_welcome")
 }

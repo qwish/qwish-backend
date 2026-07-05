@@ -17,13 +17,14 @@ import (
 )
 
 type Handler struct {
-	db     *pgxpool.Pool
-	notif  *notification.Service
-	appURL string
+	db         *pgxpool.Pool
+	notif      *notification.Service
+	appURL     string
+	teacherURL string // teacher panel base; used in teacher-verified emails
 }
 
-func NewHandler(db *pgxpool.Pool, notif *notification.Service, appURL string) *Handler {
-	return &Handler{db: db, notif: notif, appURL: appURL}
+func NewHandler(db *pgxpool.Pool, notif *notification.Service, appURL, teacherURL string) *Handler {
+	return &Handler{db: db, notif: notif, appURL: appURL, teacherURL: teacherURL}
 }
 
 // GET /api/v1/institution/overview
@@ -368,16 +369,42 @@ func (h *Handler) UpdateTeacherStatus(w http.ResponseWriter, r *http.Request) {
 		Reason string `json:"reason"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
-	var check int
-	h.db.QueryRow(r.Context(), `SELECT 1 FROM users WHERE id=$1 AND institution_id=$2 AND role='teacher'`, teacherID, instID).Scan(&check)
-	if check == 0 {
+
+	var teacherName, teacherEmail, curStatus string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT display_name, email, status FROM users WHERE id=$1 AND institution_id=$2 AND role='teacher'`,
+		teacherID, instID).Scan(&teacherName, &teacherEmail, &curStatus)
+	if err != nil {
 		middleware.NotFound(w, "teacher")
 		return
 	}
+
 	newStatus := "active"
-	if req.Action == "suspend" { newStatus = "suspended" }
+	switch req.Action {
+	case "suspend":
+		newStatus = "suspended"
+	case "verify":
+		// Only pending teachers can be verified.
+		if curStatus != "pending" {
+			middleware.Error(w, http.StatusUnprocessableEntity, "NOT_PENDING",
+				"only a teacher awaiting verification can be verified")
+			return
+		}
+		newStatus = "active"
+	}
+
 	h.db.Exec(r.Context(), `UPDATE users SET status=$1, updated_at=now() WHERE id=$2`, newStatus, teacherID)
 	logAudit(r.Context(), h.db, middleware.GetUserID(r), req.Action+"_teacher", "user", teacherID, req.Reason)
+
+	// On verification, email the teacher that they can now sign in.
+	if req.Action == "verify" && h.notif != nil {
+		var instName string
+		h.db.QueryRow(r.Context(), `SELECT name FROM institutions WHERE id=$1`, instID).Scan(&instName)
+		if mailErr := h.notif.SendTeacherVerified(r.Context(), teacherEmail, teacherName, instName, h.teacherURL+"/login"); mailErr != nil {
+			fmt.Printf("[institution] teacher-verified email to %s failed: %v\n", teacherEmail, mailErr)
+		}
+	}
+
 	middleware.JSON(w, http.StatusOK, map[string]string{"status": newStatus})
 }
 

@@ -49,5 +49,7 @@ services:
         value: https://superadmin.qwish.in
       - key: INSTITUTE_DASHBOARD_URL
         value: https://institute.qwish.in
+      - key: TEACHER_PANEL_URL
+        value: https://teacher.qwish.in
       - key: BRAND_URL
         value: https://qwish.in

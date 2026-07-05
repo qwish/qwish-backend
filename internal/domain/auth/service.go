@@ -152,13 +152,13 @@ func (s *Service) ActivateAdmin(ctx context.Context, id string) {
 }
 
 // CreateUser inserts a new user into the users table.
-func (s *Service) CreateUser(ctx context.Context, supabaseUID, fullName, email, role string, institutionID *string) (UserProfile, error) {
+func (s *Service) CreateUser(ctx context.Context, supabaseUID, fullName, email, role string, institutionID *string, status string) (UserProfile, error) {
 	var u UserProfile
 	err := s.db.QueryRow(ctx,
-		`INSERT INTO users (supabase_uid, full_name, display_name, email, role, institution_id)
-		 VALUES ($1, $2, $2, $3, $4, $5)
+		`INSERT INTO users (supabase_uid, full_name, display_name, email, role, institution_id, status)
+		 VALUES ($1, $2, $2, $3, $4, $5, $6)
 		 RETURNING id, full_name, display_name, email, role, institution_id, status, total_points, current_streak, longest_streak, member_since`,
-		supabaseUID, fullName, email, role, institutionID,
+		supabaseUID, fullName, email, role, institutionID, status,
 	).Scan(&u.ID, &u.FullName, &u.DisplayName, &u.Email, &u.Role,
 		&u.InstitutionID, &u.Status, &u.TotalPoints, &u.CurrentStreak, &u.LongestStreak, &u.MemberSince)
 	if err != nil {

@@ -162,6 +162,13 @@ func (s *Service) SendTeacherInvite(ctx context.Context, to, name, instName, inv
 		fmt.Sprintf("teacher_invite:%s", inviteID))
 }
 
+// SendTeacherVerified tells a teacher their institution approved their account
+// and they can now sign in with email + OTP.
+func (s *Service) SendTeacherVerified(ctx context.Context, to, name, instName, loginURL string) error {
+	return s.SendEmail(ctx, to, "Your Qwish teacher account is verified",
+		tmplTeacherVerified(name, instName, loginURL), "teacher_verified")
+}
+
 // SendInstitutionInvite emails a "bring Qwish to your institution" invite with a
 // link to the public application form. reference ties it back to the originating
 // contact submission (e.g. "institution_invite:<submissionID>").

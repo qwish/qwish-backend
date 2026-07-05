@@ -213,6 +213,21 @@ func tmplTeacherInvite(name, instName, inviteLink string) string {
 	return emailLayout(esc(instName)+" invited you to teach on Qwish", body)
 }
 
+func tmplTeacherVerified(name, instName, loginURL string) string {
+	greeting := "Hi"
+	if name != "" {
+		greeting = "Hi " + esc(name)
+	}
+	body := heading("You’re verified — welcome to Qwish") +
+		paragraph(greeting+",") +
+		paragraph("<strong>"+esc(instName)+"</strong> has verified your teacher account. You can now sign in and start authoring quizzes and tracking your students.") +
+		paragraph("Sign in with your email — we’ll send you a one-time code (OTP) each time.") +
+		primaryButton("Sign in to Qwish", loginURL) +
+		fallbackLink(loginURL) +
+		mutedNote("If you weren’t expecting this, you can safely ignore this email.")
+	return emailLayout(esc(instName)+" verified your Qwish teacher account", body)
+}
+
 func tmplInstitutionInvite(name, applyLink string) string {
 	greeting := "Hi"
 	if name != "" {

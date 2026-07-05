@@ -75,7 +75,7 @@ func main() {
 	parentH := parent.NewHandler(pool)
 	topicH := topicrequest.NewHandler(pool)
 	uploadH := upload.NewHandler(r2Client)
-	institutionH := institution.NewHandler(pool, notifSvc, cfg.AppURL)
+	institutionH := institution.NewHandler(pool, notifSvc, cfg.AppURL, cfg.TeacherURL)
 	teacherH := teacher.NewHandler(pool)
 	adminH := admin.NewHandler(pool, cfg, notifSvc)
 	onboardingH := onboarding.NewHandler(pool)

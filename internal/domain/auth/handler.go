@@ -71,6 +71,13 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 
 	existingUser, err := h.svc.GetUserBySupabaseUID(r.Context(), uid)
 	if err == nil {
+		// A teacher awaiting institution verification cannot sign in yet. Return
+		// 403 without tokens so the client can't enter the dashboard.
+		if existingUser.Role == "teacher" && existingUser.Status == "pending" {
+			middleware.Error(w, http.StatusForbidden, "PENDING_VERIFICATION",
+				"your teacher account is awaiting verification by your institution")
+			return
+		}
 		middleware.JSON(w, http.StatusOK, map[string]interface{}{
 			"user": map[string]interface{}{
 				"id":           existingUser.ID,
@@ -78,6 +85,7 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 				"display_name": existingUser.DisplayName,
 				"email":        existingUser.Email,
 				"role":         existingUser.Role,
+				"status":       existingUser.Status,
 			},
 			"access_token":  authResp.AccessToken,
 			"refresh_token": authResp.RefreshToken,
@@ -145,6 +153,10 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 
 	var instID *string
 	role := "student"
+	// Teachers who self-join via a referral code must be verified by their
+	// institution before they can sign in; everyone else is active immediately.
+	// Invited teachers (invite_token) are pre-vetted, so they stay active.
+	status := "active"
 	var acceptedInviteID string
 	switch {
 	case req.InviteToken != "":
@@ -176,9 +188,12 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		instID = &id
 		role = assignedRole
+		if role == "teacher" {
+			status = "pending"
+		}
 	}
 
-	newUser, err := h.svc.CreateUser(r.Context(), uid, req.FullName, email, role, instID)
+	newUser, err := h.svc.CreateUser(r.Context(), uid, req.FullName, email, role, instID, status)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -208,8 +223,11 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 			"display_name": newUser.DisplayName,
 			"email":        newUser.Email,
 			"role":         newUser.Role,
+			"status":       newUser.Status,
 			"institution":  instData,
 		},
+		// Pending teachers can't enter the panel until their institution verifies them.
+		"requires_verification": newUser.Status == "pending",
 	})
 }
 

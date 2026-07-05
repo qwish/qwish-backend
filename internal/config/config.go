@@ -28,6 +28,7 @@ type Config struct {
 	AppURL                string
 	SuperAdminURL         string // super-admin console; invite links redirect here
 	InstituteURL          string // institution dashboard; provision-admin invites redirect here
+	TeacherURL            string // teacher panel; teacher-verified emails link here to sign in
 	BrandURL              string // marketing site; institution "apply to join" links point here
 	WebAuthnRPID          string // passkey Relying Party ID (registrable domain, no scheme/port)
 	WebAuthnRPDisplayName string // passkey RP display name shown by the authenticator
@@ -60,6 +61,7 @@ func Load() *Config {
 		AppURL:                getEnv("APP_URL", "https://app.qwish.in"),
 		SuperAdminURL:         getEnv("SUPER_ADMIN_URL", "https://superadmin.qwish.in"),
 		InstituteURL:          getEnv("INSTITUTE_DASHBOARD_URL", "https://institute.qwish.in"),
+		TeacherURL:            getEnv("TEACHER_PANEL_URL", "https://teacher.qwish.in"),
 		BrandURL:              getEnv("BRAND_URL", "https://qwish.in"),
 		WebAuthnRPID:          getEnv("WEBAUTHN_RP_ID", "localhost"),
 		WebAuthnRPDisplayName: getEnv("WEBAUTHN_RP_DISPLAY_NAME", "Qwish Admin"),

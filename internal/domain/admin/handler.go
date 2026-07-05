@@ -403,7 +403,9 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	offset := (page - 1) * limit
 
 	args := []interface{}{}
-	where := `u.deleted_at IS NULL`
+	// Only end-user roles are managed here; platform staff (moderator,
+	// support_agent, super_admin) are administered on the Admin Accounts page.
+	where := `u.deleted_at IS NULL AND u.role IN ('student','teacher','parent','institution_admin')`
 	n := 1
 	if s := q.Get("search"); s != "" {
 		where += fmt.Sprintf(` AND (u.display_name ILIKE $%d OR u.email ILIKE $%d)`, n, n)
@@ -473,7 +475,8 @@ func (h *Handler) GetUser(w http.ResponseWriter, r *http.Request) {
 	err := h.db.QueryRow(r.Context(),
 		`SELECT u.display_name, u.email, u.role, u.status, i.name, u.total_points, u.current_streak, u.member_since, u.last_active_at
 		 FROM users u LEFT JOIN institutions i ON i.id=u.institution_id
-		 WHERE u.id=$1 AND u.deleted_at IS NULL`, userID,
+		 WHERE u.id=$1 AND u.deleted_at IS NULL
+		   AND u.role IN ('student','teacher','parent','institution_admin')`, userID,
 	).Scan(&displayName, &email, &role, &status, &instName, &totalPoints, &currentStreak, &memberSince, &lastActive)
 	if err != nil {
 		middleware.NotFound(w, "user")

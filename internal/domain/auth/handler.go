@@ -30,7 +30,10 @@ func (h *Handler) SendOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	isNewUser := !h.svc.UserExistsByEmail(r.Context(), req.Email)
-	h.svc.SupabaseSendOTP(r.Context(), req.Email)
+	// ponytail: log but still return 200 — enumeration protection intact, failures now visible
+	if err := h.svc.SupabaseSendOTP(r.Context(), req.Email); err != nil {
+		log.Printf("auth: send-otp failed for %s: %v", req.Email, err)
+	}
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"message":     "OTP sent",
 		"is_new_user": isNewUser,

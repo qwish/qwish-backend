@@ -61,7 +61,7 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		Day   string `json:"day"`
 		Count int    `json:"count"`
 	}
-	var chart []dayCount
+	chart := []dayCount{}
 	for rows.Next() {
 		var dc dayCount
 		rows.Scan(&dc.Day, &dc.Count)
@@ -80,7 +80,7 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		Title       string `json:"title"`
 		Completions int    `json:"completions"`
 	}
-	var topQuizzes []topQuiz
+	topQuizzes := []topQuiz{}
 	for qrows.Next() {
 		var tq topQuiz
 		qrows.Scan(&tq.ID, &tq.Title, &tq.Completions)
@@ -149,7 +149,7 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Query(r.Context(),
 		`SELECT u.id, u.display_name, u.email, u.total_points, u.current_streak, u.last_active_at, u.status,
 		        COALESCE((SELECT AVG(score_pct) FROM quiz_attempts WHERE user_id=u.id AND status='completed'),0) as avg_score
-		 FROM users u WHERE `+where+` ORDER BY `+sortCol+fmt.Sprintf(` LIMIT $%d OFFSET $%d`, n-1, n),
+		 FROM users u WHERE `+where+` ORDER BY `+sortCol+fmt.Sprintf(` LIMIT $%d OFFSET $%d`, n, n+1),
 		args...)
 	if err != nil {
 		middleware.InternalError(w)

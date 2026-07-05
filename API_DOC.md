@@ -18,6 +18,59 @@ Tokens are obtained via `/auth/verify-otp`.
 
 ---
 
+## Avatars
+
+Deterministic, procedurally-generated SVG avatars. **Public — no auth.** Same
+seed always returns the exact same image, so use a stable per-user seed (the
+user `id`). Zero stored assets; every avatar is generated from the seed.
+
+### GET `/avatars/{seed}`
+
+Returns an avatar as `image/svg+xml`. Use `<img>` / `SvgPicture.network` directly.
+
+Optional query params override the seed's random baseline. Unknown or invalid
+values are **ignored** (the random choice is kept), so the endpoint never errors
+on bad input.
+
+| Param        | Values                                                                    |
+|--------------|---------------------------------------------------------------------------|
+| `skin`       | `cream`, `peach`, `tan`, `brown`, or a `#RRGGBB` hex                       |
+| `hairStyle`  | `cap`, `helmet`, `swept`, `afro`                                           |
+| `hairColor`  | palette name (see below), or a `#RRGGBB` hex                              |
+| `background` | palette name, or a `#RRGGBB` hex                                          |
+| `expression` | `happy`, `neutral`, `sad`                                                  |
+| `accessory`  | `none`, `circle`, `triangle`, `bar`                                        |
+
+Palette names: `cobalt`, `vermilion`, `yellow`, `teal`, `terracotta`, `violet`,
+`deepteal`, `sand`.
+
+Response is cacheable (`Cache-Control: public, max-age=31536000, immutable`);
+params are part of the URL, so each customization caches separately.
+
+```
+GET /avatars/8f2a...            # random avatar for this user
+GET /avatars/8f2a...?hairStyle=afro&skin=brown&expression=happy&background=cobalt
+```
+
+### GET `/avatars/options`
+
+Returns the valid values for every customization param as JSON, for building
+pickers without hardcoding:
+
+```json
+{
+  "skin": ["cream", "peach", "tan", "brown"],
+  "hairStyle": ["cap", "helmet", "swept", "afro"],
+  "hairColor": ["cobalt", "vermilion", "yellow", "teal", "terracotta", "violet", "deepteal", "sand"],
+  "background": ["cobalt", "vermilion", "yellow", "teal", "terracotta", "violet", "deepteal", "sand"],
+  "expression": ["happy", "neutral", "sad"],
+  "accessory": ["none", "circle", "triangle", "bar"],
+  "note": "hairColor/background/skin also accept a #RRGGBB hex"
+}
+```
+
+---
+
 ## Standard Response Shapes
 
 ### Success (single object)

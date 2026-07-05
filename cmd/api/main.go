@@ -16,6 +16,7 @@ import (
 	"github.com/qwish/backend/internal/domain/admin"
 	"github.com/qwish/backend/internal/domain/attempt"
 	"github.com/qwish/backend/internal/domain/auth"
+	"github.com/qwish/backend/internal/domain/avatar"
 	"github.com/qwish/backend/internal/domain/contact"
 	"github.com/qwish/backend/internal/domain/institution"
 	"github.com/qwish/backend/internal/domain/leaderboard"
@@ -64,6 +65,7 @@ func main() {
 
 	// Handlers
 	authH := auth.NewHandler(authSvc)
+	avatarH := avatar.NewHandler()
 	userH := user.NewHandler(userSvc)
 	quizH := quiz.NewHandler(quizSvc)
 	attemptH := attempt.NewHandler(attemptSvc)
@@ -136,6 +138,10 @@ func main() {
 				r.With(mw.RateLimit(5, 10*time.Minute)).Post("/institution", onboardingH.RegisterInstitution)
 				r.Get("/institution/status", onboardingH.CheckStatus)
 			})
+
+			// ------ Public Avatars (deterministic SVG, no auth) ------
+			r.Get("/avatars/options", avatarH.Meta)
+			r.Get("/avatars/{seed}", avatarH.Get)
 
 			// ------ Public Contact Form ------
 			// Public + unauthenticated, so rate-limit per IP to curb spam/abuse.

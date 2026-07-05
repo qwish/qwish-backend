@@ -247,11 +247,26 @@ func (h *Handler) ApproveInstitution(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logAudit(r.Context(), h.db, adminID, "approve_institution", "institution", instID, "")
-	middleware.JSON(w, http.StatusOK, map[string]interface{}{
+
+	// Provision the institution admin + send the login email in the same step, so
+	// approval alone delivers credentials (the separate Provision-admin button is
+	// disabled in the dashboard). Best-effort: approval already succeeded, so a
+	// provisioning failure is reported in the response, not rolled back.
+	admin, provErr := h.provisionInstitutionAdmin(r.Context(), instID, "", "")
+	resp := map[string]interface{}{
 		"message":               "institution approved",
 		"student_referral_code": sCode,
 		"teacher_referral_code": tCode,
-	})
+	}
+	if provErr != nil {
+		fmt.Printf("[admin] auto-provision on approve failed for %s: %v\n", instID, provErr)
+		resp["admin_provisioned"] = false
+		resp["admin_error"] = "credentials email could not be sent; use resend-credentials"
+	} else {
+		resp["admin_provisioned"] = true
+		resp["admin_email"] = admin.AdminEmail
+	}
+	middleware.JSON(w, http.StatusOK, resp)
 }
 
 // POST /api/v1/admin/institutions/:institutionId/reject
@@ -1613,6 +1628,95 @@ func (h *Handler) RejectSponsorshipRequest(w http.ResponseWriter, r *http.Reques
 }
 
 // POST /api/v1/admin/institutions/:institutionId/provision-admin
+// provisionResult reports the outcome of provisionInstitutionAdmin.
+type provisionResult struct {
+	UserID        string
+	AdminEmail    string
+	AdminName     string
+	Institution   string
+	AlreadyExists bool // an admin was already provisioned; no email was sent
+}
+
+// provisionInstitutionAdmin creates the institution_admin Supabase user + local
+// record and sends the login email. Safe to call more than once: if an admin
+// already exists it returns it with AlreadyExists=true and sends nothing. The
+// override args replace the institution's contact_email / onboarding_admin_name
+// when non-empty. Shared by ProvisionAdmin (button) and ApproveInstitution
+// (auto-provision on approval).
+func (h *Handler) provisionInstitutionAdmin(ctx context.Context, instID, adminNameOverride, adminEmailOverride string) (*provisionResult, error) {
+	var instName, contactEmail, onboardingAdminName string
+	if err := h.db.QueryRow(ctx,
+		`SELECT name, contact_email, COALESCE(onboarding_admin_name,'') FROM institutions WHERE id=$1 AND deleted_at IS NULL`,
+		instID,
+	).Scan(&instName, &contactEmail, &onboardingAdminName); err != nil {
+		return nil, err
+	}
+
+	adminEmail := contactEmail
+	if adminEmailOverride != "" {
+		adminEmail = adminEmailOverride
+	}
+	adminName := onboardingAdminName
+	if adminNameOverride != "" {
+		adminName = adminNameOverride
+	}
+	if adminName == "" {
+		adminName = instName + " Admin"
+	}
+
+	// Already provisioned? Return the existing admin, send nothing.
+	var existingID, existingEmail string
+	if err := h.db.QueryRow(ctx,
+		`SELECT id, email FROM users WHERE institution_id=$1 AND role='institution_admin' AND deleted_at IS NULL LIMIT 1`,
+		instID,
+	).Scan(&existingID, &existingEmail); err == nil {
+		return &provisionResult{UserID: existingID, AdminEmail: existingEmail, AdminName: adminName, Institution: instName, AlreadyExists: true}, nil
+	}
+
+	// Provision the Supabase auth user via the shared invite client — same path
+	// internal admin invites use, so UID resolution and duplicate handling match.
+	inv, err := h.invite.Invite(ctx, adminEmail, h.cfg.InstituteURL, map[string]string{
+		"role":           "institution_admin",
+		"institution_id": instID,
+		"full_name":      adminName,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("supabase invite failed for %s: %w", adminEmail, err)
+	}
+
+	var userID string
+	if err := h.db.QueryRow(ctx,
+		`INSERT INTO users (supabase_uid, full_name, display_name, email, role, institution_id)
+		 VALUES ($1,$2,$2,$3,'institution_admin',$4)
+		 RETURNING id`,
+		inv.UID, adminName, adminEmail, instID,
+	).Scan(&userID); err != nil {
+		return nil, err
+	}
+
+	h.db.Exec(ctx, `INSERT INTO streaks (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, userID)
+
+	// Send the login email via Resend (generate_link does not send mail itself).
+	// A fresh invite carries a set-password action link; when Supabase returns no
+	// link (email already had an account) we send the welcome so the admin always
+	// gets *something* — never a silent no-op, which was the original bug.
+	// ponytail: welcome has no set-password link; if a brand-new user ever comes
+	// back with an empty ActionLink (Supabase config), reset+SendInstitutionApproval instead.
+	if h.notif != nil {
+		var mailErr error
+		if inv.ActionLink != "" {
+			mailErr = h.notif.SendAdminInvite(ctx, adminEmail, adminName, "institution_admin", inv.ActionLink)
+		} else {
+			mailErr = h.notif.SendAdminWelcome(ctx, adminEmail, adminName, "institution_admin")
+		}
+		if mailErr != nil {
+			fmt.Printf("[admin] institution-admin login email to %s failed: %v\n", adminEmail, mailErr)
+		}
+	}
+
+	return &provisionResult{UserID: userID, AdminEmail: adminEmail, AdminName: adminName, Institution: instName}, nil
+}
+
 // Creates an institution_admin user record and sends a Supabase email invite
 // so the institution admin can set up their password and log in to the dashboard.
 // Only valid for 'verified' institutions that do not yet have an admin user.
@@ -1620,13 +1724,10 @@ func (h *Handler) ProvisionAdmin(w http.ResponseWriter, r *http.Request) {
 	instID := chi.URLParam(r, "institutionId")
 	requesterAdminID := middleware.GetAdminID(r)
 
-	// Fetch institution details
-	var instName, contactEmail, status, onboardingAdminName string
-	err := h.db.QueryRow(r.Context(),
-		`SELECT name, contact_email, status, COALESCE(onboarding_admin_name,'') FROM institutions WHERE id=$1 AND deleted_at IS NULL`,
-		instID,
-	).Scan(&instName, &contactEmail, &status, &onboardingAdminName)
-	if err != nil {
+	var status string
+	if err := h.db.QueryRow(r.Context(),
+		`SELECT status FROM institutions WHERE id=$1 AND deleted_at IS NULL`, instID,
+	).Scan(&status); err != nil {
 		middleware.NotFound(w, "institution")
 		return
 	}
@@ -1643,97 +1744,34 @@ func (h *Handler) ProvisionAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
-	adminEmail := contactEmail
-	if req.AdminEmail != "" {
-		adminEmail = req.AdminEmail
+	res, err := h.provisionInstitutionAdmin(r.Context(), instID, req.AdminName, req.AdminEmail)
+	if err != nil {
+		fmt.Printf("[admin] provision institution admin failed for %s: %v\n", instID, err)
+		middleware.Error(w, http.StatusBadGateway, "INVITE_FAILED",
+			"failed to provision the institution admin; no admin was created")
+		return
 	}
-	adminName := onboardingAdminName
-	if req.AdminName != "" {
-		adminName = req.AdminName
-	}
-	if adminName == "" {
-		adminName = instName + " Admin"
-	}
-
-	// Prevent duplicate provisioning — check if an institution_admin already exists
-	var existingCount int
-	h.db.QueryRow(r.Context(),
-		`SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='institution_admin' AND deleted_at IS NULL`,
-		instID,
-	).Scan(&existingCount)
-	if existingCount > 0 {
-		// Still return their details rather than an error
-		var existingID, existingEmail string
-		h.db.QueryRow(r.Context(),
-			`SELECT id, email FROM users WHERE institution_id=$1 AND role='institution_admin' AND deleted_at IS NULL LIMIT 1`,
-			instID,
-		).Scan(&existingID, &existingEmail)
+	if res.AlreadyExists {
 		middleware.JSON(w, http.StatusOK, map[string]interface{}{
 			"message":        "institution admin already provisioned",
-			"user_id":        existingID,
-			"admin_email":    existingEmail,
+			"user_id":        res.UserID,
+			"admin_email":    res.AdminEmail,
 			"institution_id": instID,
 			"already_exists": true,
 		})
 		return
 	}
 
-	// Provision the Supabase auth user via the shared invite client — same path
-	// internal admin invites use, so UID resolution and duplicate handling match.
-	inv, err := h.invite.Invite(r.Context(), adminEmail, h.cfg.InstituteURL, map[string]string{
-		"role":           "institution_admin",
-		"institution_id": instID,
-		"full_name":      adminName,
-	})
-	if err != nil {
-		fmt.Printf("[admin] Supabase invite failed for institution admin %s: %v\n", adminEmail, err)
-		middleware.Error(w, http.StatusBadGateway, "INVITE_FAILED",
-			"failed to create Supabase invite for this email; institution admin was not provisioned")
-		return
-	}
-	supabaseUID := inv.UID
-
-	// Create the institution_admin user record in our DB
-	var userID string
-	err = h.db.QueryRow(r.Context(),
-		`INSERT INTO users (supabase_uid, full_name, display_name, email, role, institution_id)
-		 VALUES ($1,$2,$2,$3,'institution_admin',$4)
-		 RETURNING id`,
-		supabaseUID, adminName, adminEmail, instID,
-	).Scan(&userID)
-	if err != nil {
-		middleware.InternalError(w)
-		return
-	}
-
-	// Also initialise streak row
-	h.db.Exec(r.Context(),
-		`INSERT INTO streaks (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, userID)
-
-	// Send the branded invite/welcome email via Resend (generate_link, unlike the
-	// old /admin/invite endpoint, does not send mail itself).
-	if h.notif != nil {
-		var mailErr error
-		if inv.ActionLink != "" {
-			mailErr = h.notif.SendAdminInvite(r.Context(), adminEmail, adminName, "institution_admin", inv.ActionLink)
-		} else if inv.AlreadyExisted {
-			mailErr = h.notif.SendAdminWelcome(r.Context(), adminEmail, adminName, "institution_admin")
-		}
-		if mailErr != nil {
-			fmt.Printf("[admin] institution-admin invite email to %s failed: %v\n", adminEmail, mailErr)
-		}
-	}
-
 	logAudit(r.Context(), h.db, requesterAdminID, "provision_institution_admin", "institution", instID,
-		fmt.Sprintf("admin_user_id=%s email=%s", userID, adminEmail))
+		fmt.Sprintf("admin_user_id=%s email=%s", res.UserID, res.AdminEmail))
 
 	middleware.JSON(w, http.StatusCreated, map[string]interface{}{
-		"message":        "Institution admin provisioned. An invite email has been sent to " + adminEmail + " with login instructions.",
-		"user_id":        userID,
-		"admin_email":    adminEmail,
-		"admin_name":     adminName,
+		"message":        "Institution admin provisioned. An invite email has been sent to " + res.AdminEmail + " with login instructions.",
+		"user_id":        res.UserID,
+		"admin_email":    res.AdminEmail,
+		"admin_name":     res.AdminName,
 		"institution_id": instID,
-		"institution":    instName,
+		"institution":    res.Institution,
 	})
 }
 

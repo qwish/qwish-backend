@@ -30,15 +30,17 @@ var validTopics = map[string]bool{
 
 // Handler holds the database pool for all contact-form operations.
 type Handler struct {
-	db       *pgxpool.Pool
-	notif    *notification.Service
-	brandURL string // marketing site base; institution apply links point here
+	db              *pgxpool.Pool
+	notif           *notification.Service
+	brandURL        string // marketing site base; institution apply links point here
+	turnstileSecret string // Cloudflare Turnstile secret; empty disables verification
 }
 
 // NewHandler creates a new contact Handler. notif may be nil (emails are then
-// skipped); brandURL is the marketing-site base used to build apply links.
-func NewHandler(db *pgxpool.Pool, notif *notification.Service, brandURL string) *Handler {
-	return &Handler{db: db, notif: notif, brandURL: strings.TrimRight(brandURL, "/")}
+// skipped); brandURL is the marketing-site base used to build apply links;
+// turnstileSecret enables Turnstile bot verification when non-empty.
+func NewHandler(db *pgxpool.Pool, notif *notification.Service, brandURL, turnstileSecret string) *Handler {
+	return &Handler{db: db, notif: notif, brandURL: strings.TrimRight(brandURL, "/"), turnstileSecret: turnstileSecret}
 }
 
 // ──────────────────────────────────────────────
@@ -48,15 +50,21 @@ func NewHandler(db *pgxpool.Pool, notif *notification.Service, brandURL string) 
 // Submit stores a new contact form submission.
 func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Topic    string          `json:"topic"`
-		Name     string          `json:"name"`
-		Email    string          `json:"email"`
-		Phone    string          `json:"phone"`
-		Message  string          `json:"message"`
-		Metadata json.RawMessage `json:"metadata"` // optional topic-specific fields
+		Topic     string          `json:"topic"`
+		Name      string          `json:"name"`
+		Email     string          `json:"email"`
+		Phone     string          `json:"phone"`
+		Message   string          `json:"message"`
+		Metadata  json.RawMessage `json:"metadata"` // optional topic-specific fields
+		Turnstile string          `json:"turnstileToken"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
+		return
+	}
+
+	if err := middleware.VerifyTurnstile(r.Context(), h.turnstileSecret, req.Turnstile); err != nil {
+		middleware.BadRequest(w, "verification failed, please try again")
 		return
 	}
 

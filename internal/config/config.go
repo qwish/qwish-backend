@@ -33,6 +33,7 @@ type Config struct {
 	WebAuthnRPID          string // passkey Relying Party ID (registrable domain, no scheme/port)
 	WebAuthnRPDisplayName string // passkey RP display name shown by the authenticator
 	WebAuthnRPOrigins     string // comma-separated list of allowed passkey origins (with scheme)
+	TurnstileSecret       string // Cloudflare Turnstile secret; empty disables bot verification on public forms
 }
 
 func Load() *Config {
@@ -65,7 +66,8 @@ func Load() *Config {
 		BrandURL:              getEnv("BRAND_URL", "https://qwish.in"),
 		WebAuthnRPID:          getEnv("WEBAUTHN_RP_ID", "localhost"),
 		WebAuthnRPDisplayName: getEnv("WEBAUTHN_RP_DISPLAY_NAME", "Qwish Admin"),
-		WebAuthnRPOrigins:     getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3000"),
+		WebAuthnRPOrigins:     getEnv("WEBAUTHN_RP_ORIGINS", "https://superadmin.qwish.in"),
+		TurnstileSecret:       getEnv("TURNSTILE_SECRET", ""),
 	}
 }
 

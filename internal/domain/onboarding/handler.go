@@ -11,11 +11,12 @@ import (
 )
 
 type Handler struct {
-	db *pgxpool.Pool
+	db              *pgxpool.Pool
+	turnstileSecret string // Cloudflare Turnstile secret; empty disables verification
 }
 
-func NewHandler(db *pgxpool.Pool) *Handler {
-	return &Handler{db: db}
+func NewHandler(db *pgxpool.Pool, turnstileSecret string) *Handler {
+	return &Handler{db: db, turnstileSecret: turnstileSecret}
 }
 
 // POST /api/v1/onboarding/institution
@@ -36,9 +37,16 @@ func (h *Handler) RegisterInstitution(w http.ResponseWriter, r *http.Request) {
 		City    string `json:"city"`
 		State   string `json:"state"`
 		Country string `json:"country"`
+
+		Turnstile string `json:"turnstileToken"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
+		return
+	}
+
+	if err := middleware.VerifyTurnstile(r.Context(), h.turnstileSecret, req.Turnstile); err != nil {
+		middleware.BadRequest(w, "verification failed, please try again")
 		return
 	}
 

@@ -165,13 +165,20 @@ func (s *Service) SubmitAnswer(ctx context.Context, userID, attemptID string, re
 	}
 	isCorrect, pts := scoring.ScoreQuestion(resp, cfg)
 
+	// Empty confidence_level must be NULL, not '' — the CHECK constraint only
+	// allows NULL or the three enum values.
+	var confidence *string
+	if req.ConfidenceLevel != "" {
+		confidence = &req.ConfidenceLevel
+	}
+
 	// Upsert response
 	_, err = tx.Exec(ctx,
 		`INSERT INTO question_responses (attempt_id, question_id, answer, is_correct, time_taken_ms, clues_used, confidence_level, combo_level, points_earned)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		 ON CONFLICT (attempt_id, question_id) DO UPDATE
 		 SET answer=$3, is_correct=$4, time_taken_ms=$5, clues_used=$6, confidence_level=$7, combo_level=$8, points_earned=$9`,
-		attemptID, req.QuestionID, req.Answer, isCorrect, req.TimeTakenMs, req.CluesUsed, req.ConfidenceLevel, req.ComboLevel, pts)
+		attemptID, req.QuestionID, req.Answer, isCorrect, req.TimeTakenMs, req.CluesUsed, confidence, req.ComboLevel, pts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save response: %w", err)
 	}

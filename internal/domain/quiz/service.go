@@ -382,7 +382,7 @@ func (s *Service) ListForTeacher(ctx context.Context, teacherID, statusFilter st
 	args = append(args, limit, offset)
 	n := len(args)
 	rows, err := s.db.Query(ctx,
-		`SELECT id, institution_id, created_by, '' as teacher, title, description, type, visibility, status, question_count, ends_at, published_at, rejection_reason, group_id, created_at
+		`SELECT id, institution_id, created_by, '' as teacher, title, description, type, visibility, status, question_count, ends_at, published_at, group_id, created_at
 		 FROM quizzes WHERE `+where+fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, n-1, n),
 		args...)
 	if err != nil {

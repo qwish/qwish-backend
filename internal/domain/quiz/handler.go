@@ -178,6 +178,28 @@ func (h *Handler) TeacherAddQuestion(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusCreated, q)
 }
 
+// GET /api/v1/teacher/quizzes/:quizId/questions
+// Returns full questions (including correct answers) for a quiz the caller owns,
+// for the authoring UI. GetByID confirms ownership before exposing answers.
+func (h *Handler) TeacherGetQuestions(w http.ResponseWriter, r *http.Request) {
+	quizID := chi.URLParam(r, "quizId")
+	quiz, err := h.svc.GetByID(r.Context(), quizID)
+	if err != nil {
+		middleware.NotFound(w, "quiz")
+		return
+	}
+	if quiz.CreatedBy != middleware.GetUserID(r) {
+		middleware.Forbidden(w)
+		return
+	}
+	questions, err := h.svc.GetQuestions(r.Context(), quizID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, questions)
+}
+
 // PATCH /api/v1/teacher/quizzes/:quizId/questions/:questionId
 func (h *Handler) TeacherUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 	var req AddQuestionReq

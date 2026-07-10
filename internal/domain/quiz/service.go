@@ -28,6 +28,7 @@ type Quiz struct {
 	Visibility      string     `json:"visibility"`
 	Status          string     `json:"status"`
 	QuestionCount   int        `json:"question_count"`
+	TakerCount      int        `json:"taker_count"`
 	EndsAt          *time.Time `json:"ends_at,omitempty"`
 	PublishedAt     *time.Time `json:"published_at,omitempty"`
 	RejectionReason *string    `json:"rejection_reason,omitempty"`
@@ -105,7 +106,9 @@ func (s *Service) ListForStudent(ctx context.Context, institutionID, quizType, s
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(ctx,
 		`SELECT q.id, q.institution_id, q.created_by, u.display_name, q.title, q.description,
-		        q.type, q.visibility, q.status, q.question_count, q.ends_at, q.published_at, q.group_id, q.created_at
+		        q.type, q.visibility, q.status, q.question_count,
+		        (SELECT COUNT(*) FROM quiz_attempts qa WHERE qa.quiz_id = q.id AND qa.status = 'completed') AS taker_count,
+		        q.ends_at, q.published_at, q.group_id, q.created_at
 		 FROM quizzes q
 		 JOIN users u ON u.id = q.created_by
 		 WHERE `+baseWhere+
@@ -122,13 +125,14 @@ func (s *Service) GetByID(ctx context.Context, quizID string) (*Quiz, error) {
 	q := &Quiz{}
 	err := s.db.QueryRow(ctx,
 		`SELECT q.id, q.institution_id, q.created_by, u.display_name, q.title, q.description,
-		        q.type, q.visibility, q.status, q.question_count, q.ends_at, q.published_at,
-		        q.rejection_reason, q.group_id, q.created_at
+		        q.type, q.visibility, q.status, q.question_count,
+		        (SELECT COUNT(*) FROM quiz_attempts qa WHERE qa.quiz_id = q.id AND qa.status = 'completed') AS taker_count,
+		        q.ends_at, q.published_at, q.rejection_reason, q.group_id, q.created_at
 		 FROM quizzes q
 		 JOIN users u ON u.id = q.created_by
 		 WHERE q.id = $1 AND q.deleted_at IS NULL`, quizID,
 	).Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.Title, &q.Description,
-		&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.EndsAt, &q.PublishedAt,
+		&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt,
 		&q.RejectionReason, &q.GroupID, &q.CreatedAt)
 	if err != nil {
 		return nil, err
@@ -476,7 +480,7 @@ func (s *Service) scanQuizRows(rows interface{ Next() bool; Scan(...interface{})
 	for rows.Next() {
 		var q Quiz
 		rows.Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.Title, &q.Description,
-			&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.CreatedAt)
+			&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.CreatedAt)
 		quizzes = append(quizzes, q)
 	}
 	if quizzes == nil {

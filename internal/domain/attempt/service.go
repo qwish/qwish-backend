@@ -59,6 +59,9 @@ type CompleteResp struct {
 	StreakBonusAwarded int64                    `json:"streak_bonus_awarded"`
 	BadgesAwarded      []string                 `json:"badges_awarded"`
 	QuestionBreakdown  []QuestionBreakdownItem  `json:"question_breakdown"`
+	// IsRepeatAttempt is true when the quiz is knowledge_check and the user
+	// has already completed it before. Points are 0 in this case.
+	IsRepeatAttempt    bool                     `json:"is_repeat_attempt"`
 }
 
 type QuestionBreakdownItem struct {
@@ -205,16 +208,33 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 	}
 	defer tx.Rollback(ctx)
 
-	// Load attempt with FOR UPDATE
+	// Load attempt with FOR UPDATE, also fetch the quiz type for repeat-attempt check
 	var quizID string
 	var cfgSnapshot json.RawMessage
 	var totalQuestions int
+	var quizType string
 	err = tx.QueryRow(ctx,
-		`SELECT quiz_id, point_config_snapshot, total_questions FROM quiz_attempts WHERE id=$1 AND user_id=$2 AND status='in_progress' FOR UPDATE`,
+		`SELECT qa.quiz_id, qa.point_config_snapshot, qa.total_questions, q.type
+		 FROM quiz_attempts qa
+		 JOIN quizzes q ON q.id = qa.quiz_id
+		 WHERE qa.id=$1 AND qa.user_id=$2 AND qa.status='in_progress' FOR UPDATE`,
 		attemptID, userID,
-	).Scan(&quizID, &cfgSnapshot, &totalQuestions)
+	).Scan(&quizID, &cfgSnapshot, &totalQuestions, &quizType)
 	if err != nil {
 		return nil, fmt.Errorf("attempt not found or already completed")
+	}
+
+	// For knowledge_check quizzes, check whether the user has a prior completed attempt.
+	// If so this is a repeat attempt and points will be zeroed out.
+	var isRepeatAttempt bool
+	if quizType == "knowledge_check" {
+		var priorCount int
+		s.db.QueryRow(ctx,
+			`SELECT COUNT(*) FROM quiz_attempts
+			 WHERE quiz_id=$1 AND user_id=$2 AND status='completed' AND id != $3`,
+			quizID, userID, attemptID,
+		).Scan(&priorCount)
+		isRepeatAttempt = priorCount > 0
 	}
 
 	cfg, _ := scoring.ConfigFromSnapshot(cfgSnapshot)
@@ -282,6 +302,11 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 
 	finalPoints := scoring.CalculateFinalScore(totalCorrect, totalQuestions, rawPoints, scorePct, cfg, instMultiplier)
 
+	// Repeat knowledge_check attempts earn no points.
+	if isRepeatAttempt {
+		finalPoints = 0
+	}
+
 	// Performance badge
 	badge := "needs_work"
 	if scorePct >= 75 {
@@ -290,25 +315,32 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		badge = "good"
 	}
 
-	// Update attempt
+	// Update attempt — store points_delta=0 for repeat attempts so history is accurate
 	tx.Exec(ctx,
 		`UPDATE quiz_attempts SET status='completed', score_pct=$1, points_delta=$2, total_correct=$3, total_questions=$4, completed_at=now()
 		 WHERE id=$5`,
 		scorePct, finalPoints, totalCorrect, totalQuestions, attemptID)
 
-	// Update user points
 	var newBalance int64
-	err = tx.QueryRow(ctx, `UPDATE users SET total_points = GREATEST(0, total_points + $1), updated_at=now() WHERE id=$2 RETURNING total_points`, finalPoints, userID).Scan(&newBalance)
-	if err != nil {
-		return nil, err
-	}
+	if !isRepeatAttempt {
+		// Update user points and write ledger only for first attempt
+		err = tx.QueryRow(ctx,
+			`UPDATE users SET total_points = GREATEST(0, total_points + $1), updated_at=now() WHERE id=$2 RETURNING total_points`,
+			finalPoints, userID,
+		).Scan(&newBalance)
+		if err != nil {
+			return nil, err
+		}
 
-	// Insert ledger entry
-	expiresAt := time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0)
-	tx.Exec(ctx,
-		`INSERT INTO points_ledger (user_id, amount, reason, reference_id, balance_after, expires_at)
-		 VALUES ($1,$2,'quiz_attempt',$3,$4,$5)`,
-		userID, finalPoints, attemptID, newBalance, expiresAt)
+		expiresAt := time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0)
+		tx.Exec(ctx,
+			`INSERT INTO points_ledger (user_id, amount, reason, reference_id, balance_after, expires_at)
+			 VALUES ($1,$2,'quiz_attempt',$3,$4,$5)`,
+			userID, finalPoints, attemptID, newBalance, expiresAt)
+	} else {
+		// For repeat attempts, just read the current balance for consistency
+		s.db.QueryRow(ctx, `SELECT total_points FROM users WHERE id=$1`, userID).Scan(&newBalance)
+	}
 
 	err = tx.Commit(ctx)
 	if err != nil {
@@ -377,6 +409,7 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		StreakBonusAwarded: streakBonus,
 		BadgesAwarded:      awarded,
 		QuestionBreakdown:  breakdown,
+		IsRepeatAttempt:    isRepeatAttempt,
 	}, nil
 }
 

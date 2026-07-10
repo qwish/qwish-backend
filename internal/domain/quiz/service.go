@@ -22,6 +22,7 @@ type Quiz struct {
 	InstitutionID   *string    `json:"institution_id,omitempty"`
 	CreatedBy       string     `json:"created_by"`
 	TeacherName     string     `json:"teacher_name,omitempty"`
+	InstitutionName string     `json:"institution_name,omitempty"`
 	Title           string     `json:"title"`
 	Description     *string    `json:"description,omitempty"`
 	Type            string     `json:"type"`
@@ -33,6 +34,8 @@ type Quiz struct {
 	PublishedAt     *time.Time `json:"published_at,omitempty"`
 	RejectionReason *string    `json:"rejection_reason,omitempty"`
 	GroupID         *string    `json:"group_id,omitempty"`
+	Domain          *string    `json:"domain,omitempty"`
+	Subdomain       *string    `json:"subdomain,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	QuestionTypes   []string   `json:"question_types,omitempty"`
 }
@@ -57,6 +60,8 @@ type CreateQuizReq struct {
 	Visibility  string  `json:"visibility"`
 	GroupID     *string `json:"group_id"`
 	EndsAt      *time.Time `json:"ends_at"`
+	Domain      *string `json:"domain"`
+	Subdomain   *string `json:"subdomain"`
 }
 
 type AddQuestionReq struct {
@@ -105,12 +110,13 @@ func (s *Service) ListForStudent(ctx context.Context, institutionID, quizType, s
 
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(ctx,
-		`SELECT q.id, q.institution_id, q.created_by, u.display_name, q.title, q.description,
-		        q.type, q.visibility, q.status, q.question_count,
+		`SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
+		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
 		        (SELECT COUNT(*) FROM quiz_attempts qa WHERE qa.quiz_id = q.id AND qa.status = 'completed') AS taker_count,
 		        q.ends_at, q.published_at, q.group_id, q.created_at
 		 FROM quizzes q
 		 JOIN users u ON u.id = q.created_by
+		 LEFT JOIN institutions i ON i.id = u.institution_id
 		 WHERE `+baseWhere+
 			fmt.Sprintf(` ORDER BY q.published_at DESC LIMIT $%d OFFSET $%d`, argN, argN+1),
 		args...)
@@ -124,16 +130,17 @@ func (s *Service) ListForStudent(ctx context.Context, institutionID, quizType, s
 func (s *Service) GetByID(ctx context.Context, quizID string) (*Quiz, error) {
 	q := &Quiz{}
 	err := s.db.QueryRow(ctx,
-		`SELECT q.id, q.institution_id, q.created_by, u.display_name, q.title, q.description,
-		        q.type, q.visibility, q.status, q.question_count,
+		`SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
+		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
 		        (SELECT COUNT(*) FROM quiz_attempts qa WHERE qa.quiz_id = q.id AND qa.status = 'completed') AS taker_count,
-		        q.ends_at, q.published_at, q.rejection_reason, q.group_id, q.created_at
+		        q.ends_at, q.published_at, q.rejection_reason, q.group_id, q.domain, q.subdomain, q.created_at
 		 FROM quizzes q
 		 JOIN users u ON u.id = q.created_by
+		 LEFT JOIN institutions i ON i.id = u.institution_id
 		 WHERE q.id = $1 AND q.deleted_at IS NULL`, quizID,
-	).Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.Title, &q.Description,
+	).Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName, &q.Title, &q.Description,
 		&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt,
-		&q.RejectionReason, &q.GroupID, &q.CreatedAt)
+		&q.RejectionReason, &q.GroupID, &q.Domain, &q.Subdomain, &q.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -148,24 +155,112 @@ func (s *Service) GetByID(ctx context.Context, quizID string) (*Quiz, error) {
 	return q, nil
 }
 
+// ErrInvalidTaxonomy is returned when a domain/subdomain pair is unknown or
+// the subdomain does not belong to the given domain.
+var ErrInvalidTaxonomy = fmt.Errorf("invalid domain/subdomain")
+
+// validateTaxonomy checks that domain (if set) exists and that subdomain (if
+// set) exists and belongs to domain. Both nil is allowed (untagged quiz).
+func (s *Service) validateTaxonomy(ctx context.Context, domain, subdomain *string) error {
+	if domain == nil && subdomain == nil {
+		return nil
+	}
+	if subdomain != nil {
+		// A subdomain requires a matching domain.
+		if domain == nil {
+			return ErrInvalidTaxonomy
+		}
+		var ok bool
+		s.db.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM subdomains WHERE slug=$1 AND domain_slug=$2)`,
+			*subdomain, *domain).Scan(&ok)
+		if !ok {
+			return ErrInvalidTaxonomy
+		}
+		return nil
+	}
+	var ok bool
+	s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM domains WHERE slug=$1)`, *domain).Scan(&ok)
+	if !ok {
+		return ErrInvalidTaxonomy
+	}
+	return nil
+}
+
 func (s *Service) Create(ctx context.Context, req CreateQuizReq, userID, institutionID string) (*Quiz, error) {
+	if err := s.validateTaxonomy(ctx, req.Domain, req.Subdomain); err != nil {
+		return nil, err
+	}
 	q := &Quiz{}
 	err := s.db.QueryRow(ctx,
-		`INSERT INTO quizzes (institution_id, created_by, title, description, type, visibility, group_id, ends_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 RETURNING id, institution_id, created_by, title, description, type, visibility, status, question_count, ends_at, group_id, created_at`,
-		institutionID, userID, req.Title, req.Description, req.Type, req.Visibility, req.GroupID, req.EndsAt,
+		`INSERT INTO quizzes (institution_id, created_by, title, description, type, visibility, group_id, ends_at, domain, subdomain)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		 RETURNING id, institution_id, created_by, title, description, type, visibility, status, question_count, ends_at, group_id, domain, subdomain, created_at`,
+		institutionID, userID, req.Title, req.Description, req.Type, req.Visibility, req.GroupID, req.EndsAt, req.Domain, req.Subdomain,
 	).Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.Title, &q.Description, &q.Type,
-		&q.Visibility, &q.Status, &q.QuestionCount, &q.EndsAt, &q.GroupID, &q.CreatedAt)
+		&q.Visibility, &q.Status, &q.QuestionCount, &q.EndsAt, &q.GroupID, &q.Domain, &q.Subdomain, &q.CreatedAt)
 	return q, err
 }
 
 func (s *Service) Update(ctx context.Context, quizID, ownerID string, req CreateQuizReq) error {
+	if err := s.validateTaxonomy(ctx, req.Domain, req.Subdomain); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(ctx,
-		`UPDATE quizzes SET title=$1, description=$2, group_id=$3, ends_at=$4, updated_at=now()
-		 WHERE id=$5 AND created_by=$6 AND status='draft' AND deleted_at IS NULL`,
-		req.Title, req.Description, req.GroupID, req.EndsAt, quizID, ownerID)
+		`UPDATE quizzes SET title=$1, description=$2, group_id=$3, ends_at=$4, domain=$5, subdomain=$6, updated_at=now()
+		 WHERE id=$7 AND created_by=$8 AND status='draft' AND deleted_at IS NULL`,
+		req.Title, req.Description, req.GroupID, req.EndsAt, req.Domain, req.Subdomain, quizID, ownerID)
 	return err
+}
+
+// ── Taxonomy ────────────────────────────────────────────────────────────────
+
+type SubdomainOption struct {
+	Slug  string `json:"slug"`
+	Label string `json:"label"`
+}
+
+type DomainOption struct {
+	Slug       string            `json:"slug"`
+	Label      string            `json:"label"`
+	Subdomains []SubdomainOption `json:"subdomains"`
+}
+
+// GetTaxonomy returns the domain → subdomain tree for authoring dropdowns.
+func (s *Service) GetTaxonomy(ctx context.Context) ([]DomainOption, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT d.slug, d.label, sd.slug, sd.label
+		FROM domains d
+		LEFT JOIN subdomains sd ON sd.domain_slug = d.slug
+		ORDER BY d.sort, sd.sort`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var order []string
+	byDomain := map[string]*DomainOption{}
+	for rows.Next() {
+		var dSlug, dLabel string
+		var sdSlug, sdLabel *string
+		if err := rows.Scan(&dSlug, &dLabel, &sdSlug, &sdLabel); err != nil {
+			return nil, err
+		}
+		d, ok := byDomain[dSlug]
+		if !ok {
+			d = &DomainOption{Slug: dSlug, Label: dLabel}
+			byDomain[dSlug] = d
+			order = append(order, dSlug)
+		}
+		if sdSlug != nil {
+			d.Subdomains = append(d.Subdomains, SubdomainOption{Slug: *sdSlug, Label: *sdLabel})
+		}
+	}
+	out := make([]DomainOption, 0, len(order))
+	for _, slug := range order {
+		out = append(out, *byDomain[slug])
+	}
+	return out, nil
 }
 
 func (s *Service) AddQuestion(ctx context.Context, quizID, ownerID string, req AddQuestionReq) (*Question, error) {
@@ -386,8 +481,10 @@ func (s *Service) ListForTeacher(ctx context.Context, teacherID, statusFilter st
 	args = append(args, limit, offset)
 	n := len(args)
 	rows, err := s.db.Query(ctx,
-		`SELECT id, institution_id, created_by, '' as teacher, title, description, type, visibility, status, question_count, ends_at, published_at, group_id, created_at
-		 FROM quizzes WHERE `+where+fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, n-1, n),
+		`SELECT q.id, q.institution_id, q.created_by, '' as teacher, '' as institution_name,
+		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
+		        0 AS taker_count, q.ends_at, q.published_at, q.group_id, q.created_at
+		 FROM quizzes q WHERE `+where+fmt.Sprintf(` ORDER BY q.created_at DESC LIMIT $%d OFFSET $%d`, n-1, n),
 		args...)
 	if err != nil {
 		return nil, 0, err
@@ -479,7 +576,7 @@ func (s *Service) scanQuizRows(rows interface{ Next() bool; Scan(...interface{})
 	var quizzes []Quiz
 	for rows.Next() {
 		var q Quiz
-		rows.Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.Title, &q.Description,
+		rows.Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName, &q.Title, &q.Description,
 			&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.CreatedAt)
 		quizzes = append(quizzes, q)
 	}

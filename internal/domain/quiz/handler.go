@@ -144,6 +144,10 @@ func (h *Handler) TeacherCreate(w http.ResponseWriter, r *http.Request) {
 		req.Visibility = "institution"
 	}
 	quiz, err := h.svc.Create(r.Context(), req, middleware.GetUserID(r), middleware.GetInstitutionID(r))
+	if err == ErrInvalidTaxonomy {
+		middleware.BadRequest(w, "invalid domain or subdomain")
+		return
+	}
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -151,11 +155,25 @@ func (h *Handler) TeacherCreate(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusCreated, quiz)
 }
 
+// GET /api/v1/teacher/quizzes/taxonomy
+func (h *Handler) GetTaxonomy(w http.ResponseWriter, r *http.Request) {
+	tax, err := h.svc.GetTaxonomy(r.Context())
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, tax)
+}
+
 // PATCH /api/v1/teacher/quizzes/:quizId
 func (h *Handler) TeacherUpdate(w http.ResponseWriter, r *http.Request) {
 	var req CreateQuizReq
 	json.NewDecoder(r.Body).Decode(&req)
 	if err := h.svc.Update(r.Context(), chi.URLParam(r, "quizId"), middleware.GetUserID(r), req); err != nil {
+		if err == ErrInvalidTaxonomy {
+			middleware.BadRequest(w, "invalid domain or subdomain")
+			return
+		}
 		middleware.InternalError(w)
 		return
 	}

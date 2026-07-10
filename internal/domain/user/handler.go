@@ -322,6 +322,16 @@ func (h *Handler) GetMyWeeklyInsights(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, wi)
 }
 
+// GET /api/v1/users/me/insights/breakdown
+func (h *Handler) GetMyInsightsBreakdown(w http.ResponseWriter, r *http.Request) {
+	bd, err := h.svc.GetInsightsBreakdown(r.Context(), middleware.GetUserID(r))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, bd)
+}
+
 // GET /api/v1/users/me/recommendations
 func (h *Handler) GetMyRecommendations(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.GetUserID(r)

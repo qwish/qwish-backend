@@ -231,6 +231,7 @@ func main() {
 
 				// Weekly score insights
 				r.Get("/users/me/insights/weekly", userH.GetMyWeeklyInsights)
+				r.Get("/users/me/insights/breakdown", userH.GetMyInsightsBreakdown)
 
 				// Offline mode: prefetch practice pack + sync offline results
 				r.Get("/offline/pack", offlineH.GetPack)
@@ -285,6 +286,7 @@ func main() {
 				r.Route("/teacher", func(r chi.Router) {
 					r.Use(mw.RequireRole("teacher"))
 					r.Get("/overview", teacherH.Overview)
+					r.Get("/quizzes/taxonomy", quizH.GetTaxonomy)
 					r.Get("/quizzes", quizH.TeacherList)
 					r.Post("/quizzes", quizH.TeacherCreate)
 					r.Patch("/quizzes/{quizId}", quizH.TeacherUpdate)
@@ -497,6 +499,13 @@ func main() {
 						}
 						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
 					})
+					r.Post("/recompute-question-difficulty", func(w http.ResponseWriter, r *http.Request) {
+						if err := sched.RecomputeQuestionDifficulty(r.Context()); err != nil {
+							mw.InternalError(w)
+							return
+						}
+						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+					})
 				})
 			}
 		})
@@ -589,6 +598,16 @@ func runInProcessCron(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
 			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
 			time.Sleep(time.Until(next))
 			sched.ExpirePoints(context.Background())
+		}
+	}()
+
+	// Recompute derived question difficulty nightly at 00:20 UTC
+	go func() {
+		for {
+			now := time.Now().UTC()
+			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 20, 0, 0, time.UTC)
+			time.Sleep(time.Until(next))
+			sched.RecomputeQuestionDifficulty(context.Background())
 		}
 	}()
 

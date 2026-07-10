@@ -242,16 +242,25 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		cfg, _ = scoring.LoadConfig(ctx, s.db)
 	}
 
+	// Load user's current streak
+	var currentStreak int
+	tx.QueryRow(ctx, `SELECT current_streak FROM streaks WHERE user_id=$1`, userID).Scan(&currentStreak)
+
+	// Load user's activity count (completed quizzes count, adding 1 for the current one)
+	var activityCount int
+	tx.QueryRow(ctx, `SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed'`, userID).Scan(&activityCount)
+	activityCount++
+
 	// Load institution multiplier
 	var instMultiplier float64 = 1.0
 	tx.QueryRow(ctx,
 		`SELECT i.point_multiplier FROM users u JOIN institutions i ON i.id=u.institution_id WHERE u.id=$1`, userID,
 	).Scan(&instMultiplier)
 
-	// Load all question responses
+	// Load all question responses with time_taken_ms and time_limit_seconds
 	rows, err := tx.Query(ctx,
 		`SELECT qr.question_id, q.type, q.correct_answer, qr.answer, qr.confidence_level, qr.clues_used, qr.combo_level, qr.points_earned,
-		        q.position, q.prompt, qr.is_correct
+		        q.position, q.prompt, qr.is_correct, qr.time_taken_ms, q.time_limit_seconds, q.difficulty
 		 FROM question_responses qr
 		 JOIN questions q ON q.id = qr.question_id
 		 WHERE qr.attempt_id=$1
@@ -262,6 +271,10 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 
 	var rawPoints int64
 	var totalCorrect int
+	var answered int
+	var speedSum float64
+	var totalDifficulty float64
+	var correctDifficulty float64
 	var breakdown []QuestionBreakdownItem
 
 	for rows.Next() {
@@ -271,12 +284,46 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		var prompt string
 		var isCorrect bool
 		var ptsEarned int64
+		var timeTakenMs *int
+		var timeLimitSeconds int
+		var qDifficulty float64
 
-		rows.Scan(&qid, &qtype, &correctAns, &studentAns, &confLevel, &cluesUsed, &comboLevel, &ptsEarned, &position, &prompt, &isCorrect)
+		rows.Scan(&qid, &qtype, &correctAns, &studentAns, &confLevel, &cluesUsed, &comboLevel, &ptsEarned, &position, &prompt, &isCorrect, &timeTakenMs, &timeLimitSeconds, &qDifficulty)
 
 		rawPoints += ptsEarned
+		answered++
 		if isCorrect {
 			totalCorrect++
+		}
+
+		// Derived per-question difficulty (refined nightly; read live — an
+		// attempt lasts minutes so mid-flight drift is negligible).
+		// ponytail: snapshot per-question difficulty only if that drift bites.
+		qDiff := qDifficulty
+		totalDifficulty += qDiff
+
+		if isCorrect {
+			correctDifficulty += qDiff
+
+			// Calculate speed component (within reasonable time, avoiding random fast guessing)
+			tTaken := 0
+			if timeTakenMs != nil {
+				tTaken = *timeTakenMs
+			}
+			timeLimitMs := float64(timeLimitSeconds * 1000)
+			timeTaken := float64(tTaken)
+			var qSpeed float64
+			if timeTaken < 1000 {
+				qSpeed = 0.1 // avoid random fast guessing
+			} else if timeTaken <= timeLimitMs/3.0 {
+				qSpeed = 1.0 // optimal speed
+			} else {
+				qSpeed = (timeLimitMs - timeTaken) / (timeLimitMs - (timeLimitMs / 3.0))
+				if qSpeed < 0.1 {
+					qSpeed = 0.1
+				}
+			}
+			speedSum += qSpeed
 		}
 
 		snippet := prompt
@@ -294,13 +341,26 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 	}
 	rows.Close() // Explicit close so tx is free for next statements
 
-	// Score percentage
+	// Score percentage (calculated using the Qwish Score formula)
 	scorePct := 0.0
 	if totalQuestions > 0 {
-		scorePct = float64(totalCorrect) / float64(totalQuestions) * 100
+		factors := scoring.QwishScoreFactors{
+			TotalCorrect:      totalCorrect,
+			TotalQuestions:    totalQuestions,
+			Streak:            currentStreak,
+			ActivityCount:     activityCount,
+			SpeedSum:          speedSum,
+			TotalDifficulty:   totalDifficulty,
+			CorrectDifficulty: correctDifficulty,
+		}
+		scorePct = scoring.CalculateQwishScore(factors)
 	}
 
-	finalPoints := scoring.CalculateFinalScore(totalCorrect, totalQuestions, rawPoints, scorePct, cfg, instMultiplier)
+	avgDifficulty := 0.0
+	if answered > 0 {
+		avgDifficulty = totalDifficulty / float64(answered)
+	}
+	finalPoints := scoring.CalculateFinalScore(totalCorrect, totalQuestions, rawPoints, scorePct, cfg, instMultiplier, avgDifficulty)
 
 	// Repeat knowledge_check attempts earn no points.
 	if isRepeatAttempt {

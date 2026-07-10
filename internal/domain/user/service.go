@@ -689,6 +689,205 @@ func (s *Service) GetWeeklyInsights(ctx context.Context, userID, instID string) 
 	return wi, nil
 }
 
+// ── Insights breakdown ──────────────────────────────────────────────────────
+
+// ScoreComponents are the five Qwish Score inputs as lifetime fractions (0–1).
+type ScoreComponents struct {
+	Accuracy    float64 `json:"accuracy"`
+	Difficulty  float64 `json:"difficulty"`
+	Consistency float64 `json:"consistency"`
+	Speed       float64 `json:"speed"`
+	Activity    float64 `json:"activity"`
+}
+
+type SubdomainPerf struct {
+	Slug      string  `json:"slug"`
+	Label     string  `json:"label"`
+	AvgScore  float64 `json:"avg_score"` // question-weighted accuracy, 0–100
+	Questions int     `json:"questions"`
+	Attempts  int     `json:"attempts"`
+	LowSample bool    `json:"low_sample"` // < 10 answered questions
+}
+
+type DomainPerf struct {
+	Slug       string          `json:"slug"`
+	Label      string          `json:"label"`
+	AvgScore   float64         `json:"avg_score"`
+	Questions  int             `json:"questions"`
+	Attempts   int             `json:"attempts"`
+	LowSample  bool            `json:"low_sample"`
+	Subdomains []SubdomainPerf `json:"subdomains"`
+}
+
+type InsightsBreakdown struct {
+	QwishScore float64         `json:"qwish_score"` // weighted sum of components, 0–100
+	Components ScoreComponents `json:"components"`
+	Domains    []DomainPerf    `json:"domains"`
+}
+
+const lowSampleQuestions = 10
+
+func (s *Service) GetInsightsBreakdown(ctx context.Context, userID string) (*InsightsBreakdown, error) {
+	var c ScoreComponents
+
+	// Accuracy (50%): question-weighted across completed attempts.
+	var totalCorrect, totalQuestions int64
+	s.db.QueryRow(ctx,
+		`SELECT COALESCE(SUM(total_correct),0), COALESCE(SUM(total_questions),0)
+		 FROM quiz_attempts WHERE user_id=$1 AND status='completed'`, userID,
+	).Scan(&totalCorrect, &totalQuestions)
+	if totalQuestions > 0 {
+		c.Accuracy = float64(totalCorrect) / float64(totalQuestions)
+	}
+
+	// Difficulty (20%): correct difficulty over all answered difficulty.
+	// Speed (10%): mean per-response speed factor over correct answers, using
+	// the same piecewise curve as scoring at completion time.
+	var totalDiff, correctDiff, speedAvg float64
+	s.db.QueryRow(ctx, `
+		SELECT
+		  COALESCE(SUM(q.difficulty),0),
+		  COALESCE(SUM(q.difficulty) FILTER (WHERE qr.is_correct),0),
+		  COALESCE(AVG(CASE
+		      WHEN qr.time_taken_ms < 1000 THEN 0.1
+		      WHEN qr.time_taken_ms <= (q.time_limit_seconds*1000)/3.0 THEN 1.0
+		      ELSE GREATEST(
+		        (q.time_limit_seconds*1000.0 - qr.time_taken_ms)
+		        / NULLIF(q.time_limit_seconds*1000.0 - q.time_limit_seconds*1000.0/3.0, 0), 0.1)
+		    END) FILTER (WHERE qr.is_correct AND qr.time_taken_ms IS NOT NULL), 0)
+		FROM question_responses qr
+		JOIN questions q ON q.id = qr.question_id
+		JOIN quiz_attempts a ON a.id = qr.attempt_id
+		WHERE a.user_id=$1 AND a.status='completed'`, userID,
+	).Scan(&totalDiff, &correctDiff, &speedAvg)
+	if totalDiff > 0 {
+		c.Difficulty = correctDiff / totalDiff
+	}
+	c.Speed = speedAvg
+
+	// Consistency (15%) from streak, Activity (5%) from completed count —
+	// same tiers as scoring.CalculateQwishScore.
+	var streak, completed int
+	s.db.QueryRow(ctx, `SELECT current_streak FROM users WHERE id=$1`, userID).Scan(&streak)
+	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed'`, userID).Scan(&completed)
+	c.Consistency = streakTier(streak)
+	c.Activity = activityTier(completed)
+
+	qwishScore := c.Accuracy*50 + c.Difficulty*20 + c.Consistency*15 + c.Speed*10 + c.Activity*5
+
+	domains, err := s.domainPerformance(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &InsightsBreakdown{
+		QwishScore: round1(qwishScore),
+		Components: c,
+		Domains:    domains,
+	}, nil
+}
+
+// domainPerformance returns question-weighted accuracy per domain, each with a
+// subdomain roll-up. Grouped once at (domain, subdomain) then folded by domain.
+func (s *Service) domainPerformance(ctx context.Context, userID string) ([]DomainPerf, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT COALESCE(qz.domain,'general'), COALESCE(dm.label,'General'), COALESCE(dm.sort,99),
+		       COALESCE(qz.subdomain,'general_mixed'), COALESCE(sd.label,'Mixed'), COALESCE(sd.sort,99),
+		       COUNT(*) AS questions,
+		       COUNT(*) FILTER (WHERE qr.is_correct) AS correct,
+		       COUNT(DISTINCT a.id) AS attempts
+		FROM quiz_attempts a
+		JOIN question_responses qr ON qr.attempt_id = a.id
+		JOIN quizzes qz ON qz.id = a.quiz_id
+		LEFT JOIN domains dm ON dm.slug = qz.domain
+		LEFT JOIN subdomains sd ON sd.slug = qz.subdomain
+		WHERE a.user_id=$1 AND a.status='completed'
+		GROUP BY qz.domain, dm.label, dm.sort, qz.subdomain, sd.label, sd.sort
+		ORDER BY COALESCE(dm.sort,99), COALESCE(sd.sort,99)`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var order []string // preserve domain sort order
+	byDomain := map[string]*DomainPerf{}
+	corr := map[string]int{} // domain slug → correct count for weighted avg
+
+	for rows.Next() {
+		var dSlug, dLabel, sdSlug, sdLabel string
+		var dSort, sdSort, questions, correct, attempts int
+		if err := rows.Scan(&dSlug, &dLabel, &dSort, &sdSlug, &sdLabel, &sdSort, &questions, &correct, &attempts); err != nil {
+			return nil, err
+		}
+		dp, ok := byDomain[dSlug]
+		if !ok {
+			dp = &DomainPerf{Slug: dSlug, Label: dLabel}
+			byDomain[dSlug] = dp
+			order = append(order, dSlug)
+		}
+		sub := SubdomainPerf{
+			Slug: sdSlug, Label: sdLabel, Questions: questions, Attempts: attempts,
+			LowSample: questions < lowSampleQuestions,
+		}
+		if questions > 0 {
+			sub.AvgScore = round1(float64(correct) / float64(questions) * 100)
+		}
+		dp.Subdomains = append(dp.Subdomains, sub)
+		dp.Questions += questions
+		dp.Attempts += attempts
+		corr[dSlug] += correct
+	}
+
+	out := make([]DomainPerf, 0, len(order))
+	for _, slug := range order {
+		dp := byDomain[slug]
+		if dp.Questions > 0 {
+			dp.AvgScore = round1(float64(corr[slug]) / float64(dp.Questions) * 100)
+		}
+		dp.LowSample = dp.Questions < lowSampleQuestions
+		out = append(out, *dp)
+	}
+	return out, nil
+}
+
+func streakTier(streak int) float64 {
+	switch {
+	case streak >= 30:
+		return 1.0
+	case streak >= 15:
+		return 0.8
+	case streak >= 7:
+		return 0.6
+	case streak >= 3:
+		return 0.4
+	case streak >= 1:
+		return 0.2
+	default:
+		return 0
+	}
+}
+
+func activityTier(count int) float64 {
+	switch {
+	case count >= 50:
+		return 1.0
+	case count >= 20:
+		return 0.8
+	case count >= 10:
+		return 0.6
+	case count >= 5:
+		return 0.4
+	case count >= 1:
+		return 0.2
+	default:
+		return 0
+	}
+}
+
+func round1(v float64) float64 {
+	return float64(int64(v*10+0.5)) / 10
+}
+
 func buildSuggestion(wi *WeeklyInsights) string {
 	switch {
 	case wi.QuizzesThisWeek == 0:

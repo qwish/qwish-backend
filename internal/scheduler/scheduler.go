@@ -350,3 +350,86 @@ func (s *Scheduler) CloseExpiredQuizzes(ctx context.Context) error {
 	log.Println("[cron] close-expired-quizzes done")
 	return err
 }
+
+// RecomputeQuestionDifficulty runs nightly. It refines questions.difficulty
+// from real response data — empirical hardness (1 - correct-rate) blended with
+// time-taken and clue-usage signals — shrunk toward the subdomain (or, absent
+// that, the question-type) prior by sample size. Cold questions ride the prior;
+// after ~20+ responses the observed correct-rate dominates.
+func (s *Scheduler) RecomputeQuestionDifficulty(ctx context.Context) error {
+	log.Println("[cron] running recompute-question-difficulty")
+
+	rows, err := s.db.Query(ctx, `
+		SELECT qr.question_id, q.type, sd.difficulty,
+		       COUNT(*)                                                 AS n,
+		       AVG(CASE WHEN qr.is_correct THEN 1.0 ELSE 0.0 END)       AS p,
+		       COALESCE(AVG(LEAST(qr.time_taken_ms::float
+		           / NULLIF(q.time_limit_seconds * 1000, 0), 1.0)), 0)  AS time_ratio,
+		       COALESCE(AVG(CASE
+		           WHEN q.clues IS NOT NULL AND jsonb_typeof(q.clues) = 'array'
+		                AND jsonb_array_length(q.clues) > 0
+		           THEN LEAST(qr.clues_used::float / jsonb_array_length(q.clues), 1.0)
+		           ELSE 0 END), 0)                                      AS clue_frac
+		FROM question_responses qr
+		JOIN questions q  ON q.id  = qr.question_id
+		JOIN quizzes  qz  ON qz.id = q.quiz_id
+		LEFT JOIN subdomains sd ON sd.slug = qz.subdomain
+		WHERE qr.time_taken_ms IS NOT NULL
+		GROUP BY qr.question_id, q.type, sd.difficulty`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type update struct {
+		id   string
+		diff float64
+	}
+	var updates []update
+	for rows.Next() {
+		var qid, qtype string
+		var subPrior *float64
+		var n int
+		var p, timeRatio, clueFrac float64
+		if err := rows.Scan(&qid, &qtype, &subPrior, &n, &p, &timeRatio, &clueFrac); err != nil {
+			return err
+		}
+		prior := scoring.GetQuestionDifficultyCoefficient(qtype)
+		if subPrior != nil {
+			prior = *subPrior
+		}
+		updates = append(updates, update{qid, deriveDifficulty(prior, n, p, timeRatio, clueFrac)})
+	}
+	rows.Close()
+
+	// Buffer then write so we don't hold the read cursor while updating.
+	for _, u := range updates {
+		s.db.Exec(ctx, `UPDATE questions SET difficulty=$1 WHERE id=$2`, u.diff, u.id)
+	}
+
+	log.Printf("[cron] recompute-question-difficulty done (%d questions)", len(updates))
+	return nil
+}
+
+// deriveDifficulty is the pure item-difficulty model (see the job above).
+// prior/return are difficulty coefficients in [0.4,1.0]; p, timeRatio, clueFrac
+// are in [0,1]; n is the response count driving shrinkage toward the prior.
+func deriveDifficulty(prior float64, n int, p, timeRatio, clueFrac float64) float64 {
+	const shrinkK = 20.0 // responses for empirical signal to reach ~half weight
+	rawHard := clamp01(0.65*(1.0-p) + 0.25*timeRatio + 0.10*clueFrac)
+	emp := 0.40 + 0.60*rawHard // map hardness [0,1] → coefficient [0.4,1.0]
+	w := float64(n) / (float64(n) + shrinkK)
+	return clampRange(w*emp+(1.0-w)*prior, 0.40, 1.00)
+}
+
+func clamp01(v float64) float64 { return clampRange(v, 0, 1) }
+
+func clampRange(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}

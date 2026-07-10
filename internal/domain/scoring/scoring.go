@@ -193,29 +193,7 @@ func sliceEqual(a, b []string) bool {
 	return true
 }
 
-// CalculateFinalScore computes the overall quiz result.
-// Returns (scorePct, totalPoints after multiplier).
-func CalculateFinalScore(totalCorrect, totalQuestions int, rawPoints int64, scorePct float64,
-	cfg *Config, instMultiplier float64) int64 {
 
-	var finalPts int64
-
-	// Performance bonus/deduction on BASE points (separate from per-question combos)
-	baseTotal := int64(cfg.BasePointsPerQuestion) * int64(totalCorrect)
-	if scorePct >= 75 {
-		bonus := int64(float64(baseTotal) * cfg.PerformanceBonusPct75 / 100)
-		finalPts = rawPoints + bonus
-	} else if scorePct >= 50 {
-		finalPts = rawPoints
-	} else {
-		deduction := int64(float64(baseTotal) * cfg.DeductionPctBelow50 / 100)
-		finalPts = rawPoints - deduction
-	}
-
-	// Apply institution multiplier
-	finalPts = int64(float64(finalPts) * instMultiplier)
-	return finalPts
-}
 
 // ConfigJSON returns the config as JSON for snapshotting.
 func (c *Config) JSON() ([]byte, error) {
@@ -232,4 +210,139 @@ func ConfigFromSnapshot(raw json.RawMessage) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// QwishScoreFactors holds the inputs for calculating the Learning Score.
+type QwishScoreFactors struct {
+	TotalCorrect      int
+	TotalQuestions    int
+	Streak            int
+	ActivityCount     int
+	SpeedSum          float64
+	TotalDifficulty   float64
+	CorrectDifficulty float64
+}
+
+func CalculateQwishScore(f QwishScoreFactors) float64 {
+	if f.TotalQuestions == 0 {
+		return 0
+	}
+
+	// 1. Accuracy (50%)
+	accuracy := float64(f.TotalCorrect) / float64(f.TotalQuestions)
+	accuracyScore := 50.0 * accuracy
+
+	// 2. Difficulty (20%)
+	difficultyScore := 0.0
+	if f.TotalDifficulty > 0 {
+		difficultyScore = 20.0 * (f.CorrectDifficulty / f.TotalDifficulty)
+	}
+
+	// 3. Consistency (15%)
+	consistencyFraction := 0.0
+	if f.Streak >= 30 {
+		consistencyFraction = 1.0
+	} else if f.Streak >= 15 {
+		consistencyFraction = 0.8
+	} else if f.Streak >= 7 {
+		consistencyFraction = 0.6
+	} else if f.Streak >= 3 {
+		consistencyFraction = 0.4
+	} else if f.Streak >= 1 {
+		consistencyFraction = 0.2
+	}
+	consistencyScore := 15.0 * consistencyFraction
+
+	// 4. Speed (10%)
+	speedScore := 0.0
+	if f.TotalCorrect > 0 {
+		speedScore = 10.0 * (f.SpeedSum / float64(f.TotalCorrect))
+	}
+
+	// 5. Activity (5%)
+	activityFraction := 0.0
+	if f.ActivityCount >= 50 {
+		activityFraction = 1.0
+	} else if f.ActivityCount >= 20 {
+		activityFraction = 0.8
+	} else if f.ActivityCount >= 10 {
+		activityFraction = 0.6
+	} else if f.ActivityCount >= 5 {
+		activityFraction = 0.4
+	} else if f.ActivityCount >= 1 {
+		activityFraction = 0.2
+	}
+	activityScore := 5.0 * activityFraction
+
+	return accuracyScore + difficultyScore + consistencyScore + speedScore + activityScore
+}
+
+// GetQuestionDifficultyCoefficient returns the question-type difficulty prior.
+// This is the COLD-START fallback used by scheduler.RecomputeQuestionDifficulty
+// when a question has no responses and its quiz carries no subdomain prior.
+// Live scoring reads the derived questions.difficulty instead.
+func GetQuestionDifficultyCoefficient(qType string) float64 {
+	switch qType {
+	case "puzzle", "speed_chain":
+		return 1.0 // Hard
+	case "arrange_order", "confidence_based":
+		return 0.8 // Medium-Hard
+	case "multiple_choice", "eliminate_wrong":
+		return 0.6 // Medium
+	case "clue_reveal":
+		return 0.4 // Easy
+	default:
+		return 0.5 // Default
+	}
+}
+
+// difficultyPointsMultiplier maps a quiz's average derived difficulty to a
+// points multiplier, so harder content pays more. 0.60 is the "medium"
+// baseline (a medium quiz earns 1.0×); clamped to keep payouts bounded.
+func difficultyPointsMultiplier(avgDifficulty float64) float64 {
+	if avgDifficulty <= 0 {
+		return 1.0
+	}
+	m := avgDifficulty / 0.60
+	if m < 0.8 {
+		m = 0.8
+	}
+	if m > 1.6 {
+		m = 1.6
+	}
+	return m
+}
+
+// CalculateFinalScore computes the overall quiz result.
+// avgDifficulty is the mean derived difficulty of the answered questions.
+// Returns totalPoints after all multipliers.
+func CalculateFinalScore(totalCorrect, totalQuestions int, rawPoints int64, scorePct float64,
+	cfg *Config, instMultiplier, avgDifficulty float64) int64 {
+
+	var finalPts int64
+
+	// Quiz Difficulty Multiplier
+	var difficultyMultiplier float64 = 1.0
+	if totalQuestions > 18 {
+		difficultyMultiplier = 2.0 // Advanced
+	} else if totalQuestions > 12 {
+		difficultyMultiplier = 1.5 // Intermediate
+	}
+
+	// Performance bonus/deduction on BASE points (separate from per-question combos)
+	baseTotal := int64(cfg.BasePointsPerQuestion) * int64(totalCorrect)
+	if scorePct >= 75 {
+		bonus := int64(float64(baseTotal) * cfg.PerformanceBonusPct75 / 100)
+		finalPts = rawPoints + bonus
+	} else if scorePct >= 50 {
+		finalPts = rawPoints
+	} else {
+		deduction := int64(float64(baseTotal) * cfg.DeductionPctBelow50 / 100)
+		finalPts = rawPoints - deduction
+	}
+
+	// Apply quiz-size difficulty, content difficulty, and institution multipliers
+	contentMult := difficultyPointsMultiplier(avgDifficulty)
+	finalPts = int64(float64(finalPts) * difficultyMultiplier * contentMult * instMultiplier)
+	return finalPts
 }

@@ -1434,6 +1434,21 @@ Array of quiz objects belonging to the authenticated teacher.
 
 ---
 
+## GET `/teacher/quizzes/taxonomy`
+**Auth required:** Yes (teacher)
+
+Domain → subdomain tree for the quiz authoring dropdowns.
+```json
+[
+  { "slug": "quantitative", "label": "Quantitative", "subdomains": [
+    { "slug": "quant_percentages", "label": "Percentages" },
+    { "slug": "quant_geometry", "label": "Geometry" }
+  ] }
+]
+```
+
+---
+
 ## POST `/teacher/quizzes`
 **Auth required:** Yes (teacher)
 
@@ -1444,12 +1459,14 @@ Array of quiz objects belonging to the authenticated teacher.
   "description": "Cell division and genetics",
   "type":        "practice",
   "visibility":  "institution",
+  "domain":      "quantitative",
+  "subdomain":   "quant_percentages",
   "time_limit":  30,
   "expires_at":  "2024-06-01T00:00:00Z"
 }
 ```
 
-`title` is required. `visibility` defaults to `institution`.
+`title` is required. `visibility` defaults to `institution`. `domain`/`subdomain` are optional but validated against `/teacher/quizzes/taxonomy` — a subdomain must belong to its domain, else `400`.
 
 ### Response `201`
 Quiz object.
@@ -3326,6 +3343,28 @@ Push alerts are delivered via FCM (existing `/users/me/devices` registration) an
 }
 ```
 The same breakdown is emailed weekly to users with `email_weekly_insights=true`.
+
+### GET `/users/me/insights/breakdown`
+Lifetime Qwish Score breakdown plus question-weighted domain/subdomain performance. `qwish_score` is the weighted sum of the five components (0–100). `components` are lifetime fractions (0–1): accuracy 50%, difficulty 20%, consistency 15%, speed 10%, activity 5%. Each domain's `avg_score` is question-weighted accuracy (0–100); `low_sample` is true when fewer than 10 questions have been answered.
+```json
+{
+  "qwish_score": 72.4,
+  "components": {
+    "accuracy": 0.86, "difficulty": 0.61,
+    "consistency": 0.6, "speed": 0.74, "activity": 0.4
+  },
+  "domains": [
+    {
+      "slug": "quantitative", "label": "Quantitative",
+      "avg_score": 78.0, "questions": 142, "attempts": 14, "low_sample": false,
+      "subdomains": [
+        { "slug": "quant_percentages", "label": "Percentages", "avg_score": 84.0, "questions": 40, "attempts": 4, "low_sample": false },
+        { "slug": "quant_geometry", "label": "Geometry", "avg_score": 61.0, "questions": 4, "attempts": 1, "low_sample": true }
+      ]
+    }
+  ]
+}
+```
 
 ## Offline Mode
 

@@ -33,23 +33,21 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 
 	var totalStudents, activeStudents, totalTeachers, totalQuizzes int
 	var avgScore float64
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='student' AND status='active'`, instID).Scan(&totalStudents)
-	h.db.QueryRow(r.Context(),
-		`SELECT COUNT(DISTINCT qa.user_id) FROM quiz_attempts qa JOIN users u ON u.id=qa.user_id
-		 WHERE u.institution_id=$1 AND qa.completed_at >= CURRENT_DATE - 7`, instID).Scan(&activeStudents)
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher' AND status='active'`, instID).Scan(&totalTeachers)
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM quizzes WHERE institution_id=$1 AND status='published'`, instID).Scan(&totalQuizzes)
-	h.db.QueryRow(r.Context(),
-		`SELECT COALESCE(AVG(qa.score_pct),0) FROM quiz_attempts qa JOIN users u ON u.id=qa.user_id
-		 WHERE u.institution_id=$1 AND qa.completed_at >= date_trunc('month', CURRENT_DATE)`, instID).Scan(&avgScore)
-
-	// Top student this week
 	var topStudentName string
 	var topStudentPoints int64
-	h.db.QueryRow(r.Context(),
-		`SELECT u.display_name, u.total_points FROM users u
-		 WHERE u.institution_id=$1 AND u.role='student' AND u.status='active'
-		 ORDER BY u.total_points DESC LIMIT 1`, instID).Scan(&topStudentName, &topStudentPoints)
+	// Six independent aggregates folded into one round-trip.
+	h.db.QueryRow(r.Context(), `SELECT
+		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='student' AND status='active'),
+		(SELECT COUNT(DISTINCT qa.user_id) FROM quiz_attempts qa JOIN users u ON u.id=qa.user_id
+		 WHERE u.institution_id=$1 AND qa.completed_at >= CURRENT_DATE - 7),
+		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher' AND status='active'),
+		(SELECT COUNT(*) FROM quizzes WHERE institution_id=$1 AND status='published'),
+		(SELECT COALESCE(AVG(qa.score_pct),0) FROM quiz_attempts qa JOIN users u ON u.id=qa.user_id
+		 WHERE u.institution_id=$1 AND qa.completed_at >= date_trunc('month', CURRENT_DATE)),
+		COALESCE((SELECT display_name FROM users WHERE institution_id=$1 AND role='student' AND status='active' ORDER BY total_points DESC LIMIT 1), ''),
+		COALESCE((SELECT total_points FROM users WHERE institution_id=$1 AND role='student' AND status='active' ORDER BY total_points DESC LIMIT 1), 0)`,
+		instID,
+	).Scan(&totalStudents, &activeStudents, &totalTeachers, &totalQuizzes, &avgScore, &topStudentName, &topStudentPoints)
 
 	// Activity chart: quizzes completed per day over last 30 days
 	rows, _ := h.db.Query(r.Context(),
@@ -344,15 +342,21 @@ func (h *Handler) GetTeacher(w http.ResponseWriter, r *http.Request) {
 	var name string
 	var avgScore float64
 	var quizCount, attemptCount int
-	h.db.QueryRow(r.Context(), `SELECT display_name FROM users WHERE id=$1`, teacherID).Scan(&name)
-	h.db.QueryRow(r.Context(),
-		`SELECT COUNT(*), COALESCE(AVG(qa.score_pct),0)
-		 FROM quizzes q LEFT JOIN quiz_attempts qa ON qa.quiz_id=q.id AND qa.status='completed'
-		 WHERE q.created_by=$1 AND q.deleted_at IS NULL`, teacherID,
-	).Scan(&quizCount, &avgScore)
-	h.db.QueryRow(r.Context(),
-		`SELECT COUNT(*) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id WHERE q.created_by=$1 AND qa.status='completed'`, teacherID,
-	).Scan(&attemptCount)
+	// Name + quiz/attempt aggregates in one round-trip. The tq CTE evaluates the
+	// quizzes⋈attempts join once so COUNT(*)/AVG match the original single query.
+	h.db.QueryRow(r.Context(), `
+		WITH tq AS (
+			SELECT COUNT(*) AS cnt, COALESCE(AVG(qa.score_pct),0) AS avg
+			FROM quizzes q LEFT JOIN quiz_attempts qa ON qa.quiz_id=q.id AND qa.status='completed'
+			WHERE q.created_by=$1 AND q.deleted_at IS NULL
+		)
+		SELECT
+			(SELECT display_name FROM users WHERE id=$1),
+			(SELECT cnt FROM tq),
+			(SELECT avg FROM tq),
+			(SELECT COUNT(*) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id WHERE q.created_by=$1 AND qa.status='completed')`,
+		teacherID,
+	).Scan(&name, &quizCount, &avgScore, &attemptCount)
 
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"id": teacherID, "display_name": name, "quiz_count": quizCount,

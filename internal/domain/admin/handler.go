@@ -38,22 +38,29 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 	var avgScore float64
 	var pointsWeek, pointsAll int64
 
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users WHERE deleted_at IS NULL`).Scan(&totalUsers)
-	h.db.QueryRow(r.Context(),
-		`SELECT COUNT(DISTINCT user_id) FROM quiz_attempts WHERE completed_at >= CURRENT_DATE - 7`).Scan(&activeUsers)
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM institutions WHERE status='pending'`).Scan(&pendingInst)
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM institutions WHERE status='verified'`).Scan(&verifiedInst)
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM institutions WHERE status='suspended'`).Scan(&suspendedInst)
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM quizzes WHERE status='published' AND deleted_at IS NULL`).Scan(&publishedQuizzes)
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM quizzes WHERE status='pending_approval' AND deleted_at IS NULL`).Scan(&pendingQuizzes)
-	h.db.QueryRow(r.Context(), `SELECT COUNT(DISTINCT quiz_id) FROM reports WHERE status='open'`).Scan(&reportedQuizzes)
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM quiz_attempts WHERE completed_at::date = CURRENT_DATE`).Scan(&attemptsToday)
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM quiz_attempts WHERE completed_at >= CURRENT_DATE - 7`).Scan(&attemptsWeek)
-	h.db.QueryRow(r.Context(), `SELECT COALESCE(AVG(score_pct),0) FROM quiz_attempts WHERE completed_at >= CURRENT_DATE - 7`).Scan(&avgScore)
-	h.db.QueryRow(r.Context(),
-		`SELECT COALESCE(SUM(amount),0) FROM points_ledger WHERE amount > 0 AND created_at >= CURRENT_DATE - 7`).Scan(&pointsWeek)
-	h.db.QueryRow(r.Context(),
-		`SELECT COALESCE(SUM(amount),0) FROM points_ledger WHERE amount > 0`).Scan(&pointsAll)
+	// One round-trip instead of 14 sequential ones — each of the metrics is an
+	// independent scalar aggregate, so they compose into a single SELECT. Against
+	// a remote database this turns ~14×RTT into 1×RTT.
+	if err := h.db.QueryRow(r.Context(), `SELECT
+		(SELECT COUNT(*) FROM users WHERE deleted_at IS NULL),
+		(SELECT COUNT(DISTINCT user_id) FROM quiz_attempts WHERE completed_at >= CURRENT_DATE - 7),
+		(SELECT COUNT(*) FROM institutions WHERE status='pending'),
+		(SELECT COUNT(*) FROM institutions WHERE status='verified'),
+		(SELECT COUNT(*) FROM institutions WHERE status='suspended'),
+		(SELECT COUNT(*) FROM quizzes WHERE status='published' AND deleted_at IS NULL),
+		(SELECT COUNT(*) FROM quizzes WHERE status='pending_approval' AND deleted_at IS NULL),
+		(SELECT COUNT(DISTINCT quiz_id) FROM reports WHERE status='open'),
+		(SELECT COUNT(*) FROM quiz_attempts WHERE completed_at::date = CURRENT_DATE),
+		(SELECT COUNT(*) FROM quiz_attempts WHERE completed_at >= CURRENT_DATE - 7),
+		(SELECT COALESCE(AVG(score_pct),0) FROM quiz_attempts WHERE completed_at >= CURRENT_DATE - 7),
+		(SELECT COALESCE(SUM(amount),0) FROM points_ledger WHERE amount > 0 AND created_at >= CURRENT_DATE - 7),
+		(SELECT COALESCE(SUM(amount),0) FROM points_ledger WHERE amount > 0)`,
+	).Scan(&totalUsers, &activeUsers, &pendingInst, &verifiedInst, &suspendedInst,
+		&publishedQuizzes, &pendingQuizzes, &reportedQuizzes, &attemptsToday,
+		&attemptsWeek, &avgScore, &pointsWeek, &pointsAll); err != nil {
+		middleware.InternalError(w)
+		return
+	}
 
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"total_users":       totalUsers,

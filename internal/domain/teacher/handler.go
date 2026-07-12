@@ -225,18 +225,15 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 	var streak, longestStreak, quizCount int
 	var avgScore float64
 	var memberSince time.Time
-	h.db.QueryRow(r.Context(),
-		`SELECT display_name, email, status, total_points, current_streak, longest_streak, member_since
-		 FROM users WHERE id=$1`, studentID,
-	).Scan(&displayName, &email, &status, &points, &streak, &longestStreak, &memberSince)
-
-	// Stats limited to this teacher's quizzes.
-	h.db.QueryRow(r.Context(), `
-		SELECT COUNT(*), COALESCE(AVG(qa.score_pct),0)
-		FROM quiz_attempts qa
-		JOIN quizzes q ON q.id=qa.quiz_id
-		WHERE qa.user_id=$1 AND qa.status='completed' AND q.created_by=$2`,
-		studentID, teacherID).Scan(&quizCount, &avgScore)
+	// Student profile + this-teacher's-quizzes stats in one round-trip.
+	h.db.QueryRow(r.Context(), `SELECT
+		display_name, email, status, total_points, current_streak, longest_streak, member_since,
+		(SELECT COUNT(*) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
+		 WHERE qa.user_id=$1 AND qa.status='completed' AND q.created_by=$2),
+		(SELECT COALESCE(AVG(qa.score_pct),0) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
+		 WHERE qa.user_id=$1 AND qa.status='completed' AND q.created_by=$2)
+		FROM users WHERE id=$1`, studentID, teacherID,
+	).Scan(&displayName, &email, &status, &points, &streak, &longestStreak, &memberSince, &quizCount, &avgScore)
 
 	// Quiz history on this teacher's quizzes (last 20).
 	rows, _ := h.db.Query(r.Context(), `
@@ -348,18 +345,17 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 	var description *string
 	var inviteCode string
 	var createdAt time.Time
-	h.db.QueryRow(r.Context(),
-		`SELECT name, description, invite_code, created_at FROM groups WHERE id=$1`, classID,
-	).Scan(&name, &description, &inviteCode, &createdAt)
-
 	var studentCount int
 	var avgScore float64
-	h.db.QueryRow(r.Context(),
-		`SELECT COUNT(*) FROM group_students WHERE group_id=$1`, classID).Scan(&studentCount)
-	h.db.QueryRow(r.Context(), `
-		SELECT COALESCE(AVG(qa.score_pct),0) FROM quiz_attempts qa
-		JOIN group_students gs ON gs.user_id=qa.user_id
-		WHERE gs.group_id=$1 AND qa.status='completed'`, classID).Scan(&avgScore)
+	// Class details + roster size + average, in one round-trip.
+	h.db.QueryRow(r.Context(), `SELECT
+		g.name, g.description, g.invite_code, g.created_at,
+		(SELECT COUNT(*) FROM group_students WHERE group_id=$1),
+		(SELECT COALESCE(AVG(qa.score_pct),0) FROM quiz_attempts qa
+		 JOIN group_students gs ON gs.user_id=qa.user_id
+		 WHERE gs.group_id=$1 AND qa.status='completed')
+		FROM groups g WHERE g.id=$1`, classID,
+	).Scan(&name, &description, &inviteCode, &createdAt, &studentCount, &avgScore)
 
 	sRows, _ := h.db.Query(r.Context(), `
 		SELECT u.id, u.display_name, u.email, u.total_points, u.current_streak, u.last_active_at, u.status,

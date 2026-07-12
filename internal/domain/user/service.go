@@ -285,49 +285,38 @@ type RankInfo struct {
 func (s *Service) GetRank(ctx context.Context, userID, instID string) (*RankInfo, error) {
 	ri := &RankInfo{}
 
-	var totalPoints int64
+	// A CTE binds the caller's points/domain once, then every rank/total is a
+	// scalar subquery referencing it — collapsing 7 sequential round-trips into
+	// one. Institution/domain counts are computed unconditionally (cheap) and
+	// only surfaced below when applicable; NULLIF guards the empty instID so the
+	// ::uuid cast doesn't blow up.
 	var domain *string
-	s.db.QueryRow(ctx,
-		`SELECT total_points, domain FROM users WHERE id = $1`, userID,
-	).Scan(&totalPoints, &domain)
-
-	// Global rank
-	s.db.QueryRow(ctx,
-		`SELECT COUNT(*)+1 FROM users WHERE status='active' AND total_points > $1`, totalPoints,
-	).Scan(&ri.GlobalRank)
-	s.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM users WHERE status='active'`,
-	).Scan(&ri.GlobalTotal)
+	var ir, it, dr, dt int
+	err := s.db.QueryRow(ctx, `
+		WITH me AS (SELECT total_points, domain FROM users WHERE id = $1)
+		SELECT
+			(SELECT domain FROM me),
+			(SELECT COUNT(*)+1 FROM users WHERE status='active' AND total_points > (SELECT total_points FROM me)),
+			(SELECT COUNT(*) FROM users WHERE status='active'),
+			(SELECT COUNT(*)+1 FROM users WHERE institution_id = NULLIF($2,'')::uuid AND status='active' AND total_points > (SELECT total_points FROM me)),
+			(SELECT COUNT(*) FROM users WHERE institution_id = NULLIF($2,'')::uuid AND status='active'),
+			(SELECT COUNT(*)+1 FROM users WHERE domain = (SELECT domain FROM me) AND status='active' AND total_points > (SELECT total_points FROM me)),
+			(SELECT COUNT(*) FROM users WHERE domain = (SELECT domain FROM me) AND status='active')`,
+		userID, instID,
+	).Scan(&domain, &ri.GlobalRank, &ri.GlobalTotal, &ir, &it, &dr, &dt)
+	if err != nil {
+		return nil, err
+	}
 
 	if ri.GlobalTotal > 0 {
 		above := float64(ri.GlobalRank - 1)
 		ri.TopPercentile = above / float64(ri.GlobalTotal) * 100
 	}
-
-	// Institution rank
 	if instID != "" {
-		var ir, it int
-		s.db.QueryRow(ctx,
-			`SELECT COUNT(*)+1 FROM users WHERE institution_id=$1 AND status='active' AND total_points > $2`,
-			instID, totalPoints,
-		).Scan(&ir)
-		s.db.QueryRow(ctx,
-			`SELECT COUNT(*) FROM users WHERE institution_id=$1 AND status='active'`, instID,
-		).Scan(&it)
 		ri.InstRank = &ir
 		ri.InstTotal = &it
 	}
-
-	// Domain rank
 	if domain != nil && *domain != "" {
-		var dr, dt int
-		s.db.QueryRow(ctx,
-			`SELECT COUNT(*)+1 FROM users WHERE domain=$1 AND status='active' AND total_points > $2`,
-			*domain, totalPoints,
-		).Scan(&dr)
-		s.db.QueryRow(ctx,
-			`SELECT COUNT(*) FROM users WHERE domain=$1 AND status='active'`, *domain,
-		).Scan(&dt)
 		ri.DomainRank = &dr
 		ri.DomainTotal = &dt
 	}
@@ -649,40 +638,33 @@ func (s *Service) GetWeeklyInsights(ctx context.Context, userID, instID string) 
 
 	wi := &WeeklyInsights{WeekStart: weekStart, WeekEnd: now}
 
-	// Points earned this week vs the week before (from the ledger).
-	s.db.QueryRow(ctx,
-		`SELECT
-		   COALESCE(SUM(amount) FILTER (WHERE created_at >= $2 AND amount > 0),0),
-		   COALESCE(SUM(amount) FILTER (WHERE created_at >= $3 AND created_at < $2 AND amount > 0),0)
-		 FROM points_ledger WHERE user_id=$1`,
+	// All five weekly figures — ledger points (this/last week), quizzes + average
+	// this week, streak/domain, and domain rank — in a single round-trip. A CTE
+	// binds the user's row once so the domain-rank subquery can reference it.
+	var domain *string
+	var domainRank int
+	s.db.QueryRow(ctx, `
+		WITH me AS (SELECT current_streak, domain, total_points FROM users WHERE id=$1)
+		SELECT
+			(SELECT COALESCE(SUM(amount) FILTER (WHERE created_at >= $2 AND amount > 0),0) FROM points_ledger WHERE user_id=$1),
+			(SELECT COALESCE(SUM(amount) FILTER (WHERE created_at >= $3 AND created_at < $2 AND amount > 0),0) FROM points_ledger WHERE user_id=$1),
+			(SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed' AND completed_at >= $2),
+			(SELECT COALESCE(AVG(score_pct),0) FROM quiz_attempts WHERE user_id=$1 AND status='completed' AND completed_at >= $2),
+			(SELECT current_streak FROM me),
+			(SELECT domain FROM me),
+			(SELECT COUNT(*)+1 FROM users WHERE domain=(SELECT domain FROM me) AND status='active' AND total_points > (SELECT total_points FROM me))`,
 		userID, weekStart, prevStart,
-	).Scan(&wi.PointsThisWeek, &wi.PointsLastWeek)
+	).Scan(&wi.PointsThisWeek, &wi.PointsLastWeek, &wi.QuizzesThisWeek, &wi.AvgScoreThisWeek,
+		&wi.CurrentStreak, &domain, &domainRank)
+
 	if wi.PointsLastWeek > 0 {
 		wi.PointsDeltaPct = float64(wi.PointsThisWeek-wi.PointsLastWeek) / float64(wi.PointsLastWeek) * 100
 	} else if wi.PointsThisWeek > 0 {
 		wi.PointsDeltaPct = 100
 	}
-
-	// Quizzes completed + average score this week.
-	s.db.QueryRow(ctx,
-		`SELECT COUNT(*), COALESCE(AVG(score_pct),0)
-		 FROM quiz_attempts WHERE user_id=$1 AND status='completed' AND completed_at >= $2`,
-		userID, weekStart,
-	).Scan(&wi.QuizzesThisWeek, &wi.AvgScoreThisWeek)
-
-	// Streak + domain.
-	var domain *string
-	s.db.QueryRow(ctx, `SELECT current_streak, domain FROM users WHERE id=$1`, userID).
-		Scan(&wi.CurrentStreak, &domain)
 	if domain != nil && *domain != "" {
 		wi.Domain = domain
-		var rank int
-		var myPoints int64
-		s.db.QueryRow(ctx, `SELECT total_points FROM users WHERE id=$1`, userID).Scan(&myPoints)
-		s.db.QueryRow(ctx,
-			`SELECT COUNT(*)+1 FROM users WHERE domain=$1 AND status='active' AND total_points > $2`,
-			*domain, myPoints).Scan(&rank)
-		wi.DomainRank = &rank
+		wi.DomainRank = &domainRank
 	}
 
 	wi.Suggestion = buildSuggestion(wi)
@@ -730,46 +712,53 @@ const lowSampleQuestions = 10
 func (s *Service) GetInsightsBreakdown(ctx context.Context, userID string) (*InsightsBreakdown, error) {
 	var c ScoreComponents
 
-	// Accuracy (50%): question-weighted across completed attempts.
+	// All five score inputs in one round-trip. The difficulty/speed aggregate is
+	// an expensive join, so it's bound once in a CTE and its three outputs read
+	// back as scalars; the cheap counts sit alongside as independent subqueries.
+	//   Accuracy (50%): question-weighted across completed attempts.
+	//   Difficulty (20%): correct difficulty over all answered difficulty.
+	//   Speed (10%): mean per-response speed factor over correct answers.
+	//   Consistency (15%) from streak, Activity (5%) from completed count.
 	var totalCorrect, totalQuestions int64
-	s.db.QueryRow(ctx,
-		`SELECT COALESCE(SUM(total_correct),0), COALESCE(SUM(total_questions),0)
-		 FROM quiz_attempts WHERE user_id=$1 AND status='completed'`, userID,
-	).Scan(&totalCorrect, &totalQuestions)
+	var totalDiff, correctDiff, speedAvg float64
+	var streak, completed int
+	if err := s.db.QueryRow(ctx, `
+		WITH diff AS (
+			SELECT
+			  COALESCE(SUM(q.difficulty),0) AS total_diff,
+			  COALESCE(SUM(q.difficulty) FILTER (WHERE qr.is_correct),0) AS correct_diff,
+			  COALESCE(AVG(CASE
+			      WHEN qr.time_taken_ms < 1000 THEN 0.1
+			      WHEN qr.time_taken_ms <= (q.time_limit_seconds*1000)/3.0 THEN 1.0
+			      ELSE GREATEST(
+			        (q.time_limit_seconds*1000.0 - qr.time_taken_ms)
+			        / NULLIF(q.time_limit_seconds*1000.0 - q.time_limit_seconds*1000.0/3.0, 0), 0.1)
+			    END) FILTER (WHERE qr.is_correct AND qr.time_taken_ms IS NOT NULL), 0) AS speed_avg
+			FROM question_responses qr
+			JOIN questions q ON q.id = qr.question_id
+			JOIN quiz_attempts a ON a.id = qr.attempt_id
+			WHERE a.user_id=$1 AND a.status='completed'
+		)
+		SELECT
+			(SELECT COALESCE(SUM(total_correct),0) FROM quiz_attempts WHERE user_id=$1 AND status='completed'),
+			(SELECT COALESCE(SUM(total_questions),0) FROM quiz_attempts WHERE user_id=$1 AND status='completed'),
+			(SELECT total_diff FROM diff),
+			(SELECT correct_diff FROM diff),
+			(SELECT speed_avg FROM diff),
+			(SELECT current_streak FROM users WHERE id=$1),
+			(SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed')`,
+		userID,
+	).Scan(&totalCorrect, &totalQuestions, &totalDiff, &correctDiff, &speedAvg, &streak, &completed); err != nil {
+		return nil, err
+	}
+
 	if totalQuestions > 0 {
 		c.Accuracy = float64(totalCorrect) / float64(totalQuestions)
 	}
-
-	// Difficulty (20%): correct difficulty over all answered difficulty.
-	// Speed (10%): mean per-response speed factor over correct answers, using
-	// the same piecewise curve as scoring at completion time.
-	var totalDiff, correctDiff, speedAvg float64
-	s.db.QueryRow(ctx, `
-		SELECT
-		  COALESCE(SUM(q.difficulty),0),
-		  COALESCE(SUM(q.difficulty) FILTER (WHERE qr.is_correct),0),
-		  COALESCE(AVG(CASE
-		      WHEN qr.time_taken_ms < 1000 THEN 0.1
-		      WHEN qr.time_taken_ms <= (q.time_limit_seconds*1000)/3.0 THEN 1.0
-		      ELSE GREATEST(
-		        (q.time_limit_seconds*1000.0 - qr.time_taken_ms)
-		        / NULLIF(q.time_limit_seconds*1000.0 - q.time_limit_seconds*1000.0/3.0, 0), 0.1)
-		    END) FILTER (WHERE qr.is_correct AND qr.time_taken_ms IS NOT NULL), 0)
-		FROM question_responses qr
-		JOIN questions q ON q.id = qr.question_id
-		JOIN quiz_attempts a ON a.id = qr.attempt_id
-		WHERE a.user_id=$1 AND a.status='completed'`, userID,
-	).Scan(&totalDiff, &correctDiff, &speedAvg)
 	if totalDiff > 0 {
 		c.Difficulty = correctDiff / totalDiff
 	}
 	c.Speed = speedAvg
-
-	// Consistency (15%) from streak, Activity (5%) from completed count —
-	// same tiers as scoring.CalculateQwishScore.
-	var streak, completed int
-	s.db.QueryRow(ctx, `SELECT current_streak FROM users WHERE id=$1`, userID).Scan(&streak)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed'`, userID).Scan(&completed)
 	c.Consistency = streakTier(streak)
 	c.Activity = activityTier(completed)
 

@@ -3366,6 +3366,15 @@ Lifetime Qwish Score breakdown plus question-weighted domain/subdomain performan
 }
 ```
 
+### GET `/users/me/insights/trend?range=4w|12w|all`
+Bucketed average `score_pct` over time for the insights chart. `4w` → 4 weekly buckets, `12w` → 12 weekly, `all` → 12 monthly. Empty buckets carry the previous value forward so the line stays continuous.
+```json
+[
+  { "label": "5/12", "value": 71.0 },
+  { "label": "5/19", "value": 74.5 }
+]
+```
+
 ## Offline Mode
 
 ### GET `/offline/pack?since=<version>`

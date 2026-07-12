@@ -332,6 +332,17 @@ func (h *Handler) GetMyInsightsBreakdown(w http.ResponseWriter, r *http.Request)
 	middleware.JSON(w, http.StatusOK, bd)
 }
 
+// GET /api/v1/users/me/insights/trend?range=4w|12w|all
+func (h *Handler) GetMyScoreTrend(w http.ResponseWriter, r *http.Request) {
+	rng := r.URL.Query().Get("range")
+	trend, err := h.svc.GetScoreTrend(r.Context(), middleware.GetUserID(r), rng)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, trend)
+}
+
 // GET /api/v1/users/me/recommendations
 func (h *Handler) GetMyRecommendations(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.GetUserID(r)

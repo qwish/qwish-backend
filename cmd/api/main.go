@@ -232,6 +232,7 @@ func main() {
 				// Weekly score insights
 				r.Get("/users/me/insights/weekly", userH.GetMyWeeklyInsights)
 				r.Get("/users/me/insights/breakdown", userH.GetMyInsightsBreakdown)
+				r.Get("/users/me/insights/trend", userH.GetMyScoreTrend)
 
 				// Offline mode: prefetch practice pack + sync offline results
 				r.Get("/offline/pack", offlineH.GetPack)

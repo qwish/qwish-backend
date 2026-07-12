@@ -850,6 +850,70 @@ func (s *Service) domainPerformance(ctx context.Context, userID string) ([]Domai
 	return out, nil
 }
 
+// ── Score trend ─────────────────────────────────────────────────────────────
+
+type TrendPoint struct {
+	Label string  `json:"label"`
+	Value float64 `json:"value"` // avg score_pct in the bucket, carried forward
+}
+
+// GetScoreTrend returns bucketed average score_pct over time for the chart.
+// range: "4w" → 4 weekly buckets, "12w" → 12 weekly, "all" → 12 monthly.
+// Empty buckets carry forward the previous value so the line stays continuous.
+func (s *Service) GetScoreTrend(ctx context.Context, userID, rng string) ([]TrendPoint, error) {
+	unit, buckets := "week", 12
+	switch rng {
+	case "4w":
+		unit, buckets = "week", 4
+	case "all":
+		unit, buckets = "month", 12
+	}
+
+	// $1 unit ('week'|'month'), $2 userID, $3 bucket count. Interval strings are
+	// built from the unit, e.g. "3 week" / "1 month" — both valid ::interval.
+	rows, err := s.db.Query(ctx, `
+		WITH buckets AS (
+		  SELECT generate_series(
+		    date_trunc($1, now()) - (($3 - 1) || ' ' || $1)::interval,
+		    date_trunc($1, now()),
+		    ('1 ' || $1)::interval
+		  ) AS b
+		)
+		SELECT buckets.b, AVG(qa.score_pct)
+		FROM buckets
+		LEFT JOIN quiz_attempts qa
+		  ON qa.user_id = $2 AND qa.status = 'completed'
+		  AND date_trunc($1, qa.completed_at) = buckets.b
+		GROUP BY buckets.b
+		ORDER BY buckets.b`, unit, userID, buckets)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]TrendPoint, 0, buckets)
+	var last float64
+	for rows.Next() {
+		var b time.Time
+		var avg *float64
+		if err := rows.Scan(&b, &avg); err != nil {
+			return nil, err
+		}
+		if avg != nil {
+			last = round1(*avg)
+		}
+		out = append(out, TrendPoint{Label: trendLabel(b, unit), Value: last})
+	}
+	return out, nil
+}
+
+func trendLabel(b time.Time, unit string) string {
+	if unit == "month" {
+		return b.Format("Jan")
+	}
+	return b.Format("1/2") // month/day of the week bucket
+}
+
 func streakTier(streak int) float64 {
 	switch {
 	case streak >= 30:

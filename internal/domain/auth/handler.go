@@ -266,7 +266,7 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 
 	// Passkey sessions are minted by us, not Supabase — renew them locally.
 	// Non-passkey tokens fall through to the Supabase refresh path below.
-	if access, refresh, ok := h.svc.TryPasskeyRefresh(req.RefreshToken); ok {
+	if access, refresh, ok := h.svc.TryPasskeyRefresh(r.Context(), req.RefreshToken); ok {
 		middleware.JSON(w, http.StatusOK, map[string]interface{}{
 			"access_token":  access,
 			"refresh_token": refresh,

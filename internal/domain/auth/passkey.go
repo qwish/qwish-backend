@@ -23,10 +23,14 @@ const challengeTTL = 5 * time.Minute
 // passkeyAccessTTL / passkeyRefreshTTL govern the self-minted session tokens
 // issued after a successful assertion. The access token mirrors a Supabase
 // access token (short-lived, HS256, SUPABASE_JWT_SECRET); the refresh token is
-// our own JWT recognised by the /auth/refresh handler.
+// our own JWT recognised by the /auth/refresh handler. The refresh token is
+// long-lived (30 days) so passkey users stay signed in, but it is re-validated
+// against the account + a live credential on every refresh (see
+// TryPasskeyRefresh), so deleting the passkey or suspending the account revokes
+// the session immediately despite the long TTL.
 const (
 	passkeyAccessTTL  = time.Hour
-	passkeyRefreshTTL = 8 * time.Hour
+	passkeyRefreshTTL = 30 * 24 * time.Hour
 )
 
 // passkeyUser adapts an admin account to the go-webauthn User interface.
@@ -66,6 +70,30 @@ func (s *Service) getActiveAdminByEmail(ctx context.Context, email string) (*Adm
 		return nil, err
 	}
 	return &a, nil
+}
+
+func (s *Service) getAdminBySupabaseUID(ctx context.Context, uid string) (*AdminAccount, error) {
+	var a AdminAccount
+	err := s.db.QueryRow(ctx,
+		`SELECT id, supabase_uid, name, email, role, status FROM admin_accounts
+		 WHERE supabase_uid = $1 AND deleted_at IS NULL`, uid,
+	).Scan(&a.ID, &a.SupabaseUID, &a.Name, &a.Email, &a.Role, &a.Status)
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// countCredentials reports how many passkeys an admin still has. A passkey
+// session is only refreshable while at least one credential survives, so a user
+// who removes their last passkey (e.g. from a lost device) revokes every
+// long-lived refresh token they hold.
+func (s *Service) countCredentials(ctx context.Context, adminID string) (int, error) {
+	var n int
+	err := s.db.QueryRow(ctx,
+		`SELECT count(*) FROM webauthn_credentials WHERE admin_id = $1`, adminID,
+	).Scan(&n)
+	return n, err
 }
 
 // ─── Store: credentials ───────────────────────────────────────────────────────
@@ -232,7 +260,7 @@ func (s *Service) mintSession(supabaseUID, email string) (access, refresh string
 // ok=false (without error) when the token isn't one of ours, letting the caller
 // fall back to the Supabase refresh path. Opaque Supabase refresh tokens are not
 // JWTs, so they never parse here.
-func (s *Service) TryPasskeyRefresh(refreshToken string) (access, refresh string, ok bool) {
+func (s *Service) TryPasskeyRefresh(ctx context.Context, refreshToken string) (access, refresh string, ok bool) {
 	tok, err := jwt.Parse(refreshToken, func(t *jwt.Token) (interface{}, error) {
 		return []byte(s.cfg.SupabaseJWTSecret), nil
 	}, jwt.WithValidMethods([]string{"HS256"}))
@@ -244,11 +272,22 @@ func (s *Service) TryPasskeyRefresh(refreshToken string) (access, refresh string
 		return "", "", false
 	}
 	sub, _ := claims["sub"].(string)
-	email, _ := claims["email"].(string)
 	if sub == "" {
 		return "", "", false
 	}
-	a, r, err := s.mintSession(sub, email)
+
+	// Re-validate against live state so a 30-day token can't outlive the
+	// account or the passkey that authorised it: the admin must still exist,
+	// be non-suspended, and retain at least one credential.
+	admin, err := s.getAdminBySupabaseUID(ctx, sub)
+	if err != nil || admin.Status == "suspended" {
+		return "", "", false
+	}
+	if n, err := s.countCredentials(ctx, admin.ID); err != nil || n == 0 {
+		return "", "", false
+	}
+
+	a, r, err := s.mintSession(admin.SupabaseUID, admin.Email)
 	if err != nil {
 		return "", "", false
 	}

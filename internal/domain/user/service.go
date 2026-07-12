@@ -702,7 +702,7 @@ type DomainPerf struct {
 }
 
 type InsightsBreakdown struct {
-	QwishScore float64         `json:"qwish_score"` // weighted sum of components, 0–100
+	QwishScore float64         `json:"qwish_score"` // weighted components scaled to 100–980
 	Components ScoreComponents `json:"components"`
 	Domains    []DomainPerf    `json:"domains"`
 }
@@ -762,7 +762,7 @@ func (s *Service) GetInsightsBreakdown(ctx context.Context, userID string) (*Ins
 	c.Consistency = streakTier(streak)
 	c.Activity = activityTier(completed)
 
-	qwishScore := c.Accuracy*50 + c.Difficulty*20 + c.Consistency*15 + c.Speed*10 + c.Activity*5
+	qwishScore := scaleQwish(c.Accuracy*50 + c.Difficulty*20 + c.Consistency*15 + c.Speed*10 + c.Activity*5)
 
 	domains, err := s.domainPerformance(ctx, userID)
 	if err != nil {
@@ -843,7 +843,7 @@ func (s *Service) domainPerformance(ctx context.Context, userID string) ([]Domai
 
 type TrendPoint struct {
 	Label string  `json:"label"`
-	Value float64 `json:"value"` // avg score_pct in the bucket, carried forward
+	Value float64 `json:"value"` // avg score_pct scaled to 100–980, carried forward
 }
 
 // GetScoreTrend returns bucketed average score_pct over time for the chart.
@@ -889,9 +889,9 @@ func (s *Service) GetScoreTrend(ctx context.Context, userID, rng string) ([]Tren
 			return nil, err
 		}
 		if avg != nil {
-			last = round1(*avg)
+			last = *avg
 		}
-		out = append(out, TrendPoint{Label: trendLabel(b, unit), Value: last})
+		out = append(out, TrendPoint{Label: trendLabel(b, unit), Value: round1(scaleQwish(last))})
 	}
 	return out, nil
 }
@@ -939,6 +939,25 @@ func activityTier(count int) float64 {
 
 func round1(v float64) float64 {
 	return float64(int64(v*10+0.5)) / 10
+}
+
+// Qwish Score display range. The weighted formula yields 0–100; every user
+// starts at qwishScoreMin and tops out at qwishScoreMax.
+const (
+	qwishScoreMin = 100.0
+	qwishScoreMax = 980.0
+)
+
+// scaleQwish maps a 0–100 weighted score onto the [100, 980] display range.
+func scaleQwish(pct float64) float64 {
+	s := qwishScoreMin + pct/100*(qwishScoreMax-qwishScoreMin)
+	if s < qwishScoreMin {
+		return qwishScoreMin
+	}
+	if s > qwishScoreMax {
+		return qwishScoreMax
+	}
+	return s
 }
 
 func buildSuggestion(wi *WeeklyInsights) string {

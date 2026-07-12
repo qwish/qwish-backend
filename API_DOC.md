@@ -3345,10 +3345,10 @@ Push alerts are delivered via FCM (existing `/users/me/devices` registration) an
 The same breakdown is emailed weekly to users with `email_weekly_insights=true`.
 
 ### GET `/users/me/insights/breakdown`
-Lifetime Qwish Score breakdown plus question-weighted domain/subdomain performance. `qwish_score` is the weighted sum of the five components (0–100). `components` are lifetime fractions (0–1): accuracy 50%, difficulty 20%, consistency 15%, speed 10%, activity 5%. Each domain's `avg_score` is question-weighted accuracy (0–100); `low_sample` is true when fewer than 10 questions have been answered.
+Lifetime Qwish Score breakdown plus question-weighted domain/subdomain performance. `qwish_score` is the weighted sum of the five components, scaled to the 100–980 display range (every user starts at 100). `components` are lifetime fractions (0–1): accuracy 50%, difficulty 20%, consistency 15%, speed 10%, activity 5%. Each domain's `avg_score` is question-weighted accuracy (0–100); `low_sample` is true when fewer than 10 questions have been answered.
 ```json
 {
-  "qwish_score": 72.4,
+  "qwish_score": 737.1,
   "components": {
     "accuracy": 0.86, "difficulty": 0.61,
     "consistency": 0.6, "speed": 0.74, "activity": 0.4
@@ -3367,11 +3367,11 @@ Lifetime Qwish Score breakdown plus question-weighted domain/subdomain performan
 ```
 
 ### GET `/users/me/insights/trend?range=4w|12w|all`
-Bucketed average `score_pct` over time for the insights chart. `4w` → 4 weekly buckets, `12w` → 12 weekly, `all` → 12 monthly. Empty buckets carry the previous value forward so the line stays continuous.
+Bucketed average `score_pct` over time for the insights chart, scaled to the same 100–980 range as `qwish_score`. `4w` → 4 weekly buckets, `12w` → 12 weekly, `all` → 12 monthly. Empty buckets carry the previous value forward so the line stays continuous.
 ```json
 [
-  { "label": "5/12", "value": 71.0 },
-  { "label": "5/19", "value": 74.5 }
+  { "label": "5/12", "value": 724.8 },
+  { "label": "5/19", "value": 755.6 }
 ]
 ```
 

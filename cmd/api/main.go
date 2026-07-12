@@ -18,6 +18,7 @@ import (
 	"github.com/qwish/backend/internal/domain/auth"
 	"github.com/qwish/backend/internal/domain/avatar"
 	"github.com/qwish/backend/internal/domain/contact"
+	"github.com/qwish/backend/internal/domain/demo"
 	"github.com/qwish/backend/internal/domain/institution"
 	"github.com/qwish/backend/internal/domain/leaderboard"
 	"github.com/qwish/backend/internal/domain/notification"
@@ -51,6 +52,7 @@ func main() {
 	userSvc := user.NewService(pool)
 	quizSvc := quiz.NewService(pool)
 	streakSvc := streak.NewService(pool)
+	demoSvc := demo.NewService(pool, quizSvc)
 	attemptSvc := attempt.NewService(pool, quizSvc, streakSvc)
 	pushSvc := push.NewService(pool, cfg.FCMProjectID, cfg.FCMCredentialsJSON)
 	notifSvc := notification.NewService(pool, cfg.ResendAPIKey, cfg.InstituteURL, cfg.SuperAdminURL)
@@ -68,6 +70,7 @@ func main() {
 	avatarH := avatar.NewHandler()
 	userH := user.NewHandler(userSvc)
 	quizH := quiz.NewHandler(quizSvc)
+	demoH := demo.NewHandler(demoSvc)
 	attemptH := attempt.NewHandler(attemptSvc)
 	pointsH := points.NewHandler(pool)
 	streakH := streak.NewHandler(streakSvc)
@@ -146,6 +149,14 @@ func main() {
 			// ------ Public Contact Form ------
 			// Public + unauthenticated, so rate-limit per IP to curb spam/abuse.
 			r.With(mw.RateLimit(5, 10*time.Minute)).Post("/contact", contactH.Submit)
+
+			// ------ Public Demo Quizzes (onboarding, no auth) ------
+			// Curated demo quizzes played before login; graded statelessly.
+			r.Route("/demo", func(r chi.Router) {
+				r.Get("/quizzes", demoH.List)
+				r.Get("/quizzes/{quizId}", demoH.Questions)
+				r.With(mw.RateLimit(30, 10*time.Minute)).Post("/quizzes/{quizId}/score", demoH.Score)
+			})
 
 			// ------ AUTH (public) ------
 			r.Route("/auth", func(r chi.Router) {

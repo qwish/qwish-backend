@@ -62,3 +62,49 @@ func (h *Handler) Score(w http.ResponseWriter, r *http.Request) {
 	}
 	middleware.JSON(w, http.StatusOK, result)
 }
+
+// ── Admin (super_admin) endpoints ────────────────────────────────────────────
+
+// GET /api/v1/admin/demo/quizzes — list demo quizzes with play stats
+func (h *Handler) AdminList(w http.ResponseWriter, r *http.Request) {
+	quizzes, err := h.svc.ListAdmin(r.Context())
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, quizzes)
+}
+
+// POST /api/v1/admin/demo/quizzes — author a demo quiz
+func (h *Handler) AdminCreate(w http.ResponseWriter, r *http.Request) {
+	var req CreateReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Title == "" || len(req.Questions) == 0 {
+		middleware.BadRequest(w, "title and at least one question are required")
+		return
+	}
+	id, err := h.svc.Create(r.Context(), req)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
+// DELETE /api/v1/admin/demo/quizzes/{quizId}
+func (h *Handler) AdminDelete(w http.ResponseWriter, r *http.Request) {
+	if err := h.svc.Delete(r.Context(), chi.URLParam(r, "quizId")); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]bool{"deleted": true})
+}
+
+// GET /api/v1/admin/demo/quizzes/{quizId}/analytics
+func (h *Handler) AdminAnalytics(w http.ResponseWriter, r *http.Request) {
+	a, err := h.svc.Analytics(r.Context(), chi.URLParam(r, "quizId"))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, a)
+}

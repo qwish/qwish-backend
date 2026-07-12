@@ -42,9 +42,16 @@ type Answer struct {
 
 // ScoreResult is the stateless grade returned for a demo submission.
 type ScoreResult struct {
-	ScorePct       float64 `json:"score_pct"`
-	TotalCorrect   int     `json:"total_correct"`
-	TotalQuestions int     `json:"total_questions"`
+	ScorePct       float64   `json:"score_pct"`
+	TotalCorrect   int       `json:"total_correct"`
+	TotalQuestions int       `json:"total_questions"`
+	PerQuestion    []QResult `json:"per_question,omitempty"`
+}
+
+// QResult is per-question correctness, used for demo analytics.
+type QResult struct {
+	QuestionID string `json:"question_id"`
+	Correct    bool   `json:"correct"`
 }
 
 // List returns the curated demo quizzes.
@@ -75,6 +82,7 @@ func (s *Service) Questions(ctx context.Context, quizID string) ([]quiz.Question
 	if err := s.assertDemo(ctx, quizID); err != nil {
 		return nil, err
 	}
+	s.logStart(quizID)
 	return s.quizSvc.GetQuestionsForStudent(ctx, quizID)
 }
 
@@ -93,7 +101,9 @@ func (s *Service) Score(ctx context.Context, quizID string, answers []Answer) (*
 		return nil, err
 	}
 
-	return grade(questions, answers, cfg), nil
+	result := grade(questions, answers, cfg)
+	s.logComplete(quizID, result)
+	return result, nil
 }
 
 // grade is the pure scoring core: correct/total accuracy, skipped answers
@@ -105,6 +115,7 @@ func grade(questions []quiz.Question, answers []Answer, cfg *scoring.Config) *Sc
 	}
 
 	correct := 0
+	perQ := make([]QResult, 0, len(questions))
 	for _, q := range questions {
 		ok, _ := scoring.ScoreQuestion(scoring.QuestionResponse{
 			QuestionType:  q.Type,
@@ -114,6 +125,7 @@ func grade(questions []quiz.Question, answers []Answer, cfg *scoring.Config) *Sc
 		if ok {
 			correct++
 		}
+		perQ = append(perQ, QResult{QuestionID: q.ID, Correct: ok})
 	}
 
 	total := len(questions)
@@ -121,7 +133,7 @@ func grade(questions []quiz.Question, answers []Answer, cfg *scoring.Config) *Sc
 	if total > 0 {
 		pct = float64(correct) / float64(total) * 100
 	}
-	return &ScoreResult{ScorePct: pct, TotalCorrect: correct, TotalQuestions: total}
+	return &ScoreResult{ScorePct: pct, TotalCorrect: correct, TotalQuestions: total, PerQuestion: perQ}
 }
 
 func (s *Service) assertDemo(ctx context.Context, quizID string) error {

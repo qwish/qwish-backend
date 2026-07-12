@@ -380,6 +380,12 @@ func main() {
 					r.Get("/overview", adminH.Overview)
 					r.Get("/activity-feed", adminH.ActivityFeed)
 
+					// Demo quizzes (super_admin only): author + play analytics
+					r.With(mw.RequireRole("super_admin")).Get("/demo/quizzes", demoH.AdminList)
+					r.With(mw.RequireRole("super_admin")).Post("/demo/quizzes", demoH.AdminCreate)
+					r.With(mw.RequireRole("super_admin")).Delete("/demo/quizzes/{quizId}", demoH.AdminDelete)
+					r.With(mw.RequireRole("super_admin")).Get("/demo/quizzes/{quizId}/analytics", demoH.AdminAnalytics)
+
 					// Institutions (Super Admin + Moderator read)
 					r.Get("/institutions", adminH.ListInstitutions)
 					r.Get("/institutions/queue", adminH.InstitutionQueue)

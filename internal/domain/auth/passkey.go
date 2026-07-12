@@ -102,14 +102,16 @@ type storedCredential struct {
 	ID         string
 	Name       string
 	Cred       webauthn.Credential
+	Primary    bool
 	CreatedAt  time.Time
 	LastUsedAt *time.Time
 }
 
 func (s *Service) listCredentials(ctx context.Context, adminID string) ([]storedCredential, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT id, name, credential, created_at, last_used_at
-		 FROM webauthn_credentials WHERE admin_id = $1 ORDER BY created_at`, adminID)
+		`SELECT id, name, credential, is_primary, created_at, last_used_at
+		 FROM webauthn_credentials WHERE admin_id = $1
+		 ORDER BY is_primary DESC, created_at`, adminID)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +121,7 @@ func (s *Service) listCredentials(ctx context.Context, adminID string) ([]stored
 	for rows.Next() {
 		var sc storedCredential
 		var raw []byte
-		if err := rows.Scan(&sc.ID, &sc.Name, &raw, &sc.CreatedAt, &sc.LastUsedAt); err != nil {
+		if err := rows.Scan(&sc.ID, &sc.Name, &raw, &sc.Primary, &sc.CreatedAt, &sc.LastUsedAt); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(raw, &sc.Cred); err != nil {
@@ -128,6 +130,43 @@ func (s *Service) listCredentials(ctx context.Context, adminID string) ([]stored
 		out = append(out, sc)
 	}
 	return out, rows.Err()
+}
+
+// renameCredential updates a passkey's display name, scoped to its owner.
+func (s *Service) renameCredential(ctx context.Context, adminID, id, name string) (bool, error) {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE webauthn_credentials SET name = $1 WHERE id = $2 AND admin_id = $3`,
+		name, id, adminID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// setPrimaryCredential marks one passkey primary and clears the rest, in a
+// single transaction so the partial unique index never sees two primaries.
+func (s *Service) setPrimaryCredential(ctx context.Context, adminID, id string) (bool, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE webauthn_credentials SET is_primary = false
+		 WHERE admin_id = $1 AND is_primary`, adminID); err != nil {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx,
+		`UPDATE webauthn_credentials SET is_primary = true
+		 WHERE id = $1 AND admin_id = $2`, id, adminID)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+	return true, tx.Commit(ctx)
 }
 
 func (s *Service) buildPasskeyUser(admin *AdminAccount, creds []storedCredential) *passkeyUser {
@@ -489,7 +528,12 @@ func (h *Handler) PasskeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 		h.svc.ActivateAdmin(r.Context(), admin.ID)
 	}
 	h.svc.touchCredential(r.Context(), cred)
+	h.writePasskeySession(w, admin)
+}
 
+// writePasskeySession mints a session for the verified admin and writes the
+// standard auth payload shared by the email and discoverable login finishers.
+func (h *Handler) writePasskeySession(w http.ResponseWriter, admin *AdminAccount) {
 	access, refresh, err := h.svc.mintSession(admin.SupabaseUID, admin.Email)
 	if err != nil {
 		middleware.InternalError(w)
@@ -527,6 +571,7 @@ func (h *Handler) PasskeyList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]interface{}{
 			"id":           c.ID,
 			"name":         c.Name,
+			"is_primary":   c.Primary,
 			"created_at":   c.CreatedAt,
 			"last_used_at": c.LastUsedAt,
 		})
@@ -557,4 +602,143 @@ func (h *Handler) PasskeyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "passkey removed"})
+}
+
+// PasskeyRename changes the display name of one of the admin's passkeys.
+// PATCH /api/v1/auth/passkey/credentials/{id}  Body: { name }
+func (h *Handler) PasskeyRename(w http.ResponseWriter, r *http.Request) {
+	adminID := middleware.GetAdminID(r)
+	if adminID == "" {
+		middleware.Forbidden(w)
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || id == "" {
+		middleware.BadRequest(w, "id and name are required")
+		return
+	}
+	name := body.Name
+	if name == "" {
+		name = "Passkey"
+	}
+	ok, err := h.svc.renameCredential(r.Context(), adminID, id, name)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if !ok {
+		middleware.NotFound(w, "passkey")
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "passkey renamed", "name": name})
+}
+
+// PasskeySetPrimary marks one of the admin's passkeys as their primary/default.
+// POST /api/v1/auth/passkey/credentials/{id}/primary
+func (h *Handler) PasskeySetPrimary(w http.ResponseWriter, r *http.Request) {
+	adminID := middleware.GetAdminID(r)
+	if adminID == "" {
+		middleware.Forbidden(w)
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		middleware.BadRequest(w, "id is required")
+		return
+	}
+	ok, err := h.svc.setPrimaryCredential(r.Context(), adminID, id)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if !ok {
+		middleware.NotFound(w, "passkey")
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "primary passkey updated"})
+}
+
+// PasskeyLoginBeginDiscoverable starts a usernameless (conditional-UI / autofill)
+// assertion: no email is supplied, so the browser offers any passkey bound to
+// this site. The ceremony is keyed by its own challenge for the finish step.
+// POST /api/v1/auth/passkey/login/begin-discoverable
+func (h *Handler) PasskeyLoginBeginDiscoverable(w http.ResponseWriter, r *http.Request) {
+	if h.svc.wa == nil {
+		middleware.Error(w, http.StatusServiceUnavailable, "PASSKEY_DISABLED", "passkeys are not configured")
+		return
+	}
+	options, session, err := h.svc.wa.BeginDiscoverableLogin()
+	if err != nil {
+		middleware.Error(w, http.StatusBadRequest, "PASSKEY_BEGIN_FAILED", err.Error())
+		return
+	}
+	if err := h.svc.saveChallenge(r.Context(), session.Challenge, "login_discoverable", session); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, options)
+}
+
+// PasskeyLoginFinishDiscoverable verifies a usernameless assertion. The admin is
+// resolved from the credential's user handle (the admin id we set at
+// registration), so no email is required.
+// POST /api/v1/auth/passkey/login/finish-discoverable  Body: { response }
+func (h *Handler) PasskeyLoginFinishDiscoverable(w http.ResponseWriter, r *http.Request) {
+	if h.svc.wa == nil {
+		middleware.Error(w, http.StatusServiceUnavailable, "PASSKEY_DISABLED", "passkeys are not configured")
+		return
+	}
+	var body struct {
+		Response json.RawMessage `json:"response"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Response) == 0 {
+		middleware.BadRequest(w, "response is required")
+		return
+	}
+	parsed, err := protocol.ParseCredentialRequestResponseBody(bytes.NewReader(body.Response))
+	if err != nil {
+		middleware.Error(w, http.StatusBadRequest, "PASSKEY_INVALID_RESPONSE", "could not parse assertion")
+		return
+	}
+
+	// The ceremony was stored under its challenge, which the authenticator
+	// echoes back in the client data — use it to recover the SessionData.
+	session, err := h.svc.consumeChallenge(r.Context(), parsed.Response.CollectedClientData.Challenge, "login_discoverable")
+	if err != nil {
+		middleware.Error(w, http.StatusBadRequest, "PASSKEY_NO_CHALLENGE", "no active login challenge")
+		return
+	}
+
+	// Resolve the admin from the credential's user handle during validation.
+	var resolved *AdminAccount
+	handler := func(rawID, userHandle []byte) (webauthn.User, error) {
+		admin, err := h.svc.getAdminByID(r.Context(), string(userHandle))
+		if err != nil {
+			return nil, err
+		}
+		if admin.Status == "suspended" {
+			return nil, errors.New("account is suspended")
+		}
+		creds, err := h.svc.listCredentials(r.Context(), admin.ID)
+		if err != nil {
+			return nil, err
+		}
+		resolved = admin
+		return h.svc.buildPasskeyUser(admin, creds), nil
+	}
+
+	cred, err := h.svc.wa.ValidateDiscoverableLogin(handler, *session, parsed)
+	if err != nil || resolved == nil {
+		middleware.Error(w, http.StatusUnauthorized, "PASSKEY_VERIFY_FAILED", "passkey verification failed")
+		return
+	}
+
+	if resolved.Status == "pending" || resolved.Status == "invite_failed" {
+		h.svc.ActivateAdmin(r.Context(), resolved.ID)
+	}
+	h.svc.touchCredential(r.Context(), cred)
+	h.writePasskeySession(w, resolved)
 }

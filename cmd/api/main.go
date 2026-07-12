@@ -167,6 +167,12 @@ func main() {
 				).Post("/passkey/login/begin", authH.PasskeyLoginBegin)
 				r.Post("/passkey/login/finish", authH.PasskeyLoginFinish)
 
+				// Usernameless (conditional-UI / autofill) login — no email.
+				r.With(
+					mw.RateLimit(10, 15*time.Minute),
+				).Post("/passkey/login/begin-discoverable", authH.PasskeyLoginBeginDiscoverable)
+				r.Post("/passkey/login/finish-discoverable", authH.PasskeyLoginFinishDiscoverable)
+
 				// JWT-only (user may not exist in DB yet)
 				r.Group(func(r chi.Router) {
 					r.Use(mw.AuthenticateJWTOnly(cfg.SupabaseJWTSecret, cfg.SupabaseURL))
@@ -183,6 +189,8 @@ func main() {
 					r.Post("/passkey/register/begin", authH.PasskeyRegisterBegin)
 					r.Post("/passkey/register/finish", authH.PasskeyRegisterFinish)
 					r.Get("/passkey/credentials", authH.PasskeyList)
+					r.Patch("/passkey/credentials/{id}", authH.PasskeyRename)
+					r.Post("/passkey/credentials/{id}/primary", authH.PasskeySetPrimary)
 					r.Delete("/passkey/credentials/{id}", authH.PasskeyDelete)
 				})
 			})

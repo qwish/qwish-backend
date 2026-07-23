@@ -184,6 +184,18 @@ func main() {
 				).Post("/passkey/login/begin-discoverable", authH.PasskeyLoginBeginDiscoverable)
 				r.Post("/passkey/login/finish-discoverable", authH.PasskeyLoginFinishDiscoverable)
 
+				// User (teacher) passkey login — same shapes as the admin routes
+				// above, but resolved against the users table. Public.
+				r.With(
+					mw.RateLimit(10, 15*time.Minute),
+					mw.RateLimitByJSONField(5, 15*time.Minute, "email"),
+				).Post("/passkey/user/login/begin", authH.UserPasskeyLoginBegin)
+				r.Post("/passkey/user/login/finish", authH.UserPasskeyLoginFinish)
+				r.With(
+					mw.RateLimit(10, 15*time.Minute),
+				).Post("/passkey/user/login/begin-discoverable", authH.UserPasskeyLoginBeginDiscoverable)
+				r.Post("/passkey/user/login/finish-discoverable", authH.UserPasskeyLoginFinishDiscoverable)
+
 				// JWT-only (user may not exist in DB yet)
 				r.Group(func(r chi.Router) {
 					r.Use(mw.AuthenticateJWTOnly(cfg.SupabaseJWTSecret, cfg.SupabaseURL))
@@ -203,6 +215,15 @@ func main() {
 					r.Patch("/passkey/credentials/{id}", authH.PasskeyRename)
 					r.Post("/passkey/credentials/{id}/primary", authH.PasskeySetPrimary)
 					r.Delete("/passkey/credentials/{id}", authH.PasskeyDelete)
+
+					// User (teacher) passkey enrolment & management for the
+					// signed-in user (users table).
+					r.Post("/passkey/user/register/begin", authH.UserPasskeyRegisterBegin)
+					r.Post("/passkey/user/register/finish", authH.UserPasskeyRegisterFinish)
+					r.Get("/passkey/user/credentials", authH.UserPasskeyList)
+					r.Patch("/passkey/user/credentials/{id}", authH.UserPasskeyRename)
+					r.Post("/passkey/user/credentials/{id}/primary", authH.UserPasskeySetPrimary)
+					r.Delete("/passkey/user/credentials/{id}", authH.UserPasskeyDelete)
 				})
 			})
 

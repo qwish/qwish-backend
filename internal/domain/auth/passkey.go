@@ -295,6 +295,24 @@ func (s *Service) mintSession(supabaseUID, email string) (access, refresh string
 	return access, refresh, nil
 }
 
+// PasskeyRefreshSubject validates a refresh token and, if it is one of our
+// passkey refresh JWTs, returns its subject (supabase_uid). Lets the refresh
+// handler try the admin and user passkey paths without each re-parsing.
+func (s *Service) PasskeyRefreshSubject(refreshToken string) (sub string, ok bool) {
+	tok, err := jwt.Parse(refreshToken, func(t *jwt.Token) (interface{}, error) {
+		return []byte(s.cfg.SupabaseJWTSecret), nil
+	}, jwt.WithValidMethods([]string{"HS256"}))
+	if err != nil || !tok.Valid {
+		return "", false
+	}
+	claims, _ := tok.Claims.(jwt.MapClaims)
+	if claims == nil || claims["typ"] != "passkey_refresh" {
+		return "", false
+	}
+	sub, _ = claims["sub"].(string)
+	return sub, sub != ""
+}
+
 // TryPasskeyRefresh renews a passkey session from its refresh token. It returns
 // ok=false (without error) when the token isn't one of ours, letting the caller
 // fall back to the Supabase refresh path. Opaque Supabase refresh tokens are not

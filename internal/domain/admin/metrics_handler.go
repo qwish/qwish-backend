@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -16,6 +17,14 @@ func NewMetricsHandler(db *pgxpool.Pool) *MetricsHandler {
 }
 
 const bucketTimezone = "Asia/Kolkata"
+
+// failed logs the cause before the opaque 500. Without this a query error is
+// invisible — the client sees "an unexpected error occurred" and the server
+// says nothing.
+func failed(w http.ResponseWriter, what string, err error) {
+	log.Printf("admin analytics: %s: %v", what, err)
+	middleware.InternalError(w)
+}
 
 // Catalog advertises the metric vocabulary so the UI builds every picker from
 // the server rather than its own copy. Changes only on deploy.
@@ -83,12 +92,12 @@ func (h *MetricsHandler) Metrics(w http.ResponseWriter, r *http.Request) {
 
 	series, err := h.svc.Series(r.Context(), sel, win, instID)
 	if err != nil {
-		middleware.InternalError(w)
+		failed(w, "series", err)
 		return
 	}
 	totals, err := h.svc.Totals(r.Context(), sel, win, instID)
 	if err != nil {
-		middleware.InternalError(w)
+		failed(w, "totals", err)
 		return
 	}
 
@@ -118,12 +127,12 @@ func (h *MetricsHandler) Metrics(w http.ResponseWriter, r *http.Request) {
 		}
 		prevTotals, err := h.svc.Totals(r.Context(), sel, prev, instID)
 		if err != nil {
-			middleware.InternalError(w)
+			failed(w, "previous totals", err)
 			return
 		}
 		prevSeries, err := h.svc.Series(r.Context(), sel, prev, instID)
 		if err != nil {
-			middleware.InternalError(w)
+			failed(w, "previous series", err)
 			return
 		}
 		data["previous"] = prevTotals
@@ -142,7 +151,7 @@ func (h *MetricsHandler) Distributions(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := h.svc.Distributions(r.Context(), instID)
 	if err != nil {
-		middleware.InternalError(w)
+		failed(w, "distributions", err)
 		return
 	}
 	middleware.JSON(w, http.StatusOK, data)
@@ -155,7 +164,7 @@ func (h *MetricsHandler) PointsLiability(w http.ResponseWriter, r *http.Request)
 	}
 	data, err := h.svc.PointsLiability(r.Context(), instID)
 	if err != nil {
-		middleware.InternalError(w)
+		failed(w, "points liability", err)
 		return
 	}
 	middleware.JSON(w, http.StatusOK, data)

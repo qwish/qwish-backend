@@ -302,10 +302,15 @@ func main() {
 				r.Post("/quizzes/{quizId}/reports", quizH.ReportQuiz)
 				r.Post("/quizzes/{quizId}/questions/{questionId}/reports", quizH.ReportQuestion)
 
-				// Attempts
-				r.Post("/quizzes/{quizId}/attempts", attemptH.Start)
-				r.Post("/attempts/{attemptId}/answers", attemptH.SubmitAnswer)
-				r.Post("/attempts/{attemptId}/complete", attemptH.Complete)
+				// Attempts. Rate limited per user: these routes mint points, so a
+				// script hammering them is the cheapest attack surface here.
+				r.Group(func(r chi.Router) {
+					r.Use(mw.RateLimitByUser(300, time.Minute))
+					r.Post("/quizzes/{quizId}/attempts", attemptH.Start)
+					r.Post("/attempts/{attemptId}/answers", attemptH.SubmitAnswer)
+					r.Post("/attempts/{attemptId}/questions/{questionId}/clue", attemptH.RevealClue)
+					r.Post("/attempts/{attemptId}/complete", attemptH.Complete)
+				})
 				r.Get("/attempts/{attemptId}", attemptH.GetResult)
 
 				// Leaderboard

@@ -436,7 +436,8 @@ func (s *Service) GetQuestions(ctx context.Context, quizID string) ([]Question, 
 
 func (s *Service) GetQuestionsForStudent(ctx context.Context, quizID string) ([]QuestionForStudent, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT id, quiz_id, position, type, prompt, media_url, options, time_limit_seconds, clues
+		`SELECT id, quiz_id, position, type, prompt, media_url, options, time_limit_seconds,
+		        jsonb_array_length(COALESCE(clues, '[]'::jsonb))
 		 FROM questions WHERE quiz_id=$1 ORDER BY position`, quizID)
 	if err != nil {
 		return nil, err
@@ -446,7 +447,7 @@ func (s *Service) GetQuestionsForStudent(ctx context.Context, quizID string) ([]
 	for rows.Next() {
 		var q QuestionForStudent
 		rows.Scan(&q.ID, &q.QuizID, &q.Position, &q.Type, &q.Prompt, &q.MediaURL,
-			&q.Options, &q.TimeLimitSeconds, &q.Clues)
+			&q.Options, &q.TimeLimitSeconds, &q.ClueCount)
 		questions = append(questions, q)
 	}
 	if questions == nil {
@@ -455,7 +456,10 @@ func (s *Service) GetQuestionsForStudent(ctx context.Context, quizID string) ([]
 	return questions, nil
 }
 
-// QuestionForStudent strips correct_answer before sending to client
+// QuestionForStudent strips correct_answer before sending to client.
+// Clue text is withheld too — only the count ships, so the UI knows how many
+// hints exist; each one must be fetched from the clue-reveal endpoint, which
+// is what makes the clue penalty enforceable.
 type QuestionForStudent struct {
 	ID               string          `json:"id"`
 	QuizID           string          `json:"quiz_id"`
@@ -465,7 +469,7 @@ type QuestionForStudent struct {
 	MediaURL         *string         `json:"media_url,omitempty"`
 	Options          json.RawMessage `json:"options"`
 	TimeLimitSeconds int             `json:"time_limit_seconds"`
-	Clues            json.RawMessage `json:"clues,omitempty"`
+	ClueCount        int             `json:"clue_count"`
 }
 
 func (s *Service) ListForTeacher(ctx context.Context, teacherID, statusFilter string, page, limit int) ([]Quiz, int, error) {

@@ -36,10 +36,14 @@ type StartAttemptResp struct {
 type AnswerReq struct {
 	QuestionID      string          `json:"question_id"`
 	Answer          json.RawMessage `json:"answer"`
-	TimeTakenMs     int             `json:"time_taken_ms"`
 	ConfidenceLevel string          `json:"confidence_level"`
-	CluesUsed       int             `json:"clues_used"`
-	ComboLevel      int             `json:"combo_level"`
+
+	// TimeTakenMs, CluesUsed and ComboLevel used to arrive from the client and
+	// were fed straight into scoring — all three are now derived server-side and
+	// any value sent here is ignored. Kept only so old clients still parse.
+	TimeTakenMs int `json:"time_taken_ms"`
+	CluesUsed   int `json:"clues_used"`
+	ComboLevel  int `json:"combo_level"`
 }
 
 type AnswerResp struct {
@@ -47,6 +51,29 @@ type AnswerResp struct {
 	CorrectAnswer json.RawMessage `json:"correct_answer"`
 	PointsEarned  int64           `json:"points_earned"`
 	ComboLevel    int             `json:"combo_level"`
+	TimeTakenMs   int             `json:"time_taken_ms"`
+	// TimedOut is true when the answer landed past the question's time limit.
+	// Such answers are recorded but always score zero.
+	TimedOut bool `json:"timed_out"`
+}
+
+// answerGraceMs pads the per-question time limit to absorb network latency and
+// client/server clock skew before an answer is rejected as late.
+const answerGraceMs = 2000
+
+// applyServerGates applies the two adjustments the server owns outright, after
+// scoring: an answer past the time limit is void, and the combo counter advances
+// only on a genuinely correct answer. Both used to ride on client-supplied
+// values. timeTakenMs is measured against the DB clock by the caller.
+func applyServerGates(isCorrect bool, pts int64, timeTakenMs, timeLimitSeconds, comboLevel int) (correct bool, points int64, timedOut bool, newCombo int) {
+	timedOut = timeLimitSeconds > 0 && timeTakenMs > timeLimitSeconds*1000+answerGraceMs
+	if timedOut {
+		isCorrect, pts = false, 0
+	}
+	if isCorrect {
+		newCombo = comboLevel + 1
+	}
+	return isCorrect, pts, timedOut, newCombo
 }
 
 type CompleteResp struct {
@@ -102,8 +129,8 @@ func (s *Service) Start(ctx context.Context, userID, quizID string) (*StartAttem
 	// Create attempt
 	var attemptID string
 	err = s.db.QueryRow(ctx,
-		`INSERT INTO quiz_attempts (quiz_id, user_id, status, total_questions, point_config_snapshot)
-		 VALUES ($1,$2,'in_progress',$3,$4)
+		`INSERT INTO quiz_attempts (quiz_id, user_id, status, total_questions, point_config_snapshot, last_answer_at)
+		 VALUES ($1,$2,'in_progress',$3,$4, now())
 		 RETURNING id`,
 		quizID, userID, q.QuestionCount, cfgJSON,
 	).Scan(&attemptID)
@@ -129,14 +156,20 @@ func (s *Service) SubmitAnswer(ctx context.Context, userID, attemptID string, re
 	}
 	defer tx.Rollback(ctx)
 
-	// Verify attempt belongs to user and is in_progress, lock FOR SHARE to prevent concurrent completion
+	// Verify attempt belongs to user and is in_progress. FOR UPDATE (not FOR
+	// SHARE) because the combo counter and answer clock are written below.
+	// timeTakenMs is measured from the previous answer using the DB clock, so a
+	// client cannot understate how long it took.
 	var quizID string
 	var cfgSnapshot json.RawMessage
 	var qType string
+	var comboLevel, timeTakenMs int
 	err = tx.QueryRow(ctx,
-		`SELECT quiz_id, point_config_snapshot FROM quiz_attempts WHERE id=$1 AND user_id=$2 AND status='in_progress' FOR SHARE`,
+		`SELECT quiz_id, point_config_snapshot, combo_level,
+		        GREATEST(0, EXTRACT(EPOCH FROM (now() - COALESCE(last_answer_at, started_at))) * 1000)::INT
+		 FROM quiz_attempts WHERE id=$1 AND user_id=$2 AND status='in_progress' FOR UPDATE`,
 		attemptID, userID,
-	).Scan(&quizID, &cfgSnapshot)
+	).Scan(&quizID, &cfgSnapshot, &comboLevel, &timeTakenMs)
 	if err != nil {
 		return nil, fmt.Errorf("attempt not found or not in progress")
 	}
@@ -149,13 +182,21 @@ func (s *Service) SubmitAnswer(ctx context.Context, userID, attemptID string, re
 
 	// Get question details
 	var correctAnswer json.RawMessage
+	var timeLimitSeconds int
 	err = tx.QueryRow(ctx,
-		`SELECT type, correct_answer FROM questions WHERE id=$1 AND quiz_id=$2`,
+		`SELECT type, correct_answer, time_limit_seconds FROM questions WHERE id=$1 AND quiz_id=$2`,
 		req.QuestionID, quizID,
-	).Scan(&qType, &correctAnswer)
+	).Scan(&qType, &correctAnswer, &timeLimitSeconds)
 	if err != nil {
 		return nil, fmt.Errorf("question not found")
 	}
+
+	// Clues actually handed out by the server, not what the client claims.
+	var cluesUsed int
+	tx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM clue_reveals WHERE attempt_id=$1 AND question_id=$2`,
+		attemptID, req.QuestionID,
+	).Scan(&cluesUsed)
 
 	resp := scoring.QuestionResponse{
 		QuestionID:      req.QuestionID,
@@ -163,10 +204,12 @@ func (s *Service) SubmitAnswer(ctx context.Context, userID, attemptID string, re
 		CorrectAnswer:   correctAnswer,
 		StudentAnswer:   req.Answer,
 		ConfidenceLevel: req.ConfidenceLevel,
-		CluesUsed:       req.CluesUsed,
-		ComboLevel:      req.ComboLevel,
+		CluesUsed:       cluesUsed,
+		ComboLevel:      comboLevel,
 	}
 	isCorrect, pts := scoring.ScoreQuestion(resp, cfg)
+
+	isCorrect, pts, timedOut, newCombo := applyServerGates(isCorrect, pts, timeTakenMs, timeLimitSeconds, comboLevel)
 
 	// Empty confidence_level must be NULL, not '' — the CHECK constraint only
 	// allows NULL or the three enum values.
@@ -175,15 +218,25 @@ func (s *Service) SubmitAnswer(ctx context.Context, userID, attemptID string, re
 		confidence = &req.ConfidenceLevel
 	}
 
-	// Upsert response
-	_, err = tx.Exec(ctx,
+	// Insert, never update. The response below reveals the correct answer, so
+	// allowing a second write would let a wrong answer be replaced with the
+	// right one for full points.
+	ct, err := tx.Exec(ctx,
 		`INSERT INTO question_responses (attempt_id, question_id, answer, is_correct, time_taken_ms, clues_used, confidence_level, combo_level, points_earned)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-		 ON CONFLICT (attempt_id, question_id) DO UPDATE
-		 SET answer=$3, is_correct=$4, time_taken_ms=$5, clues_used=$6, confidence_level=$7, combo_level=$8, points_earned=$9`,
-		attemptID, req.QuestionID, req.Answer, isCorrect, req.TimeTakenMs, req.CluesUsed, confidence, req.ComboLevel, pts)
+		 ON CONFLICT (attempt_id, question_id) DO NOTHING`,
+		attemptID, req.QuestionID, req.Answer, isCorrect, timeTakenMs, cluesUsed, confidence, comboLevel, pts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save response: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return nil, fmt.Errorf("question already answered")
+	}
+
+	if _, err = tx.Exec(ctx,
+		`UPDATE quiz_attempts SET combo_level=$1, last_answer_at=now() WHERE id=$2`,
+		newCombo, attemptID); err != nil {
+		return nil, fmt.Errorf("failed to advance attempt: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -194,8 +247,90 @@ func (s *Service) SubmitAnswer(ctx context.Context, userID, attemptID string, re
 		IsCorrect:     isCorrect,
 		CorrectAnswer: correctAnswer,
 		PointsEarned:  pts,
-		ComboLevel:    req.ComboLevel + 1,
+		ComboLevel:    newCombo,
+		TimeTakenMs:   timeTakenMs,
+		TimedOut:      timedOut,
 	}, nil
+}
+
+// RevealClue hands out the next unrevealed clue for a question and records it,
+// so the clue_reveal scoring penalty is based on what the server actually gave
+// out. Clues are deliberately absent from the question payload sent at Start.
+func (s *Service) RevealClue(ctx context.Context, userID, attemptID, questionID string) (*ClueResp, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var quizID string
+	err = tx.QueryRow(ctx,
+		`SELECT quiz_id FROM quiz_attempts WHERE id=$1 AND user_id=$2 AND status='in_progress' FOR UPDATE`,
+		attemptID, userID,
+	).Scan(&quizID)
+	if err != nil {
+		return nil, fmt.Errorf("attempt not found or not in progress")
+	}
+
+	var rawClues json.RawMessage
+	err = tx.QueryRow(ctx,
+		`SELECT clues FROM questions WHERE id=$1 AND quiz_id=$2`,
+		questionID, quizID,
+	).Scan(&rawClues)
+	if err != nil {
+		return nil, fmt.Errorf("question not found")
+	}
+
+	var clues []json.RawMessage
+	if len(rawClues) > 0 {
+		json.Unmarshal(rawClues, &clues)
+	}
+	if len(clues) == 0 {
+		return nil, fmt.Errorf("question has no clues")
+	}
+
+	// No clues after the answer is in — that would only game the penalty.
+	var answered int
+	tx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM question_responses WHERE attempt_id=$1 AND question_id=$2`,
+		attemptID, questionID,
+	).Scan(&answered)
+	if answered > 0 {
+		return nil, fmt.Errorf("question already answered")
+	}
+
+	var next int
+	tx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM clue_reveals WHERE attempt_id=$1 AND question_id=$2`,
+		attemptID, questionID,
+	).Scan(&next)
+	if next >= len(clues) {
+		return nil, fmt.Errorf("no more clues")
+	}
+
+	if _, err = tx.Exec(ctx,
+		`INSERT INTO clue_reveals (attempt_id, question_id, clue_index) VALUES ($1,$2,$3)`,
+		attemptID, questionID, next); err != nil {
+		return nil, fmt.Errorf("failed to record clue: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit clue reveal: %w", err)
+	}
+
+	return &ClueResp{
+		Clue:      clues[next],
+		Index:     next,
+		Remaining: len(clues) - next - 1,
+		CluesUsed: next + 1,
+	}, nil
+}
+
+type ClueResp struct {
+	Clue      json.RawMessage `json:"clue"`
+	Index     int             `json:"index"`
+	Remaining int             `json:"remaining"`
+	CluesUsed int             `json:"clues_used"`
 }
 
 // Add unique constraint needed for ON CONFLICT — handled in migration.

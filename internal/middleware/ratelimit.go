@@ -102,6 +102,35 @@ func RateLimitByJSONField(max int, window time.Duration, field string) func(http
 	}
 }
 
+// RateLimitByUser limits requests keyed by authenticated user ID rather than IP.
+// Must be mounted after Authenticate. IP keying is wrong for these routes: a
+// whole school sits behind one NAT address and would share a single budget.
+// Falls back to IP when no user is on the request.
+func RateLimitByUser(max int, window time.Duration) func(http.Handler) http.Handler {
+	rl := &rateLimiter{
+		clients: make(map[string]*fixedWindow),
+		max:     max,
+		window:  window,
+	}
+	go rl.cleanupLoop()
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			key := GetUserID(r)
+			if key == "" {
+				key = "ip:" + clientIP(r)
+			}
+			if allowed, retryAfter := rl.allow(key); !allowed {
+				w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+				Error(w, http.StatusTooManyRequests, "RATE_LIMITED",
+					"too many requests, please slow down")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // allow records a request for ip and reports whether it is within the limit.
 // When denied, it also returns how long until the window resets.
 func (rl *rateLimiter) allow(ip string) (bool, time.Duration) {

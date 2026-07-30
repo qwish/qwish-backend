@@ -45,6 +45,17 @@ func (h *Handler) SubmitAnswer(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, resp)
 }
 
+// POST /api/v1/attempts/:attemptId/questions/:questionId/clue
+func (h *Handler) RevealClue(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.svc.RevealClue(r.Context(), middleware.GetUserID(r),
+		chi.URLParam(r, "attemptId"), chi.URLParam(r, "questionId"))
+	if err != nil {
+		middleware.BadRequest(w, err.Error())
+		return
+	}
+	middleware.JSON(w, http.StatusOK, resp)
+}
+
 // POST /api/v1/attempts/:attemptId/complete
 func (h *Handler) Complete(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.svc.Complete(r.Context(), middleware.GetUserID(r), chi.URLParam(r, "attemptId"))

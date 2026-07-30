@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -180,10 +181,11 @@ func TestTotalsQueryProjectsRateAndDistinctMetrics(t *testing.T) {
 func TestTotalsQueryScopes(t *testing.T) {
 	id := "11111111-1111-1111-1111-111111111111"
 	sql, args := BuildTotalsQuery(mustSelect(t, "attempts_completed"), testWindow(), &id)
-	if args[3] != id {
-		t.Errorf("args[3] = %v, want the institution id", args[3])
+	// $3, not $4: the totals query takes no date_trunc unit.
+	if args[2] != id {
+		t.Errorf("args[2] = %v, want the institution id", args[2])
 	}
-	if !strings.Contains(sql, "u.institution_id = $4") {
+	if !strings.Contains(sql, "u.institution_id = $3") {
 		t.Error("totals must honour the institution filter too")
 	}
 }
@@ -194,7 +196,7 @@ func TestBuildQueriesWithNoMetricsIsSafe(t *testing.T) {
 		t.Errorf("empty selection must still produce a valid bucket-only query; got sql=%q args=%v", sql, args)
 	}
 	tSQL, tArgs := BuildTotalsQuery(nil, testWindow(), nil)
-	if tSQL == "" || len(tArgs) != 4 {
+	if tSQL == "" || len(tArgs) != 3 {
 		t.Errorf("empty selection must still produce a valid totals query; got sql=%q args=%v", tSQL, tArgs)
 	}
 }
@@ -218,6 +220,32 @@ func TestNoDuplicateJoinAliases(t *testing.T) {
 		s, _ := Source(key)
 		if n := strings.Count(sql, ") "+s.Key+" ON "); n > 1 {
 			t.Errorf("source alias %q is joined %d times", s.Key, n)
+		}
+	}
+}
+
+// Postgres rejects a statement whose parameter numbers skip one ("could not
+// determine data type of parameter $3") and rejects a bind with the wrong
+// count. Both builders must therefore use $1..$len(args) with no gaps — the
+// totals query has no date_trunc unit, so its numbering differs from the
+// series query's and drifts apart easily.
+func TestPlaceholdersAreContiguousAndMatchArgs(t *testing.T) {
+	// Every scopable and non-scopable source at once, so any source's predicate
+	// numbering is covered.
+	sel := mustSelect(t)
+	build := map[string]func() (string, []any){
+		"series": func() (string, []any) { return BuildSeriesQuery(sel, testWindow(), nil) },
+		"totals": func() (string, []any) { return BuildTotalsQuery(sel, testWindow(), nil) },
+	}
+	for name, fn := range build {
+		sql, args := fn()
+		for n := 1; n <= len(args); n++ {
+			if !strings.Contains(sql, fmt.Sprintf("$%d", n)) {
+				t.Errorf("%s query passes %d args but never references $%d", name, len(args), n)
+			}
+		}
+		if strings.Contains(sql, fmt.Sprintf("$%d", len(args)+1)) {
+			t.Errorf("%s query references $%d but passes only %d args", name, len(args)+1, len(args))
 		}
 	}
 }

@@ -523,6 +523,13 @@ func main() {
 						}
 						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
 					})
+					r.Post("/abandon-stale-attempts", func(w http.ResponseWriter, r *http.Request) {
+						if err := sched.AbandonStaleAttempts(r.Context()); err != nil {
+							mw.InternalError(w)
+							return
+						}
+						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+					})
 					r.Post("/streak-nudges", func(w http.ResponseWriter, r *http.Request) {
 						if err := sched.SendStreakNudges(r.Context()); err != nil {
 							mw.InternalError(w)
@@ -630,6 +637,15 @@ func runInProcessCron(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
 		for {
 			time.Sleep(1 * time.Hour)
 			sched.CloseExpiredQuizzes(context.Background())
+		}
+	}()
+
+	// Sweep stale in-progress attempts to 'abandoned' every hour. Nothing else
+	// writes that status, so abandon_rate reads whatever this job records.
+	go func() {
+		for {
+			time.Sleep(1 * time.Hour)
+			sched.AbandonStaleAttempts(context.Background())
 		}
 	}()
 

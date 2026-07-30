@@ -351,6 +351,42 @@ func (s *Scheduler) CloseExpiredQuizzes(ctx context.Context) error {
 	return err
 }
 
+// staleAttemptAge is how long an attempt may sit in_progress before the
+// sweeper calls it abandoned.
+//
+// ponytail: flat 2h threshold. Quizzes run minutes — questions default to
+// time_limit_seconds=15 (migrations/001_initial.sql:133) — so this is roughly
+// eight times the longest realistic attempt, which leaves room for a user who
+// backgrounds the app mid-quiz. If a long-form quiz format ever ships, derive
+// this per-quiz from SUM(questions.time_limit_seconds) instead of a constant.
+const staleAttemptAge = 2 * time.Hour
+
+func staleCutoff(now time.Time) time.Time { return now.Add(-staleAttemptAge) }
+
+// AbandonStaleAttempts flips in-progress attempts older than staleAttemptAge to
+// status='abandoned'. Nothing else in the codebase ever writes that status, so
+// without this job abandon_rate has nothing to read.
+//
+// Idempotent: the WHERE clause excludes rows already converted, so a re-run is
+// a no-op and a missed run self-heals on the next tick.
+//
+// completed_at is deliberately left NULL — the attempt did not complete. That
+// is why the abandonment metrics bucket on started_at.
+func (s *Scheduler) AbandonStaleAttempts(ctx context.Context) error {
+	log.Println("[cron] running abandon-stale-attempts")
+	tag, err := s.db.Exec(ctx,
+		`UPDATE quiz_attempts
+		    SET status = 'abandoned'
+		  WHERE status = 'in_progress'
+		    AND started_at < $1`, staleCutoff(time.Now()))
+	if err != nil {
+		log.Printf("[cron] abandon-stale-attempts failed: %v", err)
+		return err
+	}
+	log.Printf("[cron] abandon-stale-attempts done — %d attempts abandoned", tag.RowsAffected())
+	return nil
+}
+
 // RecomputeQuestionDifficulty runs nightly. It refines questions.difficulty
 // from real response data — empirical hardness (1 - correct-rate) blended with
 // time-taken and clue-usage signals — shrunk toward the subdomain (or, absent

@@ -81,6 +81,8 @@ func main() {
 	institutionH := institution.NewHandler(pool, notifSvc, cfg.AppURL, cfg.TeacherURL)
 	teacherH := teacher.NewHandler(pool)
 	adminH := admin.NewHandler(pool, cfg, notifSvc)
+	metricsH := admin.NewMetricsHandler(pool)
+	layoutsH := admin.NewLayoutsHandler(pool)
 	onboardingH := onboarding.NewHandler(pool, cfg.TurnstileSecret)
 	contactH := contact.NewHandler(pool, notifSvc, cfg.BrandURL, cfg.TurnstileSecret)
 	notifH := notification.NewHandler(notifSvc)
@@ -406,6 +408,23 @@ func main() {
 					r.Get("/overview", adminH.Overview)
 					r.Get("/activity-feed", adminH.ActivityFeed)
 
+					// Analytics (all roles, read-only).
+					// /metrics/catalog is registered before /metrics so chi does
+					// not read "catalog" as a wildcard segment.
+					r.Get("/metrics/catalog", metricsH.Catalog)
+					r.Get("/metrics", metricsH.Metrics)
+					r.Get("/distributions", metricsH.Distributions)
+					r.Get("/points-liability", metricsH.PointsLiability)
+
+					// Dashboard layouts — private to the calling admin, so no
+					// extra role gate. /order precedes {layoutId} so chi does not
+					// capture "order" as an id.
+					r.Get("/dashboard-layouts", layoutsH.List)
+					r.Post("/dashboard-layouts", layoutsH.Create)
+					r.Put("/dashboard-layouts/order", layoutsH.Reorder)
+					r.Patch("/dashboard-layouts/{layoutId}", layoutsH.Update)
+					r.Delete("/dashboard-layouts/{layoutId}", layoutsH.Delete)
+
 					// Demo quizzes (super_admin only): author + play analytics
 					r.With(mw.RequireRole("super_admin")).Get("/demo/quizzes", demoH.AdminList)
 					r.With(mw.RequireRole("super_admin")).Post("/demo/quizzes", demoH.AdminCreate)
@@ -523,6 +542,13 @@ func main() {
 						}
 						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
 					})
+					r.Post("/abandon-stale-attempts", func(w http.ResponseWriter, r *http.Request) {
+						if err := sched.AbandonStaleAttempts(r.Context()); err != nil {
+							mw.InternalError(w)
+							return
+						}
+						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+					})
 					r.Post("/streak-nudges", func(w http.ResponseWriter, r *http.Request) {
 						if err := sched.SendStreakNudges(r.Context()); err != nil {
 							mw.InternalError(w)
@@ -630,6 +656,15 @@ func runInProcessCron(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
 		for {
 			time.Sleep(1 * time.Hour)
 			sched.CloseExpiredQuizzes(context.Background())
+		}
+	}()
+
+	// Sweep stale in-progress attempts to 'abandoned' every hour. Nothing else
+	// writes that status, so abandon_rate reads whatever this job records.
+	go func() {
+		for {
+			time.Sleep(1 * time.Hour)
+			sched.AbandonStaleAttempts(context.Background())
 		}
 	}()
 

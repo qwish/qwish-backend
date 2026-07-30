@@ -84,6 +84,7 @@ func main() {
 	adminH := admin.NewHandler(pool, cfg, notifSvc)
 	metricsH := metrics.NewHandler(pool, admin.MetricsScopeResolver(pool))
 	instMetricsH := metrics.NewHandler(pool, institution.MetricsScopeResolver())
+	teacherMetricsH := metrics.NewHandler(pool, teacher.MetricsScopeResolver(pool))
 	layoutsH := admin.NewLayoutsHandler(pool, "admin_dashboard_layouts", "admin_id", mw.GetAdminID)
 	userLayoutsH := admin.NewLayoutsHandler(pool, "user_dashboard_layouts", "user_id", mw.GetUserID)
 	onboardingH := onboarding.NewHandler(pool, cfg.TurnstileSecret)
@@ -358,6 +359,24 @@ func main() {
 					r.Get("/reports/student-performance", teacherH.StudentPerformanceReport)
 					r.Get("/topic-requests", topicH.TeacherList)
 					r.Patch("/topic-requests/{requestId}", topicH.TeacherUpdate)
+
+					// Analytics. `scope` selects classes or quizzes; the id it
+					// filters on always comes from the token.
+					// /metrics/catalog precedes /metrics so chi does not read
+					// "catalog" as a wildcard segment.
+					r.Get("/metrics/catalog", teacherMetricsH.Catalog)
+					r.Get("/metrics", teacherMetricsH.Metrics)
+					r.Get("/distributions", teacherMetricsH.Distributions)
+					r.Get("/points-liability", teacherMetricsH.PointsLiability)
+
+					// Dashboard layouts — private to the calling user.
+					// /order precedes {layoutId} so chi does not capture
+					// "order" as an id.
+					r.Get("/dashboard-layouts", userLayoutsH.List)
+					r.Post("/dashboard-layouts", userLayoutsH.Create)
+					r.Put("/dashboard-layouts/order", userLayoutsH.Reorder)
+					r.Patch("/dashboard-layouts/{layoutId}", userLayoutsH.Update)
+					r.Delete("/dashboard-layouts/{layoutId}", userLayoutsH.Delete)
 				})
 
 				// Upload

@@ -82,6 +82,7 @@ func main() {
 	teacherH := teacher.NewHandler(pool)
 	adminH := admin.NewHandler(pool, cfg, notifSvc)
 	metricsH := admin.NewMetricsHandler(pool)
+	layoutsH := admin.NewLayoutsHandler(pool)
 	onboardingH := onboarding.NewHandler(pool, cfg.TurnstileSecret)
 	contactH := contact.NewHandler(pool, notifSvc, cfg.BrandURL, cfg.TurnstileSecret)
 	notifH := notification.NewHandler(notifSvc)
@@ -414,6 +415,15 @@ func main() {
 					r.Get("/metrics", metricsH.Metrics)
 					r.Get("/distributions", metricsH.Distributions)
 					r.Get("/points-liability", metricsH.PointsLiability)
+
+					// Dashboard layouts — private to the calling admin, so no
+					// extra role gate. /order precedes {layoutId} so chi does not
+					// capture "order" as an id.
+					r.Get("/dashboard-layouts", layoutsH.List)
+					r.Post("/dashboard-layouts", layoutsH.Create)
+					r.Put("/dashboard-layouts/order", layoutsH.Reorder)
+					r.Patch("/dashboard-layouts/{layoutId}", layoutsH.Update)
+					r.Delete("/dashboard-layouts/{layoutId}", layoutsH.Delete)
 
 					// Demo quizzes (super_admin only): author + play analytics
 					r.With(mw.RequireRole("super_admin")).Get("/demo/quizzes", demoH.AdminList)

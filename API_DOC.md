@@ -3463,3 +3463,149 @@ The invited teacher authenticates via OTP (`/auth/send-otp` → `/auth/verify-ot
 The account is created with `role=teacher` linked to the inviting institution, and the invite is marked `accepted`.
 Errors: `404 NOT_FOUND` (bad token) · `410 INVITE_EXPIRED|INVITE_ACCEPTED|INVITE_REVOKED` · `403 INVITE_EMAIL_MISMATCH` (session email ≠ invited email).
 `invite_token` takes precedence over `referral_code` when both are sent.
+
+---
+
+# Analytics
+
+One metrics engine (`internal/domain/metrics`) serves three roles. The endpoints
+differ only in **scope** — which rows the caller is allowed to be answered on.
+
+| Role | Base | Scope |
+|---|---|---|
+| Super admin | `/admin` | platform-wide, optionally narrowed by `institution_id` |
+| Institution admin | `/institution` | the institution on the caller's token, always |
+| Teacher | `/teacher` | `classes` (their groups' students) or `quizzes` (quizzes they authored) |
+
+**Scope ids are never read from the query string for institution admins or
+teachers.** The institution comes from the token, the teacher comes from the
+token, and the teacher's `scope` parameter selects only the *kind*. There is no
+request by which one institution admin reads another institution, or one teacher
+reads another teacher.
+
+## The scope object
+
+Every analytics response carries:
+
+```json
+"scope": { "requested": "teacher_classes", "effective": "institution",
+           "reason": "no classes assigned — showing the whole institution" }
+```
+
+`reason` is `""` unless the server substituted a different scope. **When it is
+non-empty the client must render it.** A teacher assigned to no group is
+answered institution-wide (PRD §5.4); without that sentence on screen they read
+institution numbers as their own class's.
+
+`requested` and `effective` are `institution`, `teacher_classes`,
+`teacher_quizzes`, or `""` for an unscoped super-admin request.
+
+## Two contract rules
+
+1. **Never sum or average a `rate` or `distinct` metric across buckets.** Each
+   metric carries a `kind` (`additive` | `rate` | `distinct`). Window figures for
+   the latter two come from `totals`, which the server recomputes over the whole
+   window. Averaging an average is wrong when bucket volumes differ, and summing
+   daily distinct users double-counts anyone active on two days.
+2. **Never swallow `dropped`.** A metric the active scope cannot answer is
+   excluded and reported with a reason rather than answered at a wider scope.
+
+## GET `/{admin,institution,teacher}/metrics/catalog`
+
+The metric vocabulary, **filtered to what the caller's scope can answer**. Build
+every picker from this, never from a hardcoded client list.
+
+```json
+{ "metrics": [ { "id": "attempts_completed", "label": "Attempts completed",
+                 "group": "Engagement", "unit": "count", "kind": "additive",
+                 "scopes": ["institution","teacher_classes","teacher_quizzes"],
+                 "hint": "Attempts reaching status=completed…" } ],
+  "granularities": ["hour","day","week","month","quarter"],
+  "timezone": "Asia/Kolkata",
+  "scope": { "requested": "institution", "effective": "institution", "reason": "" } }
+```
+
+`scopes` lists the kinds a metric can answer. Cached `private, max-age=300`.
+
+Teacher variant takes `?scope=classes|quizzes` (default `classes`) — the
+answerable set changes with it, so refetch the catalog when the scope changes.
+
+## GET `/{admin,institution,teacher}/metrics`
+
+| Param | Default | Notes |
+|---|---|---|
+| `from` | `to - 29d` | `YYYY-MM-DD`, inclusive |
+| `to` | today (IST) | `YYYY-MM-DD`, inclusive |
+| `granularity` | `day` | `hour` \| `day` \| `week` \| `month` \| `quarter` |
+| `metrics` | all | csv of metric ids |
+| `compare` | absent | `previous` \| `year` |
+| `scope` | `classes` | **teacher only**; `classes` \| `quizzes` |
+| `institution_id` | absent | **super admin only** |
+
+Window caps, by granularity: hour 7d, day 92d, week 366d, month/quarter 1096d.
+Exceeding one is a `400` with a message the UI can show, not a silent coarsening.
+
+```json
+{ "from": "2026-07-01", "to": "2026-07-30", "granularity": "day",
+  "timezone": "Asia/Kolkata", "institution_id": null,
+  "scope": { "requested": "institution", "effective": "institution", "reason": "" },
+  "series": [ { "bucket": "2026-07-01T00:00:00Z", "attempts_completed": 184 } ],
+  "totals": { "attempts_completed": 5210, "avg_score": 68.4 },
+  "previous": { "attempts_completed": 4980 },
+  "previous_series": [], "previous_from": "2026-06-01", "previous_to": "2026-06-30",
+  "dropped": [ { "id": "moderation_actions", "reason": "not institution-scopable" } ] }
+```
+
+`previous*` appear only with `compare`. `dropped` appears only when non-empty.
+
+Drop reasons are phrased for the role: `not institution-scopable`,
+`not available when scoped to your classes`,
+`not available when scoped to your quizzes`, or
+`depends on <id>, which is <reason>` for a derived metric whose dependency went.
+
+## GET `/{admin,institution,teacher}/distributions`
+
+Snapshot shapes — "what is the mix right now", which is why they are not a time
+series: `score_histogram`, `difficulty_bands`, `streak_bands`, `role_mix`,
+`institution_type_mix`, `quiz_status_funnel`.
+
+Under a scope, shapes that cannot be expressed are **omitted** and listed in
+`dropped`. `institution_type_mix` drops under every scope; `streak_bands` and
+`role_mix` drop under `teacher_quizzes`; `difficulty_bands` and
+`quiz_status_funnel` drop under `teacher_classes`.
+
+## GET `/{admin,institution,teacher}/points-liability`
+
+A forward schedule of points about to expire, grouped by month.
+
+```json
+{ "as_of": "2026-07-30T12:00:00Z", "timezone": "Asia/Kolkata",
+  "total": 412000, "months": [ { "month": "2026-08", "points": 96000 } ],
+  "scope": { "requested": "institution", "effective": "institution", "reason": "" } }
+```
+
+`?scope=quizzes` returns **`400`**: `points_ledger` has no quiz linkage, and an
+empty schedule would read as "nothing is expiring" rather than "not answerable".
+
+## Dashboard layouts
+
+```
+GET    /{admin,institution,teacher}/dashboard-layouts
+POST   /{admin,institution,teacher}/dashboard-layouts
+PUT    /{admin,institution,teacher}/dashboard-layouts/order
+PATCH  /{admin,institution,teacher}/dashboard-layouts/{layoutId}
+DELETE /{admin,institution,teacher}/dashboard-layouts/{layoutId}
+```
+
+Private to the calling account. Super-admin layouts live in
+`admin_dashboard_layouts` (owner `admin_accounts.id`); institution-admin and
+teacher layouts live in `user_dashboard_layouts` (owner `users.id`). One default
+per owner, enforced by a partial unique index.
+
+`layout` is opaque to the server — validated only as a JSON object under 256 KiB,
+because widget shapes change every frontend release. A duplicate name is `409`.
+
+## Behaviour change
+
+An unknown `institution_id` on `/admin/metrics` now returns **`400`** rather than
+`404`; the parameter is a filter, and a filter naming nothing is a bad request.

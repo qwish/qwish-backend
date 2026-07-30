@@ -83,7 +83,9 @@ func main() {
 	teacherH := teacher.NewHandler(pool)
 	adminH := admin.NewHandler(pool, cfg, notifSvc)
 	metricsH := metrics.NewHandler(pool, admin.MetricsScopeResolver(pool))
-	layoutsH := admin.NewLayoutsHandler(pool)
+	instMetricsH := metrics.NewHandler(pool, institution.MetricsScopeResolver())
+	layoutsH := admin.NewLayoutsHandler(pool, "admin_dashboard_layouts", "admin_id", mw.GetAdminID)
+	userLayoutsH := admin.NewLayoutsHandler(pool, "user_dashboard_layouts", "user_id", mw.GetUserID)
 	onboardingH := onboarding.NewHandler(pool, cfg.TurnstileSecret)
 	contactH := contact.NewHandler(pool, notifSvc, cfg.BrandURL, cfg.TurnstileSecret)
 	notifH := notification.NewHandler(notifSvc)
@@ -399,6 +401,24 @@ func main() {
 					r.Patch("/settings", institutionH.UpdateSettings)
 					r.Patch("/settings/point-rules", institutionH.UpdatePointRules)
 					r.Get("/audit-log", institutionH.AuditLog)
+
+					// Analytics. Scope is pinned to the caller's institution by
+					// the resolver — there is no institution_id parameter here.
+					// /metrics/catalog precedes /metrics so chi does not read
+					// "catalog" as a wildcard segment.
+					r.Get("/metrics/catalog", instMetricsH.Catalog)
+					r.Get("/metrics", instMetricsH.Metrics)
+					r.Get("/distributions", instMetricsH.Distributions)
+					r.Get("/points-liability", instMetricsH.PointsLiability)
+
+					// Dashboard layouts — private to the calling user, so no
+					// extra role gate. /order precedes {layoutId} so chi does
+					// not capture "order" as an id.
+					r.Get("/dashboard-layouts", userLayoutsH.List)
+					r.Post("/dashboard-layouts", userLayoutsH.Create)
+					r.Put("/dashboard-layouts/order", userLayoutsH.Reorder)
+					r.Patch("/dashboard-layouts/{layoutId}", userLayoutsH.Update)
+					r.Delete("/dashboard-layouts/{layoutId}", userLayoutsH.Delete)
 				})
 
 				// ---- Super Admin routes ----

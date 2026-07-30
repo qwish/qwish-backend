@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -36,9 +37,22 @@ type Layout struct {
 	UpdatedAt time.Time       `json:"updated_at"`
 }
 
-type LayoutsService struct{ db *pgxpool.Pool }
+// LayoutsService serves one layouts table. The table and owner column are
+// supplied at construction from compile-time constants at the wiring site —
+// never from request data — so interpolating them into the SQL is safe.
+//
+// Two tables exist because layouts cascade with their owner, and the two owner
+// kinds live in different tables: super admins in admin_accounts, institution
+// admins and teachers in users.
+type LayoutsService struct {
+	db       *pgxpool.Pool
+	table    string
+	ownerCol string
+}
 
-func NewLayoutsService(db *pgxpool.Pool) *LayoutsService { return &LayoutsService{db: db} }
+func NewLayoutsService(db *pgxpool.Pool, table, ownerCol string) *LayoutsService {
+	return &LayoutsService{db: db, table: table, ownerCol: ownerCol}
+}
 
 const layoutCols = `id, name, layout, is_default, sort, created_at, updated_at`
 
@@ -56,16 +70,16 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
-func (s *LayoutsService) List(ctx context.Context, adminID string) ([]Layout, error) {
-	rows, err := s.db.Query(ctx,
-		`SELECT `+layoutCols+` FROM admin_dashboard_layouts
-		  WHERE admin_id = $1 ORDER BY sort, created_at`, adminID)
+func (s *LayoutsService) List(ctx context.Context, ownerID string) ([]Layout, error) {
+	rows, err := s.db.Query(ctx, fmt.Sprintf(
+		`SELECT `+layoutCols+` FROM %s
+		  WHERE %s = $1 ORDER BY sort, created_at`, s.table, s.ownerCol), ownerID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	out := []Layout{} // never nil — serialises as [] for a fresh admin
+	out := []Layout{} // never nil — serialises as [] for a fresh owner
 	for rows.Next() {
 		l, err := scanLayout(rows)
 		if err != nil {
@@ -77,7 +91,7 @@ func (s *LayoutsService) List(ctx context.Context, adminID string) ([]Layout, er
 }
 
 func (s *LayoutsService) Create(
-	ctx context.Context, adminID, name string, layout json.RawMessage, isDefault bool,
+	ctx context.Context, ownerID, name string, layout json.RawMessage, isDefault bool,
 ) (Layout, error) {
 	if len(layout) > maxLayoutBytes {
 		return Layout{}, ErrLayoutTooBig
@@ -92,19 +106,19 @@ func (s *LayoutsService) Create(
 	// Clearing the old default and setting the new one must be atomic, or the
 	// partial unique index rejects the second write.
 	if isDefault {
-		if _, err := tx.Exec(ctx,
-			`UPDATE admin_dashboard_layouts SET is_default = false, updated_at = now()
-			  WHERE admin_id = $1 AND is_default`, adminID); err != nil {
+		if _, err := tx.Exec(ctx, fmt.Sprintf(
+			`UPDATE %s SET is_default = false, updated_at = now()
+			  WHERE %s = $1 AND is_default`, s.table, s.ownerCol), ownerID); err != nil {
 			return Layout{}, err
 		}
 	}
 
-	l, err := scanLayout(tx.QueryRow(ctx,
-		`INSERT INTO admin_dashboard_layouts (admin_id, name, layout, is_default, sort)
+	l, err := scanLayout(tx.QueryRow(ctx, fmt.Sprintf(
+		`INSERT INTO %s (%s, name, layout, is_default, sort)
 		 VALUES ($1, $2, $3, $4,
-		   COALESCE((SELECT MAX(sort) + 1 FROM admin_dashboard_layouts WHERE admin_id = $1), 0))
-		 RETURNING `+layoutCols,
-		adminID, strings.TrimSpace(name), []byte(layout), isDefault))
+		   COALESCE((SELECT MAX(sort) + 1 FROM %s WHERE %s = $1), 0))
+		 RETURNING `+layoutCols, s.table, s.ownerCol, s.table, s.ownerCol),
+		ownerID, strings.TrimSpace(name), []byte(layout), isDefault))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Layout{}, ErrDuplicateName
@@ -119,7 +133,7 @@ func (s *LayoutsService) Create(
 
 // Update applies a partial change. A nil pointer means "leave alone".
 func (s *LayoutsService) Update(
-	ctx context.Context, adminID, id string,
+	ctx context.Context, ownerID, id string,
 	name *string, layout *json.RawMessage, isDefault *bool, sort *int,
 ) (Layout, error) {
 	if layout != nil && len(*layout) > maxLayoutBytes {
@@ -133,11 +147,11 @@ func (s *LayoutsService) Update(
 	defer tx.Rollback(ctx)
 
 	// The ownership check and the write share one transaction, and every WHERE
-	// carries admin_id, so another admin's row is never reachable.
+	// carries the owner column, so another owner's row is never reachable.
 	var exists bool
-	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM admin_dashboard_layouts WHERE id = $1 AND admin_id = $2)`,
-		id, adminID).Scan(&exists); err != nil {
+	if err := tx.QueryRow(ctx, fmt.Sprintf(
+		`SELECT EXISTS (SELECT 1 FROM %s WHERE id = $1 AND %s = $2)`, s.table, s.ownerCol),
+		id, ownerID).Scan(&exists); err != nil {
 		return Layout{}, err
 	}
 	if !exists {
@@ -145,9 +159,10 @@ func (s *LayoutsService) Update(
 	}
 
 	if isDefault != nil && *isDefault {
-		if _, err := tx.Exec(ctx,
-			`UPDATE admin_dashboard_layouts SET is_default = false, updated_at = now()
-			  WHERE admin_id = $1 AND is_default AND id <> $2`, adminID, id); err != nil {
+		if _, err := tx.Exec(ctx, fmt.Sprintf(
+			`UPDATE %s SET is_default = false, updated_at = now()
+			  WHERE %s = $1 AND is_default AND id <> $2`, s.table, s.ownerCol),
+			ownerID, id); err != nil {
 			return Layout{}, err
 		}
 	}
@@ -168,16 +183,16 @@ func (s *LayoutsService) Update(
 		sortArg = *sort
 	}
 
-	l, err := scanLayout(tx.QueryRow(ctx,
-		`UPDATE admin_dashboard_layouts SET
+	l, err := scanLayout(tx.QueryRow(ctx, fmt.Sprintf(
+		`UPDATE %s SET
 		   name       = COALESCE($3::text,    name),
 		   layout     = COALESCE($4::jsonb,   layout),
 		   is_default = COALESCE($5::boolean, is_default),
 		   sort       = COALESCE($6::int,     sort),
 		   updated_at = now()
-		 WHERE id = $1 AND admin_id = $2
-		 RETURNING `+layoutCols,
-		id, adminID, nameArg, layoutArg, defaultArg, sortArg))
+		 WHERE id = $1 AND %s = $2
+		 RETURNING `+layoutCols, s.table, s.ownerCol),
+		id, ownerID, nameArg, layoutArg, defaultArg, sortArg))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Layout{}, ErrDuplicateName
@@ -192,7 +207,7 @@ func (s *LayoutsService) Update(
 
 // Delete removes a layout and promotes the lowest-sort survivor if the deleted
 // one was the default.
-func (s *LayoutsService) Delete(ctx context.Context, adminID, id string) error {
+func (s *LayoutsService) Delete(ctx context.Context, ownerID, id string) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -200,10 +215,10 @@ func (s *LayoutsService) Delete(ctx context.Context, adminID, id string) error {
 	defer tx.Rollback(ctx)
 
 	var wasDefault bool
-	err = tx.QueryRow(ctx,
-		`DELETE FROM admin_dashboard_layouts
-		  WHERE id = $1 AND admin_id = $2
-		  RETURNING is_default`, id, adminID).Scan(&wasDefault)
+	err = tx.QueryRow(ctx, fmt.Sprintf(
+		`DELETE FROM %s
+		  WHERE id = $1 AND %s = $2
+		  RETURNING is_default`, s.table, s.ownerCol), id, ownerID).Scan(&wasDefault)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -212,12 +227,12 @@ func (s *LayoutsService) Delete(ctx context.Context, adminID, id string) error {
 	}
 
 	if wasDefault {
-		if _, err := tx.Exec(ctx,
-			`UPDATE admin_dashboard_layouts SET is_default = true, updated_at = now()
+		if _, err := tx.Exec(ctx, fmt.Sprintf(
+			`UPDATE %s SET is_default = true, updated_at = now()
 			  WHERE id = (
-			    SELECT id FROM admin_dashboard_layouts
-			     WHERE admin_id = $1 ORDER BY sort, created_at LIMIT 1
-			  )`, adminID); err != nil {
+			    SELECT id FROM %s
+			     WHERE %s = $1 ORDER BY sort, created_at LIMIT 1
+			  )`, s.table, s.table, s.ownerCol), ownerID); err != nil {
 			return err
 		}
 	}
@@ -225,30 +240,38 @@ func (s *LayoutsService) Delete(ctx context.Context, adminID, id string) error {
 }
 
 // Reorder rewrites sort for the given ids in one statement, so dragging a
-// layout in the switcher is a single write rather than N. The admin_id
-// predicate means ids belonging to another admin are silently ignored.
-func (s *LayoutsService) Reorder(ctx context.Context, adminID string, ids []string) error {
-	_, err := s.db.Exec(ctx,
-		`UPDATE admin_dashboard_layouts AS l
+// layout in the switcher is a single write rather than N. The owner-column
+// predicate means ids belonging to another owner are silently ignored.
+func (s *LayoutsService) Reorder(ctx context.Context, ownerID string, ids []string) error {
+	_, err := s.db.Exec(ctx, fmt.Sprintf(
+		`UPDATE %s AS l
 		    SET sort = v.ord, updated_at = now()
 		   FROM (SELECT id, ord FROM unnest($2::uuid[]) WITH ORDINALITY AS t(id, ord)) AS v
-		  WHERE l.id = v.id AND l.admin_id = $1`, adminID, ids)
+		  WHERE l.id = v.id AND l.%s = $1`, s.table, s.ownerCol), ownerID, ids)
 	return err
 }
 
-type LayoutsHandler struct{ svc *LayoutsService }
-
-func NewLayoutsHandler(db *pgxpool.Pool) *LayoutsHandler {
-	return &LayoutsHandler{svc: NewLayoutsService(db)}
+type LayoutsHandler struct {
+	svc   *LayoutsService
+	owner func(*http.Request) string
 }
 
-// requireAdmin resolves the owner from the token. GetAdminID is empty when an
+// NewLayoutsHandler binds a layouts table to the function that names its owner.
+// The admin console reads GetAdminID; institution and teacher panels read
+// GetUserID, because their accounts live in `users`.
+func NewLayoutsHandler(
+	db *pgxpool.Pool, table, ownerCol string, owner func(*http.Request) string,
+) *LayoutsHandler {
+	return &LayoutsHandler{svc: NewLayoutsService(db, table, ownerCol), owner: owner}
+}
+
+// requireOwner resolves the owner from the token. GetAdminID is empty when an
 // admin authenticated through the users table has no admin_accounts row
-// (internal/middleware/auth.go:128-137). admin_id is NOT NULL, so an empty
-// owner must never reach a query — and matching admin_id = ” would serve one
-// admin's layouts to another.
-func requireAdmin(w http.ResponseWriter, r *http.Request) (string, bool) {
-	id := middleware.GetAdminID(r)
+// (internal/middleware/auth.go:128-137). The owner column is NOT NULL, so an
+// empty owner must never reach a query — and matching owner = ” would serve
+// one owner's layouts to another.
+func (h *LayoutsHandler) requireOwner(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id := h.owner(r)
 	if id == "" {
 		middleware.Forbidden(w)
 		return "", false
@@ -257,11 +280,11 @@ func requireAdmin(w http.ResponseWriter, r *http.Request) (string, bool) {
 }
 
 func (h *LayoutsHandler) List(w http.ResponseWriter, r *http.Request) {
-	adminID, ok := requireAdmin(w, r)
+	ownerID, ok := h.requireOwner(w, r)
 	if !ok {
 		return
 	}
-	list, err := h.svc.List(r.Context(), adminID)
+	list, err := h.svc.List(r.Context(), ownerID)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -269,7 +292,7 @@ func (h *LayoutsHandler) List(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, list)
 }
 
-// layoutBody is the create/update payload. There is deliberately no admin_id
+// layoutBody is the create/update payload. There is deliberately no %s
 // field — ownership comes from the token and a client-supplied one is ignored.
 type layoutBody struct {
 	Name      *string          `json:"name"`
@@ -315,7 +338,7 @@ func writeLayoutErr(w http.ResponseWriter, err error) {
 }
 
 func (h *LayoutsHandler) Create(w http.ResponseWriter, r *http.Request) {
-	adminID, ok := requireAdmin(w, r)
+	ownerID, ok := h.requireOwner(w, r)
 	if !ok {
 		return
 	}
@@ -333,7 +356,7 @@ func (h *LayoutsHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	isDefault := body.IsDefault != nil && *body.IsDefault
 
-	l, err := h.svc.Create(r.Context(), adminID, *body.Name, *body.Layout, isDefault)
+	l, err := h.svc.Create(r.Context(), ownerID, *body.Name, *body.Layout, isDefault)
 	if err != nil {
 		writeLayoutErr(w, err)
 		return
@@ -342,7 +365,7 @@ func (h *LayoutsHandler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *LayoutsHandler) Update(w http.ResponseWriter, r *http.Request) {
-	adminID, ok := requireAdmin(w, r)
+	ownerID, ok := h.requireOwner(w, r)
 	if !ok {
 		return
 	}
@@ -355,7 +378,7 @@ func (h *LayoutsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	l, err := h.svc.Update(r.Context(), adminID, chi.URLParam(r, "layoutId"),
+	l, err := h.svc.Update(r.Context(), ownerID, chi.URLParam(r, "layoutId"),
 		body.Name, body.Layout, body.IsDefault, body.Sort)
 	if err != nil {
 		writeLayoutErr(w, err)
@@ -365,11 +388,11 @@ func (h *LayoutsHandler) Update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *LayoutsHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	adminID, ok := requireAdmin(w, r)
+	ownerID, ok := h.requireOwner(w, r)
 	if !ok {
 		return
 	}
-	if err := h.svc.Delete(r.Context(), adminID, chi.URLParam(r, "layoutId")); err != nil {
+	if err := h.svc.Delete(r.Context(), ownerID, chi.URLParam(r, "layoutId")); err != nil {
 		writeLayoutErr(w, err)
 		return
 	}
@@ -377,7 +400,7 @@ func (h *LayoutsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *LayoutsHandler) Reorder(w http.ResponseWriter, r *http.Request) {
-	adminID, ok := requireAdmin(w, r)
+	ownerID, ok := h.requireOwner(w, r)
 	if !ok {
 		return
 	}
@@ -388,7 +411,7 @@ func (h *LayoutsHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "ids must be a non-empty array of layout ids")
 		return
 	}
-	if err := h.svc.Reorder(r.Context(), adminID, body.IDs); err != nil {
+	if err := h.svc.Reorder(r.Context(), ownerID, body.IDs); err != nil {
 		middleware.InternalError(w)
 		return
 	}

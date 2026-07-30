@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -29,7 +31,7 @@ func seedAdmin(t *testing.T, pool *pgxpool.Pool, email string) string {
 
 func TestLayoutCreateAndList(t *testing.T) {
 	pool := openTestDB(t)
-	svc := NewLayoutsService(pool)
+	svc := NewLayoutsService(pool, "admin_dashboard_layouts", "admin_id")
 	admin := seedAdmin(t, pool, "layout-create@test.local")
 	ctx := context.Background()
 
@@ -54,7 +56,7 @@ func TestLayoutCreateAndList(t *testing.T) {
 // in that case and a null would crash the map over it.
 func TestListForFreshAdminIsEmptyNotNull(t *testing.T) {
 	pool := openTestDB(t)
-	svc := NewLayoutsService(pool)
+	svc := NewLayoutsService(pool, "admin_dashboard_layouts", "admin_id")
 	admin := seedAdmin(t, pool, "layout-fresh@test.local")
 
 	list, err := svc.List(context.Background(), admin)
@@ -73,7 +75,7 @@ func TestListForFreshAdminIsEmptyNotNull(t *testing.T) {
 // every verb.
 func TestLayoutsAreIsolatedPerAdmin(t *testing.T) {
 	pool := openTestDB(t)
-	svc := NewLayoutsService(pool)
+	svc := NewLayoutsService(pool, "admin_dashboard_layouts", "admin_id")
 	ctx := context.Background()
 	a := seedAdmin(t, pool, "layout-a@test.local")
 	b := seedAdmin(t, pool, "layout-b@test.local")
@@ -114,7 +116,7 @@ func TestLayoutsAreIsolatedPerAdmin(t *testing.T) {
 
 func TestLayoutDuplicateNameRejected(t *testing.T) {
 	pool := openTestDB(t)
-	svc := NewLayoutsService(pool)
+	svc := NewLayoutsService(pool, "admin_dashboard_layouts", "admin_id")
 	admin := seedAdmin(t, pool, "layout-dup@test.local")
 	ctx := context.Background()
 
@@ -130,7 +132,7 @@ func TestLayoutDuplicateNameRejected(t *testing.T) {
 // per-admin, not global.
 func TestSameNameAcrossAdminsIsFine(t *testing.T) {
 	pool := openTestDB(t)
-	svc := NewLayoutsService(pool)
+	svc := NewLayoutsService(pool, "admin_dashboard_layouts", "admin_id")
 	ctx := context.Background()
 	a := seedAdmin(t, pool, "layout-name-a@test.local")
 	b := seedAdmin(t, pool, "layout-name-b@test.local")
@@ -147,7 +149,7 @@ func TestSameNameAcrossAdminsIsFine(t *testing.T) {
 // unique index means a non-transactional implementation fails here.
 func TestOnlyOneDefaultSurvives(t *testing.T) {
 	pool := openTestDB(t)
-	svc := NewLayoutsService(pool)
+	svc := NewLayoutsService(pool, "admin_dashboard_layouts", "admin_id")
 	admin := seedAdmin(t, pool, "layout-default@test.local")
 	ctx := context.Background()
 
@@ -180,7 +182,7 @@ func TestOnlyOneDefaultSurvives(t *testing.T) {
 // Promoting an existing layout via Update must also clear the old default.
 func TestUpdateSetsDefaultExclusively(t *testing.T) {
 	pool := openTestDB(t)
-	svc := NewLayoutsService(pool)
+	svc := NewLayoutsService(pool, "admin_dashboard_layouts", "admin_id")
 	admin := seedAdmin(t, pool, "layout-promote-update@test.local")
 	ctx := context.Background()
 
@@ -219,7 +221,7 @@ func TestUpdateSetsDefaultExclusively(t *testing.T) {
 // with no selected layout.
 func TestDeletingDefaultPromotesSurvivor(t *testing.T) {
 	pool := openTestDB(t)
-	svc := NewLayoutsService(pool)
+	svc := NewLayoutsService(pool, "admin_dashboard_layouts", "admin_id")
 	admin := seedAdmin(t, pool, "layout-promote@test.local")
 	ctx := context.Background()
 
@@ -249,7 +251,7 @@ func TestDeletingDefaultPromotesSurvivor(t *testing.T) {
 
 func TestDeletingLastLayoutLeavesNone(t *testing.T) {
 	pool := openTestDB(t)
-	svc := NewLayoutsService(pool)
+	svc := NewLayoutsService(pool, "admin_dashboard_layouts", "admin_id")
 	admin := seedAdmin(t, pool, "layout-last@test.local")
 	ctx := context.Background()
 
@@ -271,7 +273,7 @@ func TestDeletingLastLayoutLeavesNone(t *testing.T) {
 
 func TestReorderSetsSort(t *testing.T) {
 	pool := openTestDB(t)
-	svc := NewLayoutsService(pool)
+	svc := NewLayoutsService(pool, "admin_dashboard_layouts", "admin_id")
 	admin := seedAdmin(t, pool, "layout-order@test.local")
 	ctx := context.Background()
 
@@ -308,7 +310,7 @@ func TestReorderSetsSort(t *testing.T) {
 
 func TestUpdateUnknownIDIsNotFound(t *testing.T) {
 	pool := openTestDB(t)
-	svc := NewLayoutsService(pool)
+	svc := NewLayoutsService(pool, "admin_dashboard_layouts", "admin_id")
 	admin := seedAdmin(t, pool, "layout-unknown@test.local")
 	name := "x"
 	_, err := svc.Update(context.Background(), admin,
@@ -320,7 +322,7 @@ func TestUpdateUnknownIDIsNotFound(t *testing.T) {
 
 func TestUpdateIsPartial(t *testing.T) {
 	pool := openTestDB(t)
-	svc := NewLayoutsService(pool)
+	svc := NewLayoutsService(pool, "admin_dashboard_layouts", "admin_id")
 	admin := seedAdmin(t, pool, "layout-partial@test.local")
 	ctx := context.Background()
 
@@ -348,7 +350,7 @@ func TestUpdateIsPartial(t *testing.T) {
 
 func TestOversizedLayoutRejected(t *testing.T) {
 	pool := openTestDB(t)
-	svc := NewLayoutsService(pool)
+	svc := NewLayoutsService(pool, "admin_dashboard_layouts", "admin_id")
 	admin := seedAdmin(t, pool, "layout-big@test.local")
 
 	big := make([]byte, maxLayoutBytes+1)
@@ -359,5 +361,63 @@ func TestOversizedLayoutRejected(t *testing.T) {
 
 	if _, err := svc.Create(context.Background(), admin, "Big", payload, false); !errors.Is(err, ErrLayoutTooBig) {
 		t.Errorf("err = %v, want ErrLayoutTooBig", err)
+	}
+}
+
+// The user-owned table must behave identically to the admin-owned one, since
+// both are served by the same service. This is the test that catches a missed
+// table name in one of the nine queries.
+func TestUserLayoutsRoundTrip(t *testing.T) {
+	pool := openTestDB(t)
+	ctx := context.Background()
+	svc := NewLayoutsService(pool, "user_dashboard_layouts", "user_id")
+
+	// A throwaway user; the layout cascades away with it.
+	var userID string
+	email := fmt.Sprintf("layout-test-%d@example.test", time.Now().UnixNano())
+	err := pool.QueryRow(ctx, `
+		INSERT INTO users (supabase_uid, full_name, display_name, email, role)
+		VALUES (gen_random_uuid(), 'Layout Test', 'Layout', $1, 'teacher')
+		RETURNING id`, email).Scan(&userID)
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, userID)
+	})
+
+	l, err := svc.Create(ctx, userID, "Default", json.RawMessage(`{"widgets":[]}`), true)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !l.IsDefault {
+		t.Error("created layout is not the default")
+	}
+
+	if _, err := svc.Create(ctx, userID, "Default", json.RawMessage(`{}`), false); !errors.Is(err, ErrDuplicateName) {
+		t.Errorf("duplicate name: got %v, want ErrDuplicateName", err)
+	}
+
+	list, err := svc.List(ctx, userID)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("List returned %d layouts, want 1", len(list))
+	}
+
+	name := "Renamed"
+	if _, err := svc.Update(ctx, userID, l.ID, &name, nil, nil, nil); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// An id this owner does not hold must not be reachable.
+	if _, err := svc.Update(ctx, userID, "00000000-0000-0000-0000-000000000000",
+		&name, nil, nil, nil); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown id: got %v, want ErrNotFound", err)
+	}
+
+	if err := svc.Delete(ctx, userID, l.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
 	}
 }

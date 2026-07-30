@@ -56,12 +56,12 @@ func TestCatalogReferencesResolve(t *testing.T) {
 // otherwise its numerator and denominator would cover different populations.
 func TestDerivedMetricScopabilityIsConsistent(t *testing.T) {
 	for _, m := range Catalog() {
-		if m.Source != "" || !m.Scopable {
+		if m.Source != "" || !m.answers(ScopeInstitution) {
 			continue
 		}
 		for _, need := range m.Needs {
 			dep, _ := Lookup(need)
-			if !dep.Scopable {
+			if !dep.answers(ScopeInstitution) {
 				t.Errorf("%s is scopable but depends on non-scopable %q", m.ID, need)
 			}
 		}
@@ -131,7 +131,7 @@ func TestLookup(t *testing.T) {
 }
 
 func TestSelectMetricsDefaultsToEverything(t *testing.T) {
-	sel, dropped, err := SelectMetrics(nil, false)
+	sel, dropped, err := SelectMetrics(nil, ScopeNone)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestSelectMetricsDefaultsToEverything(t *testing.T) {
 }
 
 func TestSelectMetricsRejectsUnknownID(t *testing.T) {
-	_, _, err := SelectMetrics([]string{"attempts_completed", "bogus_metric"}, false)
+	_, _, err := SelectMetrics([]string{"attempts_completed", "bogus_metric"}, ScopeNone)
 	if err == nil {
 		t.Fatal("expected an error naming the unknown metric")
 	}
@@ -157,7 +157,7 @@ func TestSelectMetricsRejectsUnknownID(t *testing.T) {
 // metric is dropped with a reason rather than silently returning platform-wide
 // numbers under an institution heading.
 func TestSelectMetricsDropsNonScopableWhenScoped(t *testing.T) {
-	sel, dropped, err := SelectMetrics([]string{"attempts_completed", "moderation_actions"}, true)
+	sel, dropped, err := SelectMetrics([]string{"attempts_completed", "moderation_actions"}, ScopeInstitution)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestSelectMetricsDropsNonScopableWhenScoped(t *testing.T) {
 }
 
 func TestSelectMetricsKeepsNonScopableWhenUnscoped(t *testing.T) {
-	sel, dropped, err := SelectMetrics([]string{"moderation_actions"}, false)
+	sel, dropped, err := SelectMetrics([]string{"moderation_actions"}, ScopeNone)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestSelectMetricsKeepsNonScopableWhenUnscoped(t *testing.T) {
 // Requesting only a derived metric must pull in the metrics it reads, or the
 // SQL builder has no columns to divide.
 func TestSelectMetricsPullsInDependencies(t *testing.T) {
-	sel, _, err := SelectMetrics([]string{"abandon_rate"}, false)
+	sel, _, err := SelectMetrics([]string{"abandon_rate"}, ScopeNone)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestSelectMetricsPullsInDependencies(t *testing.T) {
 // A derived metric whose dependency is non-scopable must itself be dropped when
 // scoped, not left projecting from columns that were removed.
 func TestScopedSelectionNeverLeavesADerivedMetricWithoutItsDeps(t *testing.T) {
-	sel, _, err := SelectMetrics(nil, true)
+	sel, _, err := SelectMetrics(nil, ScopeInstitution)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

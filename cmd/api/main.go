@@ -21,6 +21,7 @@ import (
 	"github.com/qwish/backend/internal/domain/demo"
 	"github.com/qwish/backend/internal/domain/institution"
 	"github.com/qwish/backend/internal/domain/leaderboard"
+	"github.com/qwish/backend/internal/domain/metrics"
 	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/domain/offline"
 	"github.com/qwish/backend/internal/domain/onboarding"
@@ -81,7 +82,7 @@ func main() {
 	institutionH := institution.NewHandler(pool, notifSvc, cfg.AppURL, cfg.TeacherURL)
 	teacherH := teacher.NewHandler(pool)
 	adminH := admin.NewHandler(pool, cfg, notifSvc)
-	metricsH := admin.NewMetricsHandler(pool)
+	metricsH := metrics.NewHandler(pool, admin.MetricsScopeResolver(pool))
 	layoutsH := admin.NewLayoutsHandler(pool)
 	onboardingH := onboarding.NewHandler(pool, cfg.TurnstileSecret)
 	contactH := contact.NewHandler(pool, notifSvc, cfg.BrandURL, cfg.TurnstileSecret)
@@ -343,7 +344,7 @@ func main() {
 					r.Post("/quizzes/{quizId}/unpublish", quizH.TeacherUnpublish)
 					r.Get("/quizzes/{quizId}/results", quizH.TeacherResults)
 					r.Get("/quizzes/{quizId}/questions", quizH.TeacherGetQuestions)
-				r.Post("/quizzes/{quizId}/questions", quizH.TeacherAddQuestion)
+					r.Post("/quizzes/{quizId}/questions", quizH.TeacherAddQuestion)
 					r.Patch("/quizzes/{quizId}/questions/order", quizH.TeacherReorderQuestions)
 					r.Patch("/quizzes/{quizId}/questions/{questionId}", quizH.TeacherUpdateQuestion)
 					r.Delete("/quizzes/{quizId}/questions/{questionId}", quizH.TeacherDeleteQuestion)

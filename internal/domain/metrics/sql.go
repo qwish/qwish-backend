@@ -8,19 +8,6 @@ import (
 	"sync"
 )
 
-// scopePredicate returns the NULL-tolerant institution filter for a source, so
-// one query text serves both scoped and unscoped requests. `n` is the parameter
-// position: the totals query has no date_trunc unit, so its placeholders are one
-// lower than the series query's. Postgres rejects a statement that skips a
-// parameter number ("could not determine data type of parameter $3"), so the
-// numbering has to be contiguous per query.
-func scopePredicate(s source, n int) string {
-	if s.ScopeCol == "" {
-		return ""
-	}
-	return fmt.Sprintf("($%d::uuid IS NULL OR %s = $%d)", n, s.ScopeCol, n)
-}
-
 // sourceGroups buckets the selected metrics by source, dropping derived ones,
 // and returns the source keys in a stable order.
 func sourceGroups(sel []MetricDef) (map[string][]MetricDef, []string) {
@@ -93,26 +80,11 @@ func whereClause(parts ...string) string {
 	return "WHERE " + strings.Join(kept, "\n      AND ")
 }
 
-func instArg(instID *string) any {
-	if instID == nil {
-		return nil
-	}
-	return *instID
-}
-
-func seriesArgs(w Window, instID *string) []any {
-	// Upper bound is exclusive so the final day is fully included.
-	return []any{w.From, w.To.AddDate(0, 0, 1), w.Gran.PGTrunc(), instArg(instID)}
-}
-
-// The totals query does not bucket, so it takes no date_trunc unit.
-func totalsArgs(w Window, instID *string) []any {
-	return []any{w.From, w.To.AddDate(0, 0, 1), instArg(instID)}
-}
-
 // BuildSeriesQuery composes the bucketed query. $1=from, $2=to (exclusive),
-// $3=date_trunc unit, $4=institution id or nil.
-func BuildSeriesQuery(sel []MetricDef, w Window, instID *string) (string, []any) {
+// $3=date_trunc unit, and $4=the scope id when the scope is active. An inactive
+// scope emits no predicate and no fourth argument — Postgres cannot type a
+// placeholder that no expression references.
+func BuildSeriesQuery(sel []MetricDef, w Window, sc Scope) (string, []any) {
 	groups, keys := sourceGroups(sel)
 
 	var b strings.Builder
@@ -157,22 +129,27 @@ func BuildSeriesQuery(sel []MetricDef, w Window, instID *string) (string, []any)
 				s.Where,
 				fmt.Sprintf("%s >= $1", s.BucketOn),
 				fmt.Sprintf("%s < $2", s.BucketOn),
-				scopePredicate(s, 4),
+				scopePredicate(s, sc.Kind, 4),
 			),
 			s.Key, s.Key))
 	}
 
 	b.WriteString("ORDER BY b.bucket")
-	return b.String(), seriesArgs(w, instID)
+
+	args := []any{w.From, w.To.AddDate(0, 0, 1), w.Gran.PGTrunc()}
+	if sc.Active() {
+		args = append(args, sc.ID)
+	}
+	return b.String(), args
 }
 
 // BuildTotalsQuery aggregates the whole window with no bucketing. $1=from,
-// $2=to (exclusive), $3=institution id or nil — there is no date_trunc unit
-// here, so the institution filter takes $3 rather than the series query's $4.
+// $2=to (exclusive), and $3=the scope id when active — there is no date_trunc
+// unit here, so the scope filter takes $3 rather than the series query's $4.
 // Rate and
 // distinct metrics are only correct this way — folding bucket values would
 // average an average or double-count a user active on two days.
-func BuildTotalsQuery(sel []MetricDef, w Window, instID *string) (string, []any) {
+func BuildTotalsQuery(sel []MetricDef, w Window, sc Scope) (string, []any) {
 	groups, keys := sourceGroups(sel)
 
 	var proj []string
@@ -215,7 +192,7 @@ func BuildTotalsQuery(sel []MetricDef, w Window, instID *string) (string, []any)
 				s.Where,
 				fmt.Sprintf("%s >= $1", s.BucketOn),
 				fmt.Sprintf("%s < $2", s.BucketOn),
-				scopePredicate(s, 3),
+				scopePredicate(s, sc.Kind, 3),
 			),
 			s.Key))
 	}
@@ -223,5 +200,9 @@ func BuildTotalsQuery(sel []MetricDef, w Window, instID *string) (string, []any)
 		b.WriteString("FROM (SELECT 1) AS noop\n")
 	}
 
-	return b.String(), totalsArgs(w, instID)
+	args := []any{w.From, w.To.AddDate(0, 0, 1)}
+	if sc.Active() {
+		args = append(args, sc.ID)
+	}
+	return b.String(), args
 }

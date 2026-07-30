@@ -19,12 +19,12 @@ func TestSeriesFillsEmptyBuckets(t *testing.T) {
 		To:   time.Date(2001, time.January, 10, 0, 0, 0, 0, IST),
 		Gran: GranDay,
 	}
-	sel, _, err := SelectMetrics([]string{"attempts_completed", "signups"}, false)
+	sel, _, err := SelectMetrics([]string{"attempts_completed", "signups"}, ScopeNone)
 	if err != nil {
 		t.Fatalf("SelectMetrics: %v", err)
 	}
 
-	series, err := svc.Series(context.Background(), sel, w, nil)
+	series, err := svc.Series(context.Background(), sel, w, Scope{})
 	if err != nil {
 		t.Fatalf("Series: %v", err)
 	}
@@ -54,14 +54,14 @@ func TestEveryCatalogMetricExecutes(t *testing.T) {
 
 	for _, m := range Catalog() {
 		t.Run(m.ID, func(t *testing.T) {
-			sel, _, err := SelectMetrics([]string{m.ID}, false)
+			sel, _, err := SelectMetrics([]string{m.ID}, ScopeNone)
 			if err != nil {
 				t.Fatalf("SelectMetrics(%s): %v", m.ID, err)
 			}
-			if _, err := svc.Series(context.Background(), sel, w, nil); err != nil {
+			if _, err := svc.Series(context.Background(), sel, w, Scope{}); err != nil {
 				t.Errorf("series query failed: %v", err)
 			}
-			if _, err := svc.Totals(context.Background(), sel, w, nil); err != nil {
+			if _, err := svc.Totals(context.Background(), sel, w, Scope{}); err != nil {
 				t.Errorf("totals query failed: %v", err)
 			}
 		})
@@ -81,18 +81,18 @@ func TestEveryScopableMetricExecutesScoped(t *testing.T) {
 	inst := "11111111-1111-1111-1111-111111111111" // need not exist; the filter just must run
 
 	for _, m := range Catalog() {
-		if !m.Scopable {
+		if !m.answers(ScopeInstitution) {
 			continue
 		}
 		t.Run(m.ID, func(t *testing.T) {
-			sel, _, err := SelectMetrics([]string{m.ID}, true)
+			sel, _, err := SelectMetrics([]string{m.ID}, ScopeInstitution)
 			if err != nil {
 				t.Fatalf("SelectMetrics(%s): %v", m.ID, err)
 			}
-			if _, err := svc.Series(context.Background(), sel, w, &inst); err != nil {
+			if _, err := svc.Series(context.Background(), sel, w, Scope{Kind: ScopeInstitution, ID: inst}); err != nil {
 				t.Errorf("scoped series query failed: %v", err)
 			}
-			if _, err := svc.Totals(context.Background(), sel, w, &inst); err != nil {
+			if _, err := svc.Totals(context.Background(), sel, w, Scope{Kind: ScopeInstitution, ID: inst}); err != nil {
 				t.Errorf("scoped totals query failed: %v", err)
 			}
 		})
@@ -109,14 +109,14 @@ func TestWholeCatalogExecutesInOneQuery(t *testing.T) {
 		To:   time.Date(2026, time.July, 7, 0, 0, 0, 0, IST),
 		Gran: GranDay,
 	}
-	sel, _, err := SelectMetrics(nil, false)
+	sel, _, err := SelectMetrics(nil, ScopeNone)
 	if err != nil {
 		t.Fatalf("SelectMetrics: %v", err)
 	}
-	if _, err := svc.Series(context.Background(), sel, w, nil); err != nil {
+	if _, err := svc.Series(context.Background(), sel, w, Scope{}); err != nil {
 		t.Errorf("full-catalog series failed: %v", err)
 	}
-	if _, err := svc.Totals(context.Background(), sel, w, nil); err != nil {
+	if _, err := svc.Totals(context.Background(), sel, w, Scope{}); err != nil {
 		t.Errorf("full-catalog totals failed: %v", err)
 	}
 }
@@ -127,7 +127,7 @@ func TestWholeCatalogExecutesInOneQuery(t *testing.T) {
 func TestAllGranularitiesExecute(t *testing.T) {
 	pool := openTestDB(t)
 	svc := NewMetricsService(pool)
-	sel, _, err := SelectMetrics([]string{"signups"}, false)
+	sel, _, err := SelectMetrics([]string{"signups"}, ScopeNone)
 	if err != nil {
 		t.Fatalf("SelectMetrics: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestAllGranularitiesExecute(t *testing.T) {
 			days := MaxWindowDays(g) - 1
 			to := time.Date(2026, time.July, 30, 0, 0, 0, 0, IST)
 			w := Window{From: to.AddDate(0, 0, -days), To: to, Gran: g}
-			if _, err := svc.Series(context.Background(), sel, w, nil); err != nil {
+			if _, err := svc.Series(context.Background(), sel, w, Scope{}); err != nil {
 				t.Errorf("granularity %s failed: %v", g, err)
 			}
 		})
@@ -157,15 +157,15 @@ func TestRateTotalIsRecomputedNotAveraged(t *testing.T) {
 	to := time.Date(2026, time.July, 30, 0, 0, 0, 0, IST)
 	w := Window{From: to.AddDate(0, 0, -89), To: to, Gran: GranDay}
 
-	sel, _, err := SelectMetrics([]string{"avg_score"}, false)
+	sel, _, err := SelectMetrics([]string{"avg_score"}, ScopeNone)
 	if err != nil {
 		t.Fatalf("SelectMetrics: %v", err)
 	}
-	totals, err := svc.Totals(ctx, sel, w, nil)
+	totals, err := svc.Totals(ctx, sel, w, Scope{})
 	if err != nil {
 		t.Fatalf("Totals: %v", err)
 	}
-	series, err := svc.Series(ctx, sel, w, nil)
+	series, err := svc.Series(ctx, sel, w, Scope{})
 	if err != nil {
 		t.Fatalf("Series: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestDistributionsReturnsAllShapes(t *testing.T) {
 	pool := openTestDB(t)
 	svc := NewMetricsService(pool)
 
-	got, err := svc.Distributions(context.Background(), nil)
+	got, _, err := svc.Distributions(context.Background(), Scope{})
 	if err != nil {
 		t.Fatalf("Distributions: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestDifficultyBandsAlwaysFive(t *testing.T) {
 	pool := openTestDB(t)
 	svc := NewMetricsService(pool)
 
-	got, err := svc.Distributions(context.Background(), nil)
+	got, _, err := svc.Distributions(context.Background(), Scope{})
 	if err != nil {
 		t.Fatalf("Distributions: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestScoreHistogramHasTenFixedBins(t *testing.T) {
 	pool := openTestDB(t)
 	svc := NewMetricsService(pool)
 
-	got, err := svc.Distributions(context.Background(), nil)
+	got, _, err := svc.Distributions(context.Background(), Scope{})
 	if err != nil {
 		t.Fatalf("Distributions: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestDistributionsScoped(t *testing.T) {
 	pool := openTestDB(t)
 	svc := NewMetricsService(pool)
 	inst := "11111111-1111-1111-1111-111111111111"
-	if _, err := svc.Distributions(context.Background(), &inst); err != nil {
+	if _, _, err := svc.Distributions(context.Background(), Scope{Kind: ScopeInstitution, ID: inst}); err != nil {
 		t.Fatalf("scoped Distributions: %v", err)
 	}
 }
@@ -313,7 +313,7 @@ func TestPointsLiabilityIsForwardLooking(t *testing.T) {
 	pool := openTestDB(t)
 	svc := NewMetricsService(pool)
 
-	got, err := svc.PointsLiability(context.Background(), nil)
+	got, err := svc.PointsLiability(context.Background(), Scope{})
 	if err != nil {
 		t.Fatalf("PointsLiability: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestPointsLiabilityScoped(t *testing.T) {
 	pool := openTestDB(t)
 	svc := NewMetricsService(pool)
 	inst := "11111111-1111-1111-1111-111111111111"
-	if _, err := svc.PointsLiability(context.Background(), &inst); err != nil {
+	if _, err := svc.PointsLiability(context.Background(), Scope{Kind: ScopeInstitution, ID: inst}); err != nil {
 		t.Fatalf("scoped PointsLiability: %v", err)
 	}
 }

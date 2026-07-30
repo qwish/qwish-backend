@@ -22,17 +22,25 @@ type source struct {
 	From     string // FROM clause, including any scoping join
 	BucketOn string // the timestamp column bucketed on
 	Where    string // extra predicate, or "" for none
-	ScopeCol string // institution column for filtering, or "" if not scopable
+	// Scopes holds one predicate template per answerable scope kind. The
+	// template carries a single %d for the parameter position. A missing key
+	// means the source cannot answer that kind, and its metrics drop.
+	Scopes map[ScopeKind]string
 }
 
 var sources = map[string]source{
-	// Completions bucket on completed_at. Scoped by the taker's institution.
+	// Completions bucket on completed_at. Scoped by the taker's institution,
+	// the taker's class membership, or the quiz's author.
 	"attempts_done": {
 		Key:      "ad",
 		From:     "quiz_attempts qa JOIN users u ON u.id = qa.user_id",
 		BucketOn: "qa.completed_at",
 		Where:    "qa.status = 'completed'",
-		ScopeCol: "u.institution_id",
+		Scopes: map[ScopeKind]string{
+			ScopeInstitution: "u.institution_id = $%d",
+			ScopeClasses:     "u.id IN (" + classMembers + ")",
+			ScopeQuizzes:     "qa.quiz_id IN (" + authoredQuizzes + ")",
+		},
 	},
 	// Starts and abandons bucket on started_at — an abandoned attempt never
 	// gets a completed_at.
@@ -40,26 +48,42 @@ var sources = map[string]source{
 		Key:      "ast",
 		From:     "quiz_attempts qa JOIN users u ON u.id = qa.user_id",
 		BucketOn: "qa.started_at",
-		ScopeCol: "u.institution_id",
+		Scopes: map[ScopeKind]string{
+			ScopeInstitution: "u.institution_id = $%d",
+			ScopeClasses:     "u.id IN (" + classMembers + ")",
+			ScopeQuizzes:     "qa.quiz_id IN (" + authoredQuizzes + ")",
+		},
 	},
 	"responses": {
 		Key:      "qr",
 		From:     "question_responses qr JOIN quiz_attempts qa ON qa.id = qr.attempt_id JOIN users u ON u.id = qa.user_id",
 		BucketOn: "qr.submitted_at",
-		ScopeCol: "u.institution_id",
+		Scopes: map[ScopeKind]string{
+			ScopeInstitution: "u.institution_id = $%d",
+			ScopeClasses:     "u.id IN (" + classMembers + ")",
+			ScopeQuizzes:     "qa.quiz_id IN (" + authoredQuizzes + ")",
+		},
 	},
+	// Practice sessions carry no quiz link, so they cannot answer a quizzes
+	// scope at all.
 	"practice": {
 		Key:      "pr",
 		From:     "practice_sessions ps JOIN users u ON u.id = ps.user_id",
 		BucketOn: "ps.completed_at",
-		ScopeCol: "u.institution_id",
+		Scopes: map[ScopeKind]string{
+			ScopeInstitution: "u.institution_id = $%d",
+			ScopeClasses:     "u.id IN (" + classMembers + ")",
+		},
 	},
 	"signup": {
 		Key:      "su",
 		From:     "users u",
 		BucketOn: "u.created_at",
 		Where:    "u.deleted_at IS NULL",
-		ScopeCol: "u.institution_id",
+		Scopes: map[ScopeKind]string{
+			ScopeInstitution: "u.institution_id = $%d",
+			ScopeClasses:     "u.id IN (" + classMembers + ")",
+		},
 	},
 	"inst_new": {
 		Key:      "inew",
@@ -76,41 +100,61 @@ var sources = map[string]source{
 		Key:      "pl",
 		From:     "points_ledger pl JOIN users u ON u.id = pl.user_id",
 		BucketOn: "pl.created_at",
-		ScopeCol: "u.institution_id",
+		Scopes: map[ScopeKind]string{
+			ScopeInstitution: "u.institution_id = $%d",
+			ScopeClasses:     "u.id IN (" + classMembers + ")",
+		},
 	},
+	// Quiz-authoring sources have no class linkage. Answering a class-scoped
+	// question with an authorship-scoped number gives a plausible figure that
+	// means something else, so they drop under ScopeClasses instead.
 	"quiz_new": {
 		Key:      "qn",
 		From:     "quizzes q",
 		BucketOn: "q.created_at",
 		Where:    "q.deleted_at IS NULL",
-		ScopeCol: "q.institution_id",
+		Scopes: map[ScopeKind]string{
+			ScopeInstitution: "q.institution_id = $%d",
+			ScopeQuizzes:     "q.created_by = $%d",
+		},
 	},
 	"quiz_pub": {
 		Key:      "qp",
 		From:     "quizzes q",
 		BucketOn: "q.published_at",
 		Where:    "q.deleted_at IS NULL",
-		ScopeCol: "q.institution_id",
+		Scopes: map[ScopeKind]string{
+			ScopeInstitution: "q.institution_id = $%d",
+			ScopeQuizzes:     "q.created_by = $%d",
+		},
 	},
 	"quiz_appr": {
 		Key:      "qap",
 		From:     "quizzes q",
 		BucketOn: "q.approved_at",
 		Where:    "q.deleted_at IS NULL",
-		ScopeCol: "q.institution_id",
+		Scopes: map[ScopeKind]string{
+			ScopeInstitution: "q.institution_id = $%d",
+			ScopeQuizzes:     "q.created_by = $%d",
+		},
 	},
 	"question_new": {
 		Key:      "qs",
 		From:     "questions qn JOIN quizzes q ON q.id = qn.quiz_id",
 		BucketOn: "q.created_at",
 		Where:    "q.deleted_at IS NULL",
-		ScopeCol: "q.institution_id",
+		Scopes: map[ScopeKind]string{
+			ScopeInstitution: "q.institution_id = $%d",
+			ScopeQuizzes:     "q.created_by = $%d",
+		},
 	},
 	"topicreq": {
 		Key:      "tr",
 		From:     "topic_requests tr",
 		BucketOn: "tr.created_at",
-		ScopeCol: "tr.institution_id",
+		Scopes: map[ScopeKind]string{
+			ScopeInstitution: "tr.institution_id = $%d",
+		},
 	},
 	"report_new": {
 		Key:      "rn",
@@ -180,147 +224,209 @@ func SourceKeys() []string {
 }
 
 type MetricDef struct {
-	ID       string   `json:"id"`
-	Label    string   `json:"label"`
-	Group    string   `json:"group"`
-	Unit     string   `json:"unit"` // count | percent | points | seconds
-	Kind     Kind     `json:"kind"`
-	Scopable bool     `json:"scopable"`
-	Hint     string   `json:"hint"`
-	Source   string   `json:"-"` // subquery group; "" means derived
-	Expr     string   `json:"-"` // aggregate, or derived SQL over Needs columns
-	Needs    []string `json:"-"` // metric ids a derived metric reads
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Group string `json:"group"`
+	Unit  string `json:"unit"` // count | percent | points | seconds
+	Kind  Kind   `json:"kind"`
+	// Scopes is the set of scope kinds this metric can answer, filled in by
+	// init() from its source (or, for a derived metric, from the intersection
+	// of its dependencies'). Computed rather than hand-maintained, so a source
+	// gaining a scope cannot leave a stale boolean behind.
+	Scopes []ScopeKind `json:"scopes"`
+	Hint   string      `json:"hint"`
+	Source string      `json:"-"` // subquery group; "" means derived
+	Expr   string      `json:"-"` // aggregate, or derived SQL over Needs columns
+	Needs  []string    `json:"-"` // metric ids a derived metric reads
 }
 
 var catalog = []MetricDef{
 	// ── Engagement ──────────────────────────────────────────────────────────
 	{ID: "attempts_started", Label: "Attempts started", Group: "Engagement", Unit: "count",
-		Kind: KindAdditive, Scopable: true, Source: "attempts_start", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "attempts_start", Expr: "COUNT(*)",
 		Hint: "Attempts begun, bucketed on started_at. Scoped by the taker's institution."},
 	{ID: "attempts_completed", Label: "Attempts completed", Group: "Engagement", Unit: "count",
-		Kind: KindAdditive, Scopable: true, Source: "attempts_done", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "attempts_done", Expr: "COUNT(*)",
 		Hint: "Attempts reaching status=completed, bucketed on completed_at. Scoped by the taker's institution."},
 	{ID: "attempts_abandoned", Label: "Attempts abandoned", Group: "Engagement", Unit: "count",
-		Kind: KindAdditive, Scopable: true, Source: "attempts_start",
+		Kind: KindAdditive, Source: "attempts_start",
 		Expr: "COUNT(*) FILTER (WHERE qa.status = 'abandoned')",
 		Hint: "Attempts left in progress for over 2 hours and swept to status=abandoned. Bucketed on started_at."},
 	{ID: "abandon_rate", Label: "Abandonment rate", Group: "Engagement", Unit: "percent",
-		Kind: KindRate, Scopable: true, Needs: []string{"attempts_abandoned", "attempts_started"},
+		Kind: KindRate, Needs: []string{"attempts_abandoned", "attempts_started"},
 		Expr: "attempts_abandoned::float / NULLIF(attempts_started, 0) * 100",
 		Hint: "Abandoned as a share of started, recomputed over the whole window."},
 	{ID: "completion_rate", Label: "Completion rate", Group: "Engagement", Unit: "percent",
-		Kind: KindRate, Scopable: true, Needs: []string{"attempts_completed", "attempts_started"},
+		Kind: KindRate, Needs: []string{"attempts_completed", "attempts_started"},
 		Expr: "attempts_completed::float / NULLIF(attempts_started, 0) * 100",
 		Hint: "Completed as a share of started, recomputed over the whole window."},
 	{ID: "avg_score", Label: "Average score", Group: "Engagement", Unit: "percent",
-		Kind: KindRate, Scopable: true, Source: "attempts_done", Expr: "AVG(qa.score_pct)",
+		Kind: KindRate, Source: "attempts_done", Expr: "AVG(qa.score_pct)",
 		Hint: "Mean score_pct across completed attempts, recomputed over the whole window."},
 	{ID: "median_time_to_complete", Label: "Median time to complete", Group: "Engagement", Unit: "seconds",
-		Kind: KindRate, Scopable: true, Source: "attempts_done",
+		Kind: KindRate, Source: "attempts_done",
 		Expr: "percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (qa.completed_at - qa.started_at)))",
 		Hint: "Median completed_at minus started_at, in seconds."},
 	{ID: "active_users", Label: "Active users", Group: "Engagement", Unit: "count",
-		Kind: KindDistinct, Scopable: true, Source: "attempts_done", Expr: "COUNT(DISTINCT qa.user_id)",
+		Kind: KindDistinct, Source: "attempts_done", Expr: "COUNT(DISTINCT qa.user_id)",
 		Hint: "Distinct users completing an attempt. Not summable across buckets."},
 	{ID: "questions_answered", Label: "Questions answered", Group: "Engagement", Unit: "count",
-		Kind: KindAdditive, Scopable: true, Source: "responses", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "responses", Expr: "COUNT(*)",
 		Hint: "Individual question responses, bucketed on submitted_at."},
 	{ID: "practice_sessions", Label: "Practice sessions", Group: "Engagement", Unit: "count",
-		Kind: KindAdditive, Scopable: true, Source: "practice", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "practice", Expr: "COUNT(*)",
 		Hint: "Completed practice sessions."},
 
 	// ── Growth ──────────────────────────────────────────────────────────────
 	{ID: "signups", Label: "Signups", Group: "Growth", Unit: "count",
-		Kind: KindAdditive, Scopable: true, Source: "signup", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "signup", Expr: "COUNT(*)",
 		Hint: "New non-deleted users, bucketed on created_at."},
 	{ID: "institutions_registered", Label: "Institutions registered", Group: "Growth", Unit: "count",
-		Kind: KindAdditive, Scopable: false, Source: "inst_new", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "inst_new", Expr: "COUNT(*)",
 		Hint: "New institution records. Not institution-scopable."},
 	{ID: "institutions_verified", Label: "Institutions verified", Group: "Growth", Unit: "count",
-		Kind: KindAdditive, Scopable: false, Source: "inst_verified", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "inst_verified", Expr: "COUNT(*)",
 		Hint: "Institutions reaching verified_at. Not institution-scopable."},
 	{ID: "median_time_to_verify", Label: "Median time to verify", Group: "Growth", Unit: "seconds",
-		Kind: KindRate, Scopable: false, Source: "inst_verified",
+		Kind: KindRate, Source: "inst_verified",
 		Expr: "percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (i.verified_at - i.created_at)))",
 		Hint: "Median verified_at minus created_at. Not institution-scopable."},
 
 	// ── Economy ─────────────────────────────────────────────────────────────
 	{ID: "points_issued", Label: "Points issued", Group: "Economy", Unit: "points",
-		Kind: KindAdditive, Scopable: true, Source: "ledger",
+		Kind: KindAdditive, Source: "ledger",
 		Expr: "COALESCE(SUM(pl.amount) FILTER (WHERE pl.amount > 0), 0)",
 		Hint: "Sum of positive ledger amounts."},
 	{ID: "points_expired", Label: "Points expired", Group: "Economy", Unit: "points",
-		Kind: KindAdditive, Scopable: true, Source: "ledger",
+		Kind: KindAdditive, Source: "ledger",
 		Expr: "COALESCE(-SUM(pl.amount) FILTER (WHERE pl.reason = 'expiry'), 0)",
 		Hint: "Points removed by the expiry job, as a positive number."},
 	{ID: "points_spent", Label: "Points spent", Group: "Economy", Unit: "points",
-		Kind: KindAdditive, Scopable: true, Source: "ledger",
+		Kind: KindAdditive, Source: "ledger",
 		Expr: "COALESCE(-SUM(pl.amount) FILTER (WHERE pl.amount < 0 AND pl.reason <> 'expiry'), 0)",
 		Hint: "Negative ledger amounts other than expiry, as a positive number."},
 	{ID: "net_points", Label: "Net points", Group: "Economy", Unit: "points",
-		Kind: KindAdditive, Scopable: true,
+		Kind:  KindAdditive,
 		Needs: []string{"points_issued", "points_expired", "points_spent"},
 		Expr:  "points_issued - points_expired - points_spent",
 		Hint:  "Issued minus expired minus spent."},
 	{ID: "avg_points_per_attempt", Label: "Avg points per attempt", Group: "Economy", Unit: "points",
-		Kind: KindRate, Scopable: true, Needs: []string{"points_issued", "attempts_completed"},
+		Kind: KindRate, Needs: []string{"points_issued", "attempts_completed"},
 		Expr: "points_issued::float / NULLIF(attempts_completed, 0)",
 		Hint: "Points issued divided by completed attempts, recomputed over the whole window."},
 
 	// ── Content ─────────────────────────────────────────────────────────────
 	{ID: "quizzes_created", Label: "Quizzes created", Group: "Content", Unit: "count",
-		Kind: KindAdditive, Scopable: true, Source: "quiz_new", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "quiz_new", Expr: "COUNT(*)",
 		Hint: "New quizzes. Scoped by the quiz's owning institution."},
 	{ID: "quizzes_published", Label: "Quizzes published", Group: "Content", Unit: "count",
-		Kind: KindAdditive, Scopable: true, Source: "quiz_pub", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "quiz_pub", Expr: "COUNT(*)",
 		Hint: "Quizzes reaching published_at. Scoped by the quiz's owning institution."},
 	{ID: "quizzes_approved", Label: "Quizzes approved", Group: "Content", Unit: "count",
-		Kind: KindAdditive, Scopable: true, Source: "quiz_appr", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "quiz_appr", Expr: "COUNT(*)",
 		Hint: "Quizzes reaching approved_at. Scoped by the quiz's owning institution."},
 	{ID: "questions_authored", Label: "Questions authored", Group: "Content", Unit: "count",
-		Kind: KindAdditive, Scopable: true, Source: "question_new", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "question_new", Expr: "COUNT(*)",
 		Hint: "Questions on quizzes created in the bucket."},
 	{ID: "topic_requests", Label: "Topic requests", Group: "Content", Unit: "count",
-		Kind: KindAdditive, Scopable: true, Source: "topicreq", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "topicreq", Expr: "COUNT(*)",
 		Hint: "Topic requests raised by institutions."},
 
 	// ── Moderation & ops — none are institution-scopable ────────────────────
 	{ID: "reports_opened", Label: "Reports opened", Group: "Moderation", Unit: "count",
-		Kind: KindAdditive, Scopable: false, Source: "report_new", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "report_new", Expr: "COUNT(*)",
 		Hint: "Content reports filed. Reports carry no institution linkage."},
 	{ID: "reports_resolved", Label: "Reports resolved", Group: "Moderation", Unit: "count",
-		Kind: KindAdditive, Scopable: false, Source: "report_done", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "report_done", Expr: "COUNT(*)",
 		Hint: "Reports reaching resolved_at. Not institution-scopable."},
 	{ID: "median_time_to_resolve_report", Label: "Median time to resolve report", Group: "Moderation", Unit: "seconds",
-		Kind: KindRate, Scopable: false, Source: "report_done",
+		Kind: KindRate, Source: "report_done",
 		Expr: "percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (r.resolved_at - r.created_at)))",
 		Hint: "Median resolved_at minus created_at. Not institution-scopable."},
 	{ID: "moderation_actions", Label: "Moderation actions", Group: "Moderation", Unit: "count",
-		Kind: KindAdditive, Scopable: false, Source: "audit", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "audit", Expr: "COUNT(*)",
 		Hint: "Admin actions recorded in the audit log. Platform-wide by nature."},
 	{ID: "contact_opened", Label: "Contact forms received", Group: "Moderation", Unit: "count",
-		Kind: KindAdditive, Scopable: false, Source: "contact_new", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "contact_new", Expr: "COUNT(*)",
 		Hint: "Contact submissions received. Not institution-scopable."},
 	{ID: "contact_resolved", Label: "Contact forms resolved", Group: "Moderation", Unit: "count",
-		Kind: KindAdditive, Scopable: false, Source: "contact_done", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "contact_done", Expr: "COUNT(*)",
 		Hint: "Contact submissions reaching resolved_at. Not institution-scopable."},
 	{ID: "impersonation_sessions", Label: "Impersonation sessions", Group: "Moderation", Unit: "count",
-		Kind: KindAdditive, Scopable: false, Source: "impersonation", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "impersonation", Expr: "COUNT(*)",
 		Hint: "Admin impersonation sessions started — a security metric. Not institution-scopable."},
 
 	// ── Social & retention ──────────────────────────────────────────────────
 	{ID: "badges_earned", Label: "Badges earned", Group: "Social", Unit: "count",
-		Kind: KindAdditive, Scopable: false, Source: "badge", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "badge", Expr: "COUNT(*)",
 		Hint: "Badges awarded. Badges carry no institution linkage."},
 	{ID: "follows_created", Label: "Follows created", Group: "Social", Unit: "count",
-		Kind: KindAdditive, Scopable: false, Source: "follow", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "follow", Expr: "COUNT(*)",
 		Hint: "New follow relationships."},
 	{ID: "profile_views", Label: "Profile views", Group: "Social", Unit: "count",
-		Kind: KindAdditive, Scopable: false, Source: "pview", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "pview", Expr: "COUNT(*)",
 		Hint: "Profile view events."},
 	{ID: "notifications_sent", Label: "Notifications sent", Group: "Social", Unit: "count",
-		Kind: KindAdditive, Scopable: false, Source: "notif", Expr: "COUNT(*)",
+		Kind: KindAdditive, Source: "notif", Expr: "COUNT(*)",
 		Hint: "Notification log entries."},
+}
+
+// scopeOrder is the stable order Scopes is reported in.
+var scopeOrder = []ScopeKind{ScopeInstitution, ScopeClasses, ScopeQuizzes}
+
+// init fills MetricDef.Scopes from each metric's source, and a derived metric's
+// from the intersection of its dependencies'. Computing it removes the class of
+// bug where a source gains a scope and a hand-maintained boolean does not.
+//
+// The second loop reads Scopes of sourced metrics only, which the first loop has
+// already filled; TestNoDerivedMetricDependsOnADerivedMetric guarantees no
+// derived metric depends on another.
+func init() {
+	for i := range catalog {
+		m := &catalog[i]
+		if m.Source == "" {
+			continue
+		}
+		s := sources[m.Source]
+		for _, k := range scopeOrder {
+			if _, ok := s.Scopes[k]; ok {
+				m.Scopes = append(m.Scopes, k)
+			}
+		}
+	}
+	for i := range catalog {
+		m := &catalog[i]
+		if m.Source != "" {
+			continue
+		}
+		for _, k := range scopeOrder {
+			ok := len(m.Needs) > 0
+			for _, need := range m.Needs {
+				dep, found := Lookup(need)
+				if !found || !dep.answers(k) {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				m.Scopes = append(m.Scopes, k)
+			}
+		}
+	}
+}
+
+// answers reports whether this metric can be filtered by the given kind.
+// Everything answers ScopeNone: no filter is no constraint.
+func (m MetricDef) answers(k ScopeKind) bool {
+	if k == ScopeNone {
+		return true
+	}
+	for _, s := range m.Scopes {
+		if s == k {
+			return true
+		}
+	}
+	return false
 }
 
 func Catalog() []MetricDef { return catalog }
@@ -339,12 +445,10 @@ type DroppedMetric struct {
 	Reason string `json:"reason"`
 }
 
-const reasonNotScopable = "not institution-scopable"
-
 // SelectMetrics resolves the requested ids (empty means everything), pulls in
 // the dependencies of derived metrics, and removes anything that cannot honour
-// an active institution filter.
-func SelectMetrics(ids []string, scoped bool) ([]MetricDef, []DroppedMetric, error) {
+// the active scope kind.
+func SelectMetrics(ids []string, kind ScopeKind) ([]MetricDef, []DroppedMetric, error) {
 	want := map[string]bool{}
 	if len(ids) == 0 {
 		for _, m := range catalog {
@@ -378,14 +482,14 @@ func SelectMetrics(ids []string, scoped bool) ([]MetricDef, []DroppedMetric, err
 		}
 	}
 
-	// Drop non-scopable metrics first, then drop any derived metric whose
-	// dependency just went away — a rate projecting from a removed column is a
-	// broken query, not a partial answer.
+	// Drop sourced metrics the kind cannot answer, then drop any derived metric
+	// whose dependency just went away — a rate projecting from a removed column
+	// is a broken query, not a partial answer.
 	dropped := map[string]string{}
 	for id := range want {
 		m, _ := Lookup(id)
-		if scoped && !m.Scopable {
-			dropped[id] = reasonNotScopable
+		if m.Source != "" && !m.answers(kind) {
+			dropped[id] = DropReason(kind)
 		}
 	}
 	for id := range want {
@@ -395,7 +499,7 @@ func SelectMetrics(ids []string, scoped bool) ([]MetricDef, []DroppedMetric, err
 		}
 		for _, need := range m.Needs {
 			if dropped[need] != "" {
-				dropped[id] = fmt.Sprintf("depends on %s, which is %s", need, reasonNotScopable)
+				dropped[id] = fmt.Sprintf("depends on %s, which is %s", need, DropReason(kind))
 				break
 			}
 		}

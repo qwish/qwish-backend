@@ -2,11 +2,60 @@ package metrics
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ErrScopeUnsupported is returned when a snapshot shape cannot be expressed
+// under the requested scope at all. Callers turn it into a 400: an empty
+// schedule reads as "nothing is expiring" rather than "not answerable".
+var ErrScopeUnsupported = errors.New("this shape cannot be scoped that way")
+
+// userScopePred filters a hand-written snapshot query on a users alias.
+// "TRUE" for an unscoped request keeps the surrounding SQL valid without a
+// branch per query; "FALSE" marks a shape the caller must drop instead of run.
+func userScopePred(sc Scope, alias string, n int) string {
+	switch sc.Kind {
+	case ScopeNone:
+		return "TRUE"
+	case ScopeInstitution:
+		return fmt.Sprintf("%s.institution_id = $%d", alias, n)
+	case ScopeClasses:
+		return fmt.Sprintf(`%s.id IN (SELECT gs.user_id
+			     FROM group_students gs
+			     JOIN group_teachers gt ON gt.group_id = gs.group_id
+			    WHERE gt.user_id = $%d)`, alias, n)
+	default: // ScopeQuizzes has no user linkage
+		return "FALSE"
+	}
+}
+
+// quizScopePred is the same for a quizzes alias.
+func quizScopePred(sc Scope, alias string, n int) string {
+	switch sc.Kind {
+	case ScopeNone:
+		return "TRUE"
+	case ScopeInstitution:
+		return fmt.Sprintf("%s.institution_id = $%d", alias, n)
+	case ScopeQuizzes:
+		return fmt.Sprintf("%s.created_by = $%d", alias, n)
+	default: // ScopeClasses has no quiz linkage
+		return "FALSE"
+	}
+}
+
+// scopeArgs is the argument slice for a snapshot query: one element when the
+// scope is active, none otherwise.
+func scopeArgs(sc Scope) []any {
+	if !sc.Active() {
+		return nil
+	}
+	return []any{sc.ID}
+}
 
 type MetricsService struct{ db *pgxpool.Pool }
 
@@ -34,8 +83,8 @@ func rowsToMaps(rows pgx.Rows) ([]map[string]any, error) {
 	return out, rows.Err()
 }
 
-func (s *MetricsService) Series(ctx context.Context, sel []MetricDef, w Window, instID *string) ([]map[string]any, error) {
-	sql, args := BuildSeriesQuery(sel, w, instID)
+func (s *MetricsService) Series(ctx context.Context, sel []MetricDef, w Window, sc Scope) ([]map[string]any, error) {
+	sql, args := BuildSeriesQuery(sel, w, sc)
 	rows, err := s.db.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
@@ -50,8 +99,8 @@ func (s *MetricsService) Series(ctx context.Context, sel []MetricDef, w Window, 
 	return out, nil
 }
 
-func (s *MetricsService) Totals(ctx context.Context, sel []MetricDef, w Window, instID *string) (map[string]any, error) {
-	sql, args := BuildTotalsQuery(sel, w, instID)
+func (s *MetricsService) Totals(ctx context.Context, sel []MetricDef, w Window, sc Scope) (map[string]any, error) {
+	sql, args := BuildTotalsQuery(sel, w, sc)
 	rows, err := s.db.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
@@ -98,13 +147,16 @@ var streakBands = []band{
 
 // countBands runs one COUNT per band. Keeping the edges in Go means the labels
 // and the ranges live in one place instead of being duplicated in SQL.
+// The band edges are always $1 and $2; any scope argument follows at $3, and
+// an unscoped call passes none at all.
 func (s *MetricsService) countBands(
-	ctx context.Context, bands []band, query string, inst any,
+	ctx context.Context, bands []band, query string, args ...any,
 ) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(bands))
 	for _, b := range bands {
 		var n int64
-		if err := s.db.QueryRow(ctx, query, b.Lo, b.Hi, inst).Scan(&n); err != nil {
+		full := append([]any{b.Lo, b.Hi}, args...)
+		if err := s.db.QueryRow(ctx, query, full...).Scan(&n); err != nil {
 			return nil, err
 		}
 		out = append(out, map[string]any{
@@ -134,74 +186,96 @@ func (s *MetricsService) labelledCounts(ctx context.Context, query string, args 
 }
 
 // Distributions returns snapshot shapes — "what is the mix right now" — which
-// is why they do not live in /metrics.
-func (s *MetricsService) Distributions(ctx context.Context, instID *string) (map[string]any, error) {
-	var inst any
-	if instID != nil {
-		inst = *instID
-	}
+// is why they do not live in /metrics. Shapes the active scope cannot express
+// are omitted and reported, matching how /metrics reports dropped metrics.
+func (s *MetricsService) Distributions(ctx context.Context, sc Scope) (map[string]any, []DroppedMetric, error) {
 	out := map[string]any{}
+	var dropped []DroppedMetric
+	args := scopeArgs(sc)
+	reason := DropReason(sc.Kind)
+
+	drop := func(id string) { dropped = append(dropped, DroppedMetric{ID: id, Reason: reason}) }
 
 	// Score histogram: ten fixed 10-point bins, zero-filled by generate_series
-	// so the x-axis is stable regardless of what data exists.
-	hist, err := s.labelledHistogram(ctx, inst)
+	// so the x-axis is stable regardless of what data exists. It answers every
+	// kind — the quizzes scope filters the attempt's quiz rather than the taker.
+	hist, err := s.labelledHistogram(ctx, sc)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out["score_histogram"] = hist
 
-	bands, err := s.countBands(ctx, difficultyBands, `
-		SELECT COUNT(*)
-		FROM questions qn
-		JOIN quizzes q ON q.id = qn.quiz_id
-		WHERE q.deleted_at IS NULL
-		  AND qn.difficulty >= $1 AND qn.difficulty < $2
-		  AND ($3::uuid IS NULL OR q.institution_id = $3)`, inst)
-	if err != nil {
-		return nil, err
+	if quizScopePred(sc, "q", 3) == "FALSE" {
+		drop("difficulty_bands")
+	} else {
+		bands, err := s.countBands(ctx, difficultyBands, `
+			SELECT COUNT(*)
+			FROM questions qn
+			JOIN quizzes q ON q.id = qn.quiz_id
+			WHERE q.deleted_at IS NULL
+			  AND qn.difficulty >= $1 AND qn.difficulty < $2
+			  AND `+quizScopePred(sc, "q", 3), args...)
+		if err != nil {
+			return nil, nil, err
+		}
+		out["difficulty_bands"] = bands
 	}
-	out["difficulty_bands"] = bands
 
 	// streaks has no institution column, so it scopes through users.
-	streaks, err := s.countBands(ctx, streakBands, `
-		SELECT COUNT(*)
-		FROM streaks st
-		JOIN users u ON u.id = st.user_id
-		WHERE u.deleted_at IS NULL
-		  AND st.current_streak >= $1 AND st.current_streak < $2
-		  AND ($3::uuid IS NULL OR u.institution_id = $3)`, inst)
-	if err != nil {
-		return nil, err
+	if userScopePred(sc, "u", 3) == "FALSE" {
+		drop("streak_bands")
+	} else {
+		streaks, err := s.countBands(ctx, streakBands, `
+			SELECT COUNT(*)
+			FROM streaks st
+			JOIN users u ON u.id = st.user_id
+			WHERE u.deleted_at IS NULL
+			  AND st.current_streak >= $1 AND st.current_streak < $2
+			  AND `+userScopePred(sc, "u", 3), args...)
+		if err != nil {
+			return nil, nil, err
+		}
+		out["streak_bands"] = streaks
 	}
-	out["streak_bands"] = streaks
 
-	if out["role_mix"], err = s.labelledCounts(ctx, `
+	if userScopePred(sc, "users", 1) == "FALSE" {
+		drop("role_mix")
+	} else if out["role_mix"], err = s.labelledCounts(ctx, `
 		SELECT role AS label, COUNT(*) AS count
 		FROM users
-		WHERE deleted_at IS NULL AND ($1::uuid IS NULL OR institution_id = $1)
-		GROUP BY 1 ORDER BY 2 DESC`, inst); err != nil {
-		return nil, err
+		WHERE deleted_at IS NULL AND `+userScopePred(sc, "users", 1)+`
+		GROUP BY 1 ORDER BY 2 DESC`, args...); err != nil {
+		return nil, nil, err
 	}
 
-	// Institutions have no parent institution, so this shape ignores the filter.
-	if out["institution_type_mix"], err = s.labelledCounts(ctx, `
+	// Institutions have no parent institution, so this shape answers no scope.
+	if sc.Active() {
+		drop("institution_type_mix")
+	} else if out["institution_type_mix"], err = s.labelledCounts(ctx, `
 		SELECT type AS label, COUNT(*) AS count
 		FROM institutions WHERE deleted_at IS NULL GROUP BY 1 ORDER BY 2 DESC`); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	if out["quiz_status_funnel"], err = s.labelledCounts(ctx, `
+	if quizScopePred(sc, "quizzes", 1) == "FALSE" {
+		drop("quiz_status_funnel")
+	} else if out["quiz_status_funnel"], err = s.labelledCounts(ctx, `
 		SELECT status AS label, COUNT(*) AS count
 		FROM quizzes
-		WHERE deleted_at IS NULL AND ($1::uuid IS NULL OR institution_id = $1)
-		GROUP BY 1 ORDER BY 2 DESC`, inst); err != nil {
-		return nil, err
+		WHERE deleted_at IS NULL AND `+quizScopePred(sc, "quizzes", 1)+`
+		GROUP BY 1 ORDER BY 2 DESC`, args...); err != nil {
+		return nil, nil, err
 	}
 
-	return out, nil
+	return out, dropped, nil
 }
 
-func (s *MetricsService) labelledHistogram(ctx context.Context, inst any) ([]map[string]any, error) {
+func (s *MetricsService) labelledHistogram(ctx context.Context, sc Scope) ([]map[string]any, error) {
+	// The quizzes scope filters the attempt's quiz; the others filter the taker.
+	pred := userScopePred(sc, "u", 1)
+	if sc.Kind == ScopeQuizzes {
+		pred = "qa.quiz_id IN (SELECT id FROM quizzes WHERE created_by = $1)"
+	}
 	rows, err := s.db.Query(ctx, `
 		WITH bins AS (SELECT generate_series(0, 90, 10) AS lo)
 		SELECT b.lo, b.lo + 10 AS hi, COALESCE(c.n, 0) AS count
@@ -211,10 +285,10 @@ func (s *MetricsService) labelledHistogram(ctx context.Context, inst any) ([]map
 		  FROM quiz_attempts qa
 		  JOIN users u ON u.id = qa.user_id
 		  WHERE qa.status = 'completed' AND qa.score_pct IS NOT NULL
-		    AND ($1::uuid IS NULL OR u.institution_id = $1)
+		    AND `+pred+`
 		  GROUP BY 1
 		) c ON c.lo = b.lo
-		ORDER BY b.lo`, inst)
+		ORDER BY b.lo`, scopeArgs(sc)...)
 	if err != nil {
 		return nil, err
 	}
@@ -234,10 +308,11 @@ func (s *MetricsService) labelledHistogram(ctx context.Context, inst any) ([]map
 // PointsLiability is a schedule of points about to expire, grouped by month.
 // Not a time series of the past, which is why it is its own endpoint.
 // Served by idx_ledger_expires_positive from migration 019.
-func (s *MetricsService) PointsLiability(ctx context.Context, instID *string) (map[string]any, error) {
-	var inst any
-	if instID != nil {
-		inst = *instID
+func (s *MetricsService) PointsLiability(ctx context.Context, sc Scope) (map[string]any, error) {
+	// points_ledger has no quiz linkage. Returning an empty schedule would read
+	// as "nothing is expiring", so refuse instead.
+	if sc.Kind == ScopeQuizzes {
+		return nil, ErrScopeUnsupported
 	}
 
 	rows, err := s.db.Query(ctx, `
@@ -248,9 +323,9 @@ func (s *MetricsService) PointsLiability(ctx context.Context, instID *string) (m
 		WHERE pl.amount > 0
 		  AND pl.expires_at IS NOT NULL
 		  AND pl.expires_at > now()
-		  AND ($1::uuid IS NULL OR u.institution_id = $1)
+		  AND `+userScopePred(sc, "u", 1)+`
 		GROUP BY 1
-		ORDER BY 1`, inst)
+		ORDER BY 1`, scopeArgs(sc)...)
 	if err != nil {
 		return nil, err
 	}

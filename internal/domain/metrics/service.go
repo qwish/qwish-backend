@@ -1,4 +1,4 @@
-package admin
+package metrics
 
 import (
 	"context"
@@ -273,7 +273,7 @@ func (s *MetricsService) PointsLiability(ctx context.Context, instID *string) (m
 
 	return map[string]any{
 		"as_of":    time.Now().UTC().Format(time.RFC3339),
-		"timezone": bucketTimezone,
+		"timezone": BucketTimezone,
 		"total":    total,
 		"months":   months,
 	}, nil

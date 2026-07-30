@@ -7,16 +7,16 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/domain/metrics"
 	"github.com/qwish/backend/internal/middleware"
 )
 
-type MetricsHandler struct{ svc *MetricsService }
+type MetricsHandler struct{ svc *metrics.MetricsService }
 
 func NewMetricsHandler(db *pgxpool.Pool) *MetricsHandler {
-	return &MetricsHandler{svc: NewMetricsService(db)}
+	return &MetricsHandler{svc: metrics.NewMetricsService(db)}
 }
 
-const bucketTimezone = "Asia/Kolkata"
 
 // failed logs the cause before the opaque 500. Without this a query error is
 // invisible — the client sees "an unexpected error occurred" and the server
@@ -31,9 +31,9 @@ func failed(w http.ResponseWriter, what string, err error) {
 func (h *MetricsHandler) Catalog(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	middleware.JSON(w, http.StatusOK, map[string]any{
-		"metrics":       Catalog(),
-		"granularities": Granularities,
-		"timezone":      bucketTimezone,
+		"metrics":       metrics.Catalog(),
+		"granularities": metrics.Granularities,
+		"timezone":      metrics.BucketTimezone,
 	})
 }
 
@@ -61,7 +61,7 @@ func (h *MetricsHandler) resolveInstitution(w http.ResponseWriter, r *http.Reque
 func (h *MetricsHandler) Metrics(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
-	win, err := ResolveWindow(q.Get("from"), q.Get("to"), q.Get("granularity"), time.Now())
+	win, err := metrics.ResolveWindow(q.Get("from"), q.Get("to"), q.Get("granularity"), time.Now())
 	if err != nil {
 		middleware.BadRequest(w, err.Error())
 		return
@@ -84,7 +84,7 @@ func (h *MetricsHandler) Metrics(w http.ResponseWriter, r *http.Request) {
 	if raw := strings.TrimSpace(q.Get("metrics")); raw != "" {
 		ids = strings.Split(raw, ",")
 	}
-	sel, dropped, err := SelectMetrics(ids, instID != nil)
+	sel, dropped, err := metrics.SelectMetrics(ids, instID != nil)
 	if err != nil {
 		middleware.BadRequest(w, err.Error())
 		return
@@ -102,10 +102,10 @@ func (h *MetricsHandler) Metrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := map[string]any{
-		"from":        win.From.Format(dateLayout),
-		"to":          win.To.Format(dateLayout),
+		"from":        win.From.Format(metrics.DateLayout),
+		"to":          win.To.Format(metrics.DateLayout),
 		"granularity": win.Gran,
-		"timezone":    bucketTimezone,
+		"timezone":    metrics.BucketTimezone,
 		"series":      series,
 		"totals":      totals,
 	}
@@ -137,8 +137,8 @@ func (h *MetricsHandler) Metrics(w http.ResponseWriter, r *http.Request) {
 		}
 		data["previous"] = prevTotals
 		data["previous_series"] = prevSeries
-		data["previous_from"] = prev.From.Format(dateLayout)
-		data["previous_to"] = prev.To.Format(dateLayout)
+		data["previous_from"] = prev.From.Format(metrics.DateLayout)
+		data["previous_to"] = prev.To.Format(metrics.DateLayout)
 	}
 
 	middleware.JSON(w, http.StatusOK, data)

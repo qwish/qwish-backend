@@ -1,4 +1,4 @@
-package admin
+package metrics
 
 import (
 	"fmt"
@@ -10,6 +10,10 @@ import (
 // with no tzdata installed — India has no DST, so the offset is constant and
 // the simplification is lossless.
 var IST = time.FixedZone("IST", 5*60*60+30*60)
+
+// BucketTimezone is IST's name on the wire. Every response says which timezone
+// it bucketed in, or "today" means different things to different readers.
+const BucketTimezone = "Asia/Kolkata"
 
 type Granularity string
 
@@ -80,7 +84,9 @@ type Window struct {
 	Gran Granularity
 }
 
-const dateLayout = "2006-01-02"
+// DateLayout is the wire format for every date the analytics API accepts or
+// returns. Exported because handlers in other packages format with it.
+const DateLayout = "2006-01-02"
 
 // ResolveWindow parses the request's from/to/granularity, applies defaults, and
 // enforces the caps. now is injected so this stays a pure function.
@@ -95,7 +101,7 @@ func ResolveWindow(from, to, gran string, now time.Time) (Window, error) {
 
 	toT := today
 	if to != "" {
-		toT, err = time.ParseInLocation(dateLayout, to, IST)
+		toT, err = time.ParseInLocation(DateLayout, to, IST)
 		if err != nil {
 			return Window{}, fmt.Errorf("invalid 'to' date %q; expected YYYY-MM-DD", to)
 		}
@@ -104,7 +110,7 @@ func ResolveWindow(from, to, gran string, now time.Time) (Window, error) {
 	// Default window is the last 30 days inclusive: today-29 .. today.
 	fromT := toT.AddDate(0, 0, -29)
 	if from != "" {
-		fromT, err = time.ParseInLocation(dateLayout, from, IST)
+		fromT, err = time.ParseInLocation(DateLayout, from, IST)
 		if err != nil {
 			return Window{}, fmt.Errorf("invalid 'from' date %q; expected YYYY-MM-DD", from)
 		}
@@ -112,7 +118,7 @@ func ResolveWindow(from, to, gran string, now time.Time) (Window, error) {
 
 	if fromT.After(toT) {
 		return Window{}, fmt.Errorf("'from' (%s) is after 'to' (%s)",
-			fromT.Format(dateLayout), toT.Format(dateLayout))
+			fromT.Format(DateLayout), toT.Format(DateLayout))
 	}
 
 	w := Window{From: fromT, To: toT, Gran: g}

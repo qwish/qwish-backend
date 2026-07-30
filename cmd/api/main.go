@@ -81,6 +81,7 @@ func main() {
 	institutionH := institution.NewHandler(pool, notifSvc, cfg.AppURL, cfg.TeacherURL)
 	teacherH := teacher.NewHandler(pool)
 	adminH := admin.NewHandler(pool, cfg, notifSvc)
+	metricsH := admin.NewMetricsHandler(pool)
 	onboardingH := onboarding.NewHandler(pool, cfg.TurnstileSecret)
 	contactH := contact.NewHandler(pool, notifSvc, cfg.BrandURL, cfg.TurnstileSecret)
 	notifH := notification.NewHandler(notifSvc)
@@ -405,6 +406,12 @@ func main() {
 					// Overview (all roles)
 					r.Get("/overview", adminH.Overview)
 					r.Get("/activity-feed", adminH.ActivityFeed)
+
+					// Analytics (all roles, read-only).
+					// /metrics/catalog is registered before /metrics so chi does
+					// not read "catalog" as a wildcard segment.
+					r.Get("/metrics/catalog", metricsH.Catalog)
+					r.Get("/metrics", metricsH.Metrics)
 
 					// Demo quizzes (super_admin only): author + play analytics
 					r.With(mw.RequireRole("super_admin")).Get("/demo/quizzes", demoH.AdminList)

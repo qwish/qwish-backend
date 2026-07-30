@@ -306,3 +306,50 @@ func TestDistributionsScoped(t *testing.T) {
 		t.Fatalf("scoped Distributions: %v", err)
 	}
 }
+
+// Liability is forward-looking: a schedule of what is about to expire, not a
+// series of the past. Every bucket must be in the current month or later.
+func TestPointsLiabilityIsForwardLooking(t *testing.T) {
+	pool := openTestDB(t)
+	svc := NewMetricsService(pool)
+
+	got, err := svc.PointsLiability(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("PointsLiability: %v", err)
+	}
+	for _, key := range []string{"as_of", "total", "months"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("missing %q in liability response", key)
+		}
+	}
+
+	months, ok := got["months"].([]map[string]any)
+	if !ok {
+		t.Fatalf("months has type %T, want []map[string]any", got["months"])
+	}
+	thisMonth := time.Now().In(IST).Format("2006-01")
+	var sum int64
+	for _, m := range months {
+		bucket, _ := m["month"].(string)
+		if bucket < thisMonth {
+			t.Errorf("month %q is in the past; liability must only look forward", bucket)
+		}
+		if v, ok := m["points"].(int64); ok {
+			sum += v
+		}
+	}
+	// total must equal the sum of the months, or the headline number and the
+	// chart disagree.
+	if total, ok := got["total"].(int64); ok && total != sum {
+		t.Errorf("total = %d but months sum to %d", total, sum)
+	}
+}
+
+func TestPointsLiabilityScoped(t *testing.T) {
+	pool := openTestDB(t)
+	svc := NewMetricsService(pool)
+	inst := "11111111-1111-1111-1111-111111111111"
+	if _, err := svc.PointsLiability(context.Background(), &inst); err != nil {
+		t.Fatalf("scoped PointsLiability: %v", err)
+	}
+}

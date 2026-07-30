@@ -147,3 +147,16 @@ func (h *MetricsHandler) Distributions(w http.ResponseWriter, r *http.Request) {
 	}
 	middleware.JSON(w, http.StatusOK, data)
 }
+
+func (h *MetricsHandler) PointsLiability(w http.ResponseWriter, r *http.Request) {
+	instID, ok := h.resolveInstitution(w, r)
+	if !ok {
+		return
+	}
+	data, err := h.svc.PointsLiability(r.Context(), instID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, data)
+}

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -228,6 +229,54 @@ func (s *MetricsService) labelledHistogram(ctx context.Context, inst any) ([]map
 		out = append(out, map[string]any{"lo": lo, "hi": hi, "count": n})
 	}
 	return out, rows.Err()
+}
+
+// PointsLiability is a schedule of points about to expire, grouped by month.
+// Not a time series of the past, which is why it is its own endpoint.
+// Served by idx_ledger_expires_positive from migration 019.
+func (s *MetricsService) PointsLiability(ctx context.Context, instID *string) (map[string]any, error) {
+	var inst any
+	if instID != nil {
+		inst = *instID
+	}
+
+	rows, err := s.db.Query(ctx, `
+		SELECT to_char(date_trunc('month', pl.expires_at AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM') AS month,
+		       SUM(pl.amount) AS points
+		FROM points_ledger pl
+		JOIN users u ON u.id = pl.user_id
+		WHERE pl.amount > 0
+		  AND pl.expires_at IS NOT NULL
+		  AND pl.expires_at > now()
+		  AND ($1::uuid IS NULL OR u.institution_id = $1)
+		GROUP BY 1
+		ORDER BY 1`, inst)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	months := []map[string]any{}
+	var total int64
+	for rows.Next() {
+		var month string
+		var points int64
+		if err := rows.Scan(&month, &points); err != nil {
+			return nil, err
+		}
+		months = append(months, map[string]any{"month": month, "points": points})
+		total += points
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return map[string]any{
+		"as_of":    time.Now().UTC().Format(time.RFC3339),
+		"timezone": bucketTimezone,
+		"total":    total,
+		"months":   months,
+	}, nil
 }
 
 func (s *MetricsService) InstitutionExists(ctx context.Context, id string) (bool, error) {

@@ -134,3 +134,16 @@ func (h *MetricsHandler) Metrics(w http.ResponseWriter, r *http.Request) {
 
 	middleware.JSON(w, http.StatusOK, data)
 }
+
+func (h *MetricsHandler) Distributions(w http.ResponseWriter, r *http.Request) {
+	instID, ok := h.resolveInstitution(w, r)
+	if !ok {
+		return
+	}
+	data, err := h.svc.Distributions(r.Context(), instID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, data)
+}

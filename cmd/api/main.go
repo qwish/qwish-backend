@@ -412,6 +412,7 @@ func main() {
 					// not read "catalog" as a wildcard segment.
 					r.Get("/metrics/catalog", metricsH.Catalog)
 					r.Get("/metrics", metricsH.Metrics)
+					r.Get("/distributions", metricsH.Distributions)
 
 					// Demo quizzes (super_admin only): author + play analytics
 					r.With(mw.RequireRole("super_admin")).Get("/demo/quizzes", demoH.AdminList)

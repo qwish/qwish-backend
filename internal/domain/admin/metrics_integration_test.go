@@ -225,3 +225,84 @@ func TestInstitutionExistsRejectsUnknownID(t *testing.T) {
 		t.Error("a random uuid reported as an existing institution")
 	}
 }
+
+func TestDistributionsReturnsAllShapes(t *testing.T) {
+	pool := openTestDB(t)
+	svc := NewMetricsService(pool)
+
+	got, err := svc.Distributions(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Distributions: %v", err)
+	}
+	for _, key := range []string{
+		"score_histogram", "difficulty_bands", "streak_bands",
+		"role_mix", "institution_type_mix", "quiz_status_funnel",
+	} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("missing %q in distributions response", key)
+		}
+	}
+}
+
+// Difficulty bands are fixed server-side so the histogram and the categorical
+// legend cannot drift apart. All five must always be present, even at zero.
+func TestDifficultyBandsAlwaysFive(t *testing.T) {
+	pool := openTestDB(t)
+	svc := NewMetricsService(pool)
+
+	got, err := svc.Distributions(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Distributions: %v", err)
+	}
+	bands, ok := got["difficulty_bands"].([]map[string]any)
+	if !ok {
+		t.Fatalf("difficulty_bands has type %T, want []map[string]any", got["difficulty_bands"])
+	}
+	if len(bands) != 5 {
+		t.Fatalf("len(difficulty_bands) = %d, want 5", len(bands))
+	}
+	wantLabels := []string{"Very easy", "Easy", "Moderate", "Hard", "Very hard"}
+	for i, b := range bands {
+		if b["label"] != wantLabels[i] {
+			t.Errorf("band %d label = %v, want %q", i, b["label"], wantLabels[i])
+		}
+	}
+}
+
+// The score histogram is ten fixed 10-point bins, zero-filled, so the x-axis is
+// stable regardless of what data exists.
+func TestScoreHistogramHasTenFixedBins(t *testing.T) {
+	pool := openTestDB(t)
+	svc := NewMetricsService(pool)
+
+	got, err := svc.Distributions(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Distributions: %v", err)
+	}
+	bins, ok := got["score_histogram"].([]map[string]any)
+	if !ok {
+		t.Fatalf("score_histogram has type %T, want []map[string]any", got["score_histogram"])
+	}
+	if len(bins) != 10 {
+		t.Fatalf("len(score_histogram) = %d, want 10", len(bins))
+	}
+	for i, b := range bins {
+		if lo, _ := toFloat(b["lo"]); int(lo) != i*10 {
+			t.Errorf("bin %d lo = %v, want %d", i, b["lo"], i*10)
+		}
+		if b["count"] == nil {
+			t.Errorf("bin %d count is nil, want a zero-filled number", i)
+		}
+	}
+}
+
+// Scoping must run without error on every shape, including the ones that reach
+// their institution through a join.
+func TestDistributionsScoped(t *testing.T) {
+	pool := openTestDB(t)
+	svc := NewMetricsService(pool)
+	inst := "11111111-1111-1111-1111-111111111111"
+	if _, err := svc.Distributions(context.Background(), &inst); err != nil {
+		t.Fatalf("scoped Distributions: %v", err)
+	}
+}

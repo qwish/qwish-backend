@@ -382,24 +382,32 @@ func (s *Service) Unpublish(ctx context.Context, quizID, ownerID string) error {
 // ReorderQuestions sets the position of each question in the given order. The
 // caller must own the quiz; question IDs not belonging to the quiz are ignored.
 func (s *Service) ReorderQuestions(ctx context.Context, quizID, ownerID string, order []string) error {
-	var check int
-	s.db.QueryRow(ctx, `SELECT 1 FROM quizzes WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL`,
-		quizID, ownerID).Scan(&check)
-	if check == 0 {
-		return fmt.Errorf("not found or forbidden")
+	// Ownership check and the whole reorder in one statement. This used to be a
+	// SELECT plus a transaction with one UPDATE per question — a round trip per
+	// question in the quiz. The ownership CTE returns no rows when the caller
+	// does not own the quiz, so the UPDATE's join matches nothing and the
+	// RowsAffected check below turns that into the same error as before.
+	if len(order) == 0 {
+		return nil
 	}
-	tx, err := s.db.Begin(ctx)
+	ct, err := s.db.Exec(ctx,
+		`WITH owned AS (
+		   SELECT id FROM quizzes
+		    WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL
+		 )
+		 UPDATE questions q
+		    SET position = o.ord
+		   FROM unnest($3::uuid[]) WITH ORDINALITY AS o(qid, ord)
+		  WHERE q.id = o.qid
+		    AND q.quiz_id = (SELECT id FROM owned)`,
+		quizID, ownerID, order)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
-	for i, qid := range order {
-		if _, err := tx.Exec(ctx,
-			`UPDATE questions SET position=$1 WHERE id=$2 AND quiz_id=$3`, i+1, qid, quizID); err != nil {
-			return err
-		}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("not found or forbidden")
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 func (s *Service) SaveQuiz(ctx context.Context, userID, quizID string) error {
@@ -522,19 +530,20 @@ func (s *Service) GetTeacherResults(ctx context.Context, quizID, teacherID strin
 }
 
 func (s *Service) getResults(ctx context.Context, quizID string) (map[string]interface{}, error) {
-	var totalAttempts int
+	// One pass over quiz_attempts for the completed count, the average score and
+	// the started count — they were three separate round trips scanning the same
+	// rows twice. question_count comes along as a scalar subquery.
+	var totalAttempts, started, questionCount int
 	var avgScore float64
 	s.db.QueryRow(ctx,
-		`SELECT COUNT(*), COALESCE(AVG(score_pct),0) FROM quiz_attempts WHERE quiz_id=$1 AND status='completed'`, quizID,
-	).Scan(&totalAttempts, &avgScore)
-
-	var questionCount int
-	s.db.QueryRow(ctx, `SELECT question_count FROM quizzes WHERE id=$1`, quizID).Scan(&questionCount)
+		`SELECT COUNT(*) FILTER (WHERE status='completed'),
+		        COALESCE(AVG(score_pct) FILTER (WHERE status='completed'), 0),
+		        COUNT(*),
+		        COALESCE((SELECT question_count FROM quizzes WHERE id=$1), 0)
+		 FROM quiz_attempts WHERE quiz_id=$1`, quizID,
+	).Scan(&totalAttempts, &avgScore, &started, &questionCount)
 
 	completionRate := 0.0
-	// simplified: all who started vs completed
-	var started int
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quiz_attempts WHERE quiz_id=$1`, quizID).Scan(&started)
 	if started > 0 {
 		completionRate = float64(totalAttempts) / float64(started) * 100
 	}

@@ -107,9 +107,13 @@ func WithReference(v string) EmitOpt { return func(o *emitOpts) { o.reference = 
 
 func (s *Service) List(ctx context.Context, userID string, page, limit int) ([]Notification, int, int, error) {
 	offset := (page - 1) * limit
+	// Both counts scan the same rows, so one aggregate with a FILTER replaces
+	// two round trips and two index scans. This endpoint is polled on every app
+	// open, which makes it one of the highest-frequency reads in the API.
 	var total, unread int
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM user_notifications WHERE user_id=$1`, userID).Scan(&total)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM user_notifications WHERE user_id=$1 AND read_at IS NULL`, userID).Scan(&unread)
+	s.db.QueryRow(ctx,
+		`SELECT COUNT(*), COUNT(*) FILTER (WHERE read_at IS NULL)
+		 FROM user_notifications WHERE user_id=$1`, userID).Scan(&total, &unread)
 
 	rows, err := s.db.Query(ctx,
 		`SELECT id, kind, title, body, icon, color, reference, read_at, created_at

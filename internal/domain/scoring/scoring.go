@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -31,8 +33,51 @@ type ConfidenceTable struct {
 	NotSureWrong         float64 `json:"not_sure_wrong"`
 }
 
+// point_economy_config is a handful of rows that changes when an admin edits the
+// economy — effectively never relative to request volume. Every quiz start and
+// every snapshot-miss used to pay a round trip for it; against a remote Supabase
+// database that is 30–80ms of pure latency on the hottest path in the app.
+// ponytail: process-local cache, no invalidation hook. An admin edit takes up to
+// configTTL to appear, and each replica expires independently. If that ever
+// matters, add a NOTIFY listener rather than shortening the TTL.
+const configTTL = 30 * time.Second
+
+var (
+	configMu     sync.RWMutex
+	cachedConfig *Config
+	cachedAt     time.Time
+)
+
+// InvalidateConfigCache drops the cached config so the next LoadConfig re-reads
+// the table. Call it after writing point_economy_config.
+func InvalidateConfigCache() {
+	configMu.Lock()
+	cachedConfig, cachedAt = nil, time.Time{}
+	configMu.Unlock()
+}
+
 // LoadConfig reads all point economy config keys from DB and returns a Config.
+// Results are cached for configTTL; the returned *Config is shared and must be
+// treated as read-only.
 func LoadConfig(ctx context.Context, db *pgxpool.Pool) (*Config, error) {
+	configMu.RLock()
+	cfg, at := cachedConfig, cachedAt
+	configMu.RUnlock()
+	if cfg != nil && time.Since(at) < configTTL {
+		return cfg, nil
+	}
+
+	cfg, err := loadConfigUncached(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	configMu.Lock()
+	cachedConfig, cachedAt = cfg, time.Now()
+	configMu.Unlock()
+	return cfg, nil
+}
+
+func loadConfigUncached(ctx context.Context, db *pgxpool.Pool) (*Config, error) {
 	rows, err := db.Query(ctx, `SELECT key, value FROM point_economy_config`)
 	if err != nil {
 		return nil, err

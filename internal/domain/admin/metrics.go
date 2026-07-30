@@ -96,19 +96,54 @@ var streakBands = []band{
 	{"31+ days", 31, 1e9},
 }
 
-// countBands runs one COUNT per band. Keeping the edges in Go means the labels
-// and the ranges live in one place instead of being duplicated in SQL.
+// countBands counts every band in a single round trip. The band edges stay in
+// Go so the labels and ranges live in one place instead of being duplicated in
+// SQL; they are shipped as arrays and the caller's query runs once per band as
+// a LATERAL. The per-band loop this replaces cost one round trip per band — six
+// for the streak histogram — for counts Postgres computes in one pass.
+//
+// The query must reference the band edges as the lateral columns e.lo and e.hi
+// (not placeholders: inside a LATERAL, $1 is still a query parameter and would
+// bind to the whole array). $1 is the institution filter.
 func (s *MetricsService) countBands(
 	ctx context.Context, bands []band, query string, inst any,
 ) ([]map[string]any, error) {
-	out := make([]map[string]any, 0, len(bands))
-	for _, b := range bands {
+	los := make([]float64, len(bands))
+	his := make([]float64, len(bands))
+	for i, b := range bands {
+		los[i], his[i] = b.Lo, b.Hi
+	}
+
+	rows, err := s.db.Query(ctx,
+		`SELECT e.ord, c.count
+		   FROM unnest($2::float8[], $3::float8[]) WITH ORDINALITY AS e(lo, hi, ord)
+		   CROSS JOIN LATERAL (`+query+`) AS c(count)
+		  ORDER BY e.ord`,
+		inst, los, his)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := make([]int64, len(bands))
+	for rows.Next() {
+		var ord int
 		var n int64
-		if err := s.db.QueryRow(ctx, query, b.Lo, b.Hi, inst).Scan(&n); err != nil {
+		if err := rows.Scan(&ord, &n); err != nil {
 			return nil, err
 		}
+		if ord >= 1 && ord <= len(counts) {
+			counts[ord-1] = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]map[string]any, 0, len(bands))
+	for i, b := range bands {
 		out = append(out, map[string]any{
-			"label": b.Label, "lo": b.Lo, "hi": b.Hi, "count": n,
+			"label": b.Label, "lo": b.Lo, "hi": b.Hi, "count": counts[i],
 		})
 	}
 	return out, nil
@@ -155,8 +190,8 @@ func (s *MetricsService) Distributions(ctx context.Context, instID *string) (map
 		FROM questions qn
 		JOIN quizzes q ON q.id = qn.quiz_id
 		WHERE q.deleted_at IS NULL
-		  AND qn.difficulty >= $1 AND qn.difficulty < $2
-		  AND ($3::uuid IS NULL OR q.institution_id = $3)`, inst)
+		  AND qn.difficulty >= e.lo AND qn.difficulty < e.hi
+		  AND ($1::uuid IS NULL OR q.institution_id = $1)`, inst)
 	if err != nil {
 		return nil, err
 	}
@@ -168,8 +203,8 @@ func (s *MetricsService) Distributions(ctx context.Context, instID *string) (map
 		FROM streaks st
 		JOIN users u ON u.id = st.user_id
 		WHERE u.deleted_at IS NULL
-		  AND st.current_streak >= $1 AND st.current_streak < $2
-		  AND ($3::uuid IS NULL OR u.institution_id = $3)`, inst)
+		  AND st.current_streak >= e.lo AND st.current_streak < e.hi
+		  AND ($1::uuid IS NULL OR u.institution_id = $1)`, inst)
 	if err != nil {
 		return nil, err
 	}

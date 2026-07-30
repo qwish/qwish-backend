@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/config"
 	"github.com/qwish/backend/internal/domain/notification"
+	"github.com/qwish/backend/internal/domain/scoring"
 	"github.com/qwish/backend/internal/middleware"
 	"github.com/qwish/backend/internal/supabase"
 )
@@ -814,6 +815,7 @@ func (h *Handler) UpdatePointEconomy(w http.ResponseWriter, r *http.Request) {
 		middleware.InternalError(w)
 		return
 	}
+	scoring.InvalidateConfigCache()
 
 	// Audit with old/new values and optional reason. audit_log.admin_id is NOT
 	// NULL, so only record when the actor maps to an admin_accounts row.

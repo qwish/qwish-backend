@@ -144,7 +144,17 @@ type SyncResult struct {
 // Sync persists a batch of offline practice sessions. Re-syncing the same id is
 // a no-op (idempotent). Returns the number of newly-stored sessions.
 func (s *Service) Sync(ctx context.Context, userID string, results []SyncResult) (int, error) {
-	stored := 0
+	// One insert for the whole batch instead of one per session. A client coming
+	// back online after a long trip can sync dozens of sessions at once, and the
+	// per-row version paid a full network round trip for each.
+	ids := make([]string, 0, len(results))
+	quizIDs := make([]*string, 0, len(results))
+	totals := make([]int, 0, len(results))
+	corrects := make([]int, 0, len(results))
+	scores := make([]float64, 0, len(results))
+	answers := make([][]byte, 0, len(results))
+	completedAts := make([]time.Time, 0, len(results))
+
 	for _, res := range results {
 		if res.ID == "" {
 			continue
@@ -153,22 +163,34 @@ func (s *Service) Sync(ctx context.Context, userID string, results []SyncResult)
 		if res.CompletedAt != nil {
 			completed = *res.CompletedAt
 		}
-		var answers []byte
+		var ans []byte
 		if len(res.Answers) > 0 {
-			answers = res.Answers
+			ans = res.Answers
 		}
-		ct, err := s.db.Exec(ctx,
-			`INSERT INTO practice_sessions
-			   (id, user_id, quiz_id, total_questions, correct_count, score_pct, answers, completed_at)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-			 ON CONFLICT (id) DO NOTHING`,
-			res.ID, userID, res.QuizID, res.TotalQuestions, res.CorrectCount, res.ScorePct, answers, completed)
-		if err != nil {
-			return stored, err
-		}
-		stored += int(ct.RowsAffected())
+		ids = append(ids, res.ID)
+		quizIDs = append(quizIDs, res.QuizID)
+		totals = append(totals, res.TotalQuestions)
+		corrects = append(corrects, res.CorrectCount)
+		scores = append(scores, res.ScorePct)
+		answers = append(answers, ans)
+		completedAts = append(completedAts, completed)
 	}
-	return stored, nil
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	ct, err := s.db.Exec(ctx,
+		`INSERT INTO practice_sessions
+		   (id, user_id, quiz_id, total_questions, correct_count, score_pct, answers, completed_at)
+		 SELECT id, $2, quiz_id, total_questions, correct_count, score_pct, answers, completed_at
+		   FROM unnest($1::uuid[], $3::uuid[], $4::int[], $5::int[], $6::float8[], $7::jsonb[], $8::timestamptz[])
+		     AS t(id, quiz_id, total_questions, correct_count, score_pct, answers, completed_at)
+		 ON CONFLICT (id) DO NOTHING`,
+		ids, userID, quizIDs, totals, corrects, scores, answers, completedAts)
+	if err != nil {
+		return 0, err
+	}
+	return int(ct.RowsAffected()), nil
 }
 
 // nullable converts an empty string to a nil for SQL params that compare against

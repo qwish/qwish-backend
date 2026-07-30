@@ -323,9 +323,19 @@ src/components/widgets/registry.ts
 src/components/widgets/widget-config.tsx
 src/components/widgets/widget-view.tsx
 src/components/analytics/control-row.tsx
+src/components/analytics/scope-banner.tsx
+src/components/badge.tsx           (replaces the shadcn one widget-view expects)
+src/components/fetch-error.tsx
+src/hooks/use-metrics-query.ts
+src/hooks/use-dashboards.ts
 src/lib/metrics.ts
+src/lib/csv.ts
 src/app/(dashboard)/analytics/page.tsx
 ```
+
+That is roughly 4,000 lines per app, not the 2,700 an earlier count of
+`components/` alone suggested: the hooks, the CSV helper and the two small
+components above are dependencies of the ported files.
 
 `src/lib/utils.ts` gains `cn()` if absent. `src/lib/metrics.ts` is repointed at
 `/institution/*` or `/teacher/*` and goes through the app's existing
@@ -417,11 +427,20 @@ error.
 - `qwish-institute-dashboard/API_DOC.md` and `qwish-teacher-panel/API_DOC.md`
   each gain an "Analytics" section covering their own slice.
 
-### 4.9 Out of scope
+### 4.9 Frontend testing
 
-Neither Next app has a test suite configured, and none is added here. Backend
-tests (3.8) carry the correctness burden; the frontend contract they protect is
-the `kind` rule in 4.7 and the two signals in 4.5.
+Neither Next app has a test runner configured, and no framework is added. Both
+run on bun, whose built-in `bun test` executes TypeScript with no dependency and
+no config, so each app gets **one** test file — `src/lib/metrics.test.ts` —
+covering the pure functions that would otherwise fail silently rather than
+loudly: `delta` (a hardcoded trend arrow is exactly the bug this replaced),
+`isFoldable` (the `kind` rule from 4.7), `formatMetric`, `slotFor`, and the
+window caps that mirror the server's.
+
+Components are not unit-tested. Their contract is the two signals in 4.5, and it
+is verified by the manual checks each plan's page task ends with.
+
+Backend tests (3.8) carry the rest of the correctness burden.
 
 ---
 

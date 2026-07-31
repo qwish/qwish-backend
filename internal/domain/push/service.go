@@ -179,14 +179,20 @@ func (s *Service) SendToUser(ctx context.Context, userID string, p Payload) {
 		rows.Scan(&t)
 		tokens = append(tokens, t)
 	}
+	// Collect dead tokens and prune them in one DELETE rather than one per
+	// token — a user with several stale devices paid a round trip each.
+	var dead []string
 	for _, t := range tokens {
 		if err := s.sendOne(ctx, t, p); err != nil {
 			if errors.Is(err, errInvalidToken) {
-				s.db.Exec(ctx, `DELETE FROM device_tokens WHERE token=$1`, t)
+				dead = append(dead, t)
 				continue
 			}
 			log.Printf("[push] send to token: %v", err)
 		}
+	}
+	if len(dead) > 0 {
+		s.db.Exec(ctx, `DELETE FROM device_tokens WHERE token = ANY($1)`, dead)
 	}
 }
 

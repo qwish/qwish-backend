@@ -54,11 +54,47 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 	}
 	defer tx.Rollback(ctx)
 
-	// Get current timezone for user's institution
+	// Ensure the streak row exists and read it locked, together with the
+	// institution timezone, in one round trip. The old code did a timezone
+	// SELECT, a streak SELECT, and — on the common first-completion path — an
+	// INSERT plus a second SELECT: four exchanges for data that one statement
+	// returns. The upsert is unconditional and idempotent, so the "row missing"
+	// branch disappears entirely.
 	var timezone string
-	tx.QueryRow(ctx,
-		`SELECT COALESCE(i.timezone,'UTC') FROM users u LEFT JOIN institutions i ON i.id=u.institution_id WHERE u.id=$1`, userID,
-	).Scan(&timezone)
+	var current, longest int
+	var lastDate *string
+	var grace, m7, m15, m30 bool
+
+	err = tx.QueryRow(ctx,
+		`WITH ins AS (
+		   INSERT INTO streaks (user_id) VALUES ($1) ON CONFLICT DO NOTHING
+		 )
+		 SELECT COALESCE(i.timezone, 'UTC'),
+		        s.current_streak, s.longest_streak, s.last_completed_date::text,
+		        s.grace_window_active, s.milestone_7_claimed,
+		        s.milestone_15_claimed, s.milestone_30_claimed
+		   FROM users u
+		   LEFT JOIN institutions i ON i.id = u.institution_id
+		   LEFT JOIN streaks s ON s.user_id = u.id
+		  WHERE u.id = $1
+		    FOR NO KEY UPDATE OF s`, userID,
+	).Scan(&timezone, &current, &longest, &lastDate, &grace, &m7, &m15, &m30)
+	if err != nil {
+		// The upsert above runs in the same snapshot as the SELECT, so a row
+		// created by this very statement is not yet visible to it. Re-read.
+		if err = tx.QueryRow(ctx,
+			`SELECT COALESCE((SELECT i.timezone FROM users u
+			                    JOIN institutions i ON i.id = u.institution_id
+			                   WHERE u.id=$1), 'UTC'),
+			        current_streak, longest_streak, last_completed_date::text,
+			        grace_window_active, milestone_7_claimed,
+			        milestone_15_claimed, milestone_30_claimed
+			   FROM streaks WHERE user_id=$1 FOR NO KEY UPDATE`, userID,
+		).Scan(&timezone, &current, &longest, &lastDate, &grace, &m7, &m15, &m30); err != nil {
+			timezone = "UTC"
+			current, longest, lastDate, grace, m7, m15, m30 = 0, 0, nil, false, false, false, false
+		}
+	}
 
 	loc, err := time.LoadLocation(timezone)
 	if err != nil {
@@ -67,28 +103,6 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 	today := time.Now().In(loc).Truncate(24 * time.Hour)
 	todayDate := today.Format("2006-01-02")
 	yesterdayDate := today.AddDate(0, 0, -1).Format("2006-01-02")
-
-	var current, longest int
-	var lastDate *string
-	var grace, m7, m15, m30 bool
-
-	err = tx.QueryRow(ctx,
-		`SELECT current_streak, longest_streak, last_completed_date::text, grace_window_active,
-		        milestone_7_claimed, milestone_15_claimed, milestone_30_claimed
-		 FROM streaks WHERE user_id=$1 FOR UPDATE`, userID,
-	).Scan(&current, &longest, &lastDate, &grace, &m7, &m15, &m30)
-	if err != nil {
-		// Create streak record
-		tx.Exec(ctx, `INSERT INTO streaks (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, userID)
-		err = tx.QueryRow(ctx,
-			`SELECT current_streak, longest_streak, last_completed_date::text, grace_window_active,
-			        milestone_7_claimed, milestone_15_claimed, milestone_30_claimed
-			 FROM streaks WHERE user_id=$1 FOR UPDATE`, userID,
-		).Scan(&current, &longest, &lastDate, &grace, &m7, &m15, &m30)
-		if err != nil {
-			current, longest, lastDate, grace, m7, m15, m30 = 0, 0, nil, false, false, false, false
-		}
-	}
 
 	// Already completed today → no change
 	if lastDate != nil && *lastDate == todayDate {
@@ -130,38 +144,50 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 		bonus += int64(cfg.StreakBonus30Day)
 	}
 
-	tx.Exec(ctx,
-		`UPDATE streaks SET current_streak=$1, longest_streak=$2, last_completed_date=$3,
-		 grace_window_active=false, milestone_7_claimed=$4, milestone_15_claimed=$5, milestone_30_claimed=$6,
-		 updated_at=now()
-		 WHERE user_id=$7`,
-		current, longest, todayDate, m7, m15, m30, userID)
-
-	// Update denormalized fields on users
-	tx.Exec(ctx,
-		`UPDATE users SET current_streak=$1, longest_streak=$2, last_completed_date=$3, updated_at=now() WHERE id=$4`,
-		current, longest, todayDate, userID)
-
-	// top_10 badge check
-	var rank int
-	tx.QueryRow(ctx,
-		`SELECT COUNT(*)+1 FROM users WHERE institution_id=(SELECT institution_id FROM users WHERE id=$1) AND total_points > (SELECT total_points FROM users WHERE id=$1) AND status='active'`,
-		userID,
-	).Scan(&rank)
-	if rank <= 10 {
-		tx.Exec(ctx, `INSERT INTO badges (user_id, badge_type) VALUES ($1,'top_10') ON CONFLICT DO NOTHING`, userID)
-	}
-
-	// on_a_roll badge
+	// Streak badges that depend only on the new streak length are decided here;
+	// top_10 depends on a rank the database has to compute, so it is added by
+	// the statement below rather than in Go.
+	streakBadges := []string{}
 	if current >= 7 {
-		tx.Exec(ctx, `INSERT INTO badges (user_id, badge_type) VALUES ($1,'on_a_roll') ON CONFLICT DO NOTHING`, userID)
+		streakBadges = append(streakBadges, "on_a_roll")
 	}
-	// unstoppable badge
 	if current >= 30 {
-		tx.Exec(ctx, `INSERT INTO badges (user_id, badge_type) VALUES ($1,'unstoppable') ON CONFLICT DO NOTHING`, userID)
+		streakBadges = append(streakBadges, "unstoppable")
 	}
 
-	tx.Commit(ctx)
+	// Both updates, the rank lookup, and every badge insert in one statement.
+	// This was up to six sequential round trips inside the transaction; none of
+	// them depended on another's result, so they chain as CTEs instead.
+	if _, err := tx.Exec(ctx,
+		`WITH s AS (
+		   UPDATE streaks
+		      SET current_streak=$2, longest_streak=$3, last_completed_date=$4,
+		          grace_window_active=false, milestone_7_claimed=$5,
+		          milestone_15_claimed=$6, milestone_30_claimed=$7, updated_at=now()
+		    WHERE user_id=$1
+		 ), u AS (
+		   UPDATE users
+		      SET current_streak=$2, longest_streak=$3, last_completed_date=$4, updated_at=now()
+		    WHERE id=$1
+		 ), rank AS (
+		   SELECT COUNT(*) + 1 AS r FROM users
+		    WHERE institution_id = (SELECT institution_id FROM users WHERE id=$1)
+		      AND total_points > (SELECT total_points FROM users WHERE id=$1)
+		      AND status='active'
+		 )
+		 INSERT INTO badges (user_id, badge_type)
+		 SELECT $1, bt FROM unnest($8::text[]) AS bt
+		 UNION ALL
+		 SELECT $1, 'top_10' FROM rank WHERE r <= 10
+		 ON CONFLICT DO NOTHING`,
+		userID, current, longest, todayDate, m7, m15, m30, streakBadges,
+	); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
 	return bonus, nil
 }
 

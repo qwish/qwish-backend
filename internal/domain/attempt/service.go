@@ -359,38 +359,35 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		return nil, fmt.Errorf("attempt not found or already completed")
 	}
 
-	// For knowledge_check quizzes, check whether the user has a prior completed attempt.
-	// If so this is a repeat attempt and points will be zeroed out.
-	var isRepeatAttempt bool
-	if quizType == "knowledge_check" {
-		var priorCount int
-		s.db.QueryRow(ctx,
-			`SELECT COUNT(*) FROM quiz_attempts
-			 WHERE quiz_id=$1 AND user_id=$2 AND status='completed' AND id != $3`,
-			quizID, userID, attemptID,
-		).Scan(&priorCount)
-		isRepeatAttempt = priorCount > 0
-	}
-
 	cfg, _ := scoring.ConfigFromSnapshot(cfgSnapshot)
 	if cfg == nil {
 		cfg, _ = scoring.LoadConfig(ctx, s.db)
 	}
 
-	// Load user's current streak
-	var currentStreak int
-	tx.QueryRow(ctx, `SELECT current_streak FROM streaks WHERE user_id=$1`, userID).Scan(&currentStreak)
-
-	// Load user's activity count (completed quizzes count, adding 1 for the current one)
-	var activityCount int
-	tx.QueryRow(ctx, `SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed'`, userID).Scan(&activityCount)
-	activityCount++
-
-	// Load institution multiplier
+	// One round trip for four independent scalars that used to cost four:
+	// the knowledge_check repeat guard, the current streak, the lifetime
+	// completed count, and the institution multiplier. They share no inputs, so
+	// a single SELECT of scalar subqueries is exactly equivalent and pays the
+	// network latency once instead of four times.
+	var isRepeatAttempt bool
+	var currentStreak, activityCount int
 	var instMultiplier float64 = 1.0
-	tx.QueryRow(ctx,
-		`SELECT i.point_multiplier FROM users u JOIN institutions i ON i.id=u.institution_id WHERE u.id=$1`, userID,
-	).Scan(&instMultiplier)
+	if err := tx.QueryRow(ctx,
+		`SELECT
+		   CASE WHEN $4 = 'knowledge_check' THEN EXISTS (
+		     SELECT 1 FROM quiz_attempts
+		      WHERE quiz_id=$2 AND user_id=$1 AND status='completed' AND id <> $3
+		   ) ELSE false END,
+		   COALESCE((SELECT current_streak FROM streaks WHERE user_id=$1), 0),
+		   (SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed'),
+		   COALESCE((SELECT i.point_multiplier FROM users u
+		               JOIN institutions i ON i.id = u.institution_id
+		              WHERE u.id=$1), 1.0)`,
+		userID, quizID, attemptID, quizType,
+	).Scan(&isRepeatAttempt, &currentStreak, &activityCount, &instMultiplier); err != nil {
+		return nil, err
+	}
+	activityCount++ // count the attempt being completed right now
 
 	// Load all question responses with time_taken_ms and time_limit_seconds
 	rows, err := tx.Query(ctx,
@@ -510,31 +507,37 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		badge = "good"
 	}
 
-	// Update attempt — store points_delta=0 for repeat attempts so history is accurate
-	tx.Exec(ctx,
-		`UPDATE quiz_attempts SET status='completed', score_pct=$1, points_delta=$2, total_correct=$3, total_questions=$4, completed_at=now()
-		 WHERE id=$5`,
-		scorePct, finalPoints, totalCorrect, totalQuestions, attemptID)
-
+	// Finish the attempt, move the balance, and write the ledger row in one
+	// statement. These were three sequential round trips inside the transaction
+	// even though each one's input is already known here; chaining them as CTEs
+	// makes the whole commit path a single exchange with the database.
+	// points_delta is stored as 0 for repeat attempts so history stays accurate.
+	expiresAt := time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0)
 	var newBalance int64
-	if !isRepeatAttempt {
-		// Update user points and write ledger only for first attempt
-		err = tx.QueryRow(ctx,
-			`UPDATE users SET total_points = GREATEST(0, total_points + $1), updated_at=now() WHERE id=$2 RETURNING total_points`,
-			finalPoints, userID,
-		).Scan(&newBalance)
-		if err != nil {
-			return nil, err
-		}
-
-		expiresAt := time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0)
-		tx.Exec(ctx,
-			`INSERT INTO points_ledger (user_id, amount, reason, reference_id, balance_after, expires_at)
-			 VALUES ($1,$2,'quiz_attempt',$3,$4,$5)`,
-			userID, finalPoints, attemptID, newBalance, expiresAt)
-	} else {
-		// For repeat attempts, just read the current balance for consistency
-		s.db.QueryRow(ctx, `SELECT total_points FROM users WHERE id=$1`, userID).Scan(&newBalance)
+	err = tx.QueryRow(ctx,
+		`WITH att AS (
+		   UPDATE quiz_attempts
+		      SET status='completed', score_pct=$1, points_delta=$2,
+		          total_correct=$3, total_questions=$4, completed_at=now()
+		    WHERE id=$5
+		 ), bal AS (
+		   UPDATE users
+		      SET total_points = GREATEST(0, total_points + $2), updated_at=now()
+		    WHERE id=$6 AND NOT $7::bool
+		   RETURNING total_points
+		 ), led AS (
+		   INSERT INTO points_ledger (user_id, amount, reason, reference_id, balance_after, expires_at)
+		   SELECT $6, $2, 'quiz_attempt', $5, total_points, $8 FROM bal
+		 )
+		 SELECT COALESCE(
+		   (SELECT total_points FROM bal),
+		   (SELECT total_points FROM users WHERE id=$6)
+		 )`,
+		scorePct, finalPoints, totalCorrect, totalQuestions, attemptID,
+		userID, isRepeatAttempt, expiresAt,
+	).Scan(&newBalance)
+	if err != nil {
+		return nil, err
 	}
 
 	err = tx.Commit(ctx)
@@ -545,15 +548,15 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 	// Update streak and get bonus
 	streakBonus, _ := s.streakSvc.RecordCompletion(ctx, userID, cfg)
 	if streakBonus > 0 {
-		var postStreakBalance int64
-		err = s.db.QueryRow(ctx, `UPDATE users SET total_points = total_points + $1, updated_at=now() WHERE id=$2 RETURNING total_points`, streakBonus, userID).Scan(&postStreakBalance)
-		if err == nil {
-			streakExpiry := time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0)
-			s.db.Exec(ctx,
-				`INSERT INTO points_ledger (user_id, amount, reason, balance_after, expires_at)
-				 VALUES ($1,$2,'streak_bonus',$3,$4)`,
-				userID, streakBonus, postStreakBalance, streakExpiry)
-		}
+		// Credit and ledger in one statement rather than two round trips.
+		s.db.Exec(ctx,
+			`WITH bal AS (
+			   UPDATE users SET total_points = total_points + $1, updated_at=now()
+			    WHERE id=$2 RETURNING total_points
+			 )
+			 INSERT INTO points_ledger (user_id, amount, reason, balance_after, expires_at)
+			 SELECT $2, $1, 'streak_bonus', total_points, $3 FROM bal`,
+			streakBonus, userID, time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0))
 	}
 
 	// Check and award badges
@@ -664,63 +667,79 @@ func badgeCopy(bt string) (string, string) {
 
 // checkBadges awards applicable badges after a quiz completion.
 func (s *Service) checkBadges(ctx context.Context, userID, quizID string, scorePct float64, correct, total int, attemptID string) []string {
-	var awarded []string
-	awardBadge := func(bt string) {
-		_, err := s.db.Exec(ctx,
-			`INSERT INTO badges (user_id, badge_type) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-			userID, bt)
-		if err == nil {
-			awarded = append(awarded, bt)
-		}
-	}
-
-	// first_quiz
-	var quizCount int
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed'`, userID).Scan(&quizCount)
-	if quizCount == 1 {
-		awardBadge("first_quiz")
-	}
-
-	// perfect_score
-	if scorePct == 100 {
-		awardBadge("perfect_score")
-	}
-
-	// explorer: one of each of the 7 question types
-	var typeCount int
-	s.db.QueryRow(ctx,
-		`SELECT COUNT(DISTINCT q.type) FROM question_responses qr
-		 JOIN questions q ON q.id=qr.question_id
-		 JOIN quiz_attempts qa ON qa.id=qr.attempt_id
-		 WHERE qa.user_id=$1 AND qa.status='completed'`, userID,
-	).Scan(&typeCount)
-	if typeCount >= 7 {
-		awardBadge("explorer")
-	}
-
-	// speed_demon: speed_chain with combo >=3
-	var maxCombo int
-	s.db.QueryRow(ctx,
-		`SELECT COALESCE(MAX(combo_level),0) FROM question_responses qr
-		 JOIN questions q ON q.id=qr.question_id
-		 WHERE qr.attempt_id=$1 AND q.type='speed_chain'`, attemptID,
-	).Scan(&maxCombo)
-	if maxCombo >= 3 {
-		awardBadge("speed_demon")
-	}
-
-	// sharp_mind: 100% on confidence_based, all very_confident correct
+	// The four badge predicates are independent aggregates, so they collapse
+	// into one SELECT instead of four sequential round trips on the completion
+	// path. NULL-safe COALESCE on the SUMs because SUM over zero rows is NULL.
+	var quizCount, typeCount, maxCombo int
 	var confTotal, confCorrect, veryConfCorrect int
-	s.db.QueryRow(ctx,
-		`SELECT COUNT(*), SUM(CASE WHEN qr.is_correct THEN 1 ELSE 0 END),
-		        SUM(CASE WHEN qr.confidence_level='very_confident' AND qr.is_correct THEN 1 ELSE 0 END)
-		 FROM question_responses qr
-		 JOIN questions q ON q.id=qr.question_id
-		 WHERE qr.attempt_id=$1 AND q.type='confidence_based'`, attemptID,
-	).Scan(&confTotal, &confCorrect, &veryConfCorrect)
-	if confTotal > 0 && confCorrect == confTotal && veryConfCorrect == confTotal {
-		awardBadge("sharp_mind")
+	err := s.db.QueryRow(ctx,
+		`SELECT
+		   (SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed'),
+		   (SELECT COUNT(DISTINCT q.type) FROM question_responses qr
+		      JOIN questions q ON q.id = qr.question_id
+		      JOIN quiz_attempts qa ON qa.id = qr.attempt_id
+		     WHERE qa.user_id=$1 AND qa.status='completed'),
+		   (SELECT COALESCE(MAX(qr.combo_level), 0) FROM question_responses qr
+		      JOIN questions q ON q.id = qr.question_id
+		     WHERE qr.attempt_id=$2 AND q.type='speed_chain'),
+		   (SELECT COUNT(*) FROM question_responses qr
+		      JOIN questions q ON q.id = qr.question_id
+		     WHERE qr.attempt_id=$2 AND q.type='confidence_based'),
+		   (SELECT COALESCE(SUM(CASE WHEN qr.is_correct THEN 1 ELSE 0 END), 0)
+		      FROM question_responses qr JOIN questions q ON q.id = qr.question_id
+		     WHERE qr.attempt_id=$2 AND q.type='confidence_based'),
+		   (SELECT COALESCE(SUM(CASE WHEN qr.confidence_level='very_confident' AND qr.is_correct THEN 1 ELSE 0 END), 0)
+		      FROM question_responses qr JOIN questions q ON q.id = qr.question_id
+		     WHERE qr.attempt_id=$2 AND q.type='confidence_based')`,
+		userID, attemptID,
+	).Scan(&quizCount, &typeCount, &maxCombo, &confTotal, &confCorrect, &veryConfCorrect)
+	if err != nil {
+		return nil
 	}
 
+	var earned []string
+	if quizCount == 1 {
+		earned = append(earned, "first_quiz")
+	}
+	if scorePct == 100 {
+		earned = append(earned, "perfect_score")
+	}
+	if typeCount >= 7 {
+		earned = append(earned, "explorer")
+	}
+	if maxCombo >= 3 {
+		earned = append(earned, "speed_demon")
+	}
+	if confTotal > 0 && confCorrect == confTotal && veryConfCorrect == confTotal {
+		earned = append(earned, "sharp_mind")
+	}
+	if len(earned) == 0 {
+		return nil
+	}
+
+	// One multi-row insert instead of one per badge. RETURNING reports only the
+	// rows that were actually inserted, so a badge the user already holds no
+	// longer shows up as newly awarded — the old code appended on any Exec that
+	// did not error, which meant ON CONFLICT DO NOTHING still counted as a win
+	// and re-announced the same badge after every quiz.
+	rows, err := s.db.Query(ctx,
+		`INSERT INTO badges (user_id, badge_type)
+		 SELECT $1, bt FROM unnest($2::text[]) AS bt
+		 ON CONFLICT DO NOTHING
+		 RETURNING badge_type`,
+		userID, earned)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var awarded []string
+	for rows.Next() {
+		var bt string
+		if err := rows.Scan(&bt); err != nil {
+			return awarded
+		}
+		awarded = append(awarded, bt)
+	}
 	return awarded
 }

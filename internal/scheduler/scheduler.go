@@ -36,40 +36,51 @@ func (s *Scheduler) ExpirePoints(ctx context.Context) error {
 		return err
 	}
 
-	// Find unexpired positive ledger entries that are past expiry
-	rows, err := s.db.Query(ctx,
-		`SELECT pl.id, pl.user_id, pl.amount FROM points_ledger pl
-		 WHERE pl.expires_at IS NOT NULL AND pl.expires_at <= now() AND pl.amount > 0
-		 AND NOT EXISTS (
-		   SELECT 1 FROM points_ledger e WHERE e.reference_id=pl.id AND e.reason='expiry'
-		 )`)
+	// Expire every due ledger entry in one statement. This was a read followed by
+	// three round trips per expiring row — on a nightly sweep over the whole
+	// ledger that is thousands of sequential exchanges.
+	//
+	// The deduction is clamped at the user's balance exactly as before. Ordering
+	// matters when one user has several entries expiring at once: the running
+	// sum over prior entries is subtracted first, so the second entry can only
+	// take what the first one left, and balance_after stays a truthful running
+	// figure rather than each row independently reading the same starting value.
+	expiry := time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0)
+	ct, err := s.db.Exec(ctx, `
+		WITH due AS (
+		  SELECT pl.id, pl.user_id, pl.amount,
+		         u.total_points,
+		         COALESCE(SUM(pl.amount) OVER (
+		           PARTITION BY pl.user_id ORDER BY pl.expires_at, pl.id
+		           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS taken_before
+		    FROM points_ledger pl
+		    JOIN users u ON u.id = pl.user_id
+		   WHERE pl.expires_at IS NOT NULL AND pl.expires_at <= now() AND pl.amount > 0
+		     AND NOT EXISTS (
+		       SELECT 1 FROM points_ledger e
+		        WHERE e.reference_id = pl.id AND e.reason = 'expiry'
+		     )
+		), calc AS (
+		  SELECT id, user_id, amount,
+		         LEAST(amount, GREATEST(0, total_points - taken_before)) AS deduction,
+		         GREATEST(0, total_points - taken_before) AS balance_before
+		    FROM due
+		), bal AS (
+		  UPDATE users u
+		     SET total_points = GREATEST(0, u.total_points - t.total_deduction),
+		         updated_at = now()
+		    FROM (SELECT user_id, SUM(deduction) AS total_deduction
+		            FROM calc GROUP BY user_id) t
+		   WHERE u.id = t.user_id
+		)
+		INSERT INTO points_ledger (user_id, amount, reason, reference_id, balance_after, expires_at)
+		SELECT user_id, -deduction, 'expiry', id, balance_before - deduction, $1
+		  FROM calc`, expiry)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		var ledgerID, userID string
-		var amount int64
-		rows.Scan(&ledgerID, &userID, &amount)
-
-		// Get current balance
-		var balance int64
-		s.db.QueryRow(ctx, `SELECT total_points FROM users WHERE id=$1`, userID).Scan(&balance)
-		deduction := amount
-		if deduction > balance {
-			deduction = balance
-		}
-		newBalance := balance - deduction
-
-		s.db.Exec(ctx, `UPDATE users SET total_points=$1, updated_at=now() WHERE id=$2`, newBalance, userID)
-		expiry := time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0)
-		s.db.Exec(ctx,
-			`INSERT INTO points_ledger (user_id, amount, reason, reference_id, balance_after, expires_at)
-			 VALUES ($1,$2,'expiry',$3,$4,$5)`,
-			userID, -deduction, ledgerID, newBalance, expiry)
-	}
-	log.Println("[cron] expire-points done")
+	log.Printf("[cron] expire-points done (%d entries expired)", ct.RowsAffected())
 	return nil
 }
 
@@ -117,32 +128,30 @@ func (s *Scheduler) SnapshotLeaderboard(ctx context.Context) error {
 		`INSERT INTO leaderboard_snapshots (scope, week_start, rankings) VALUES ('global',$1,$2)`,
 		weekStart.Format("2006-01-02"), globalJSON)
 
-	// Per-institution snapshots
-	instRows, _ := s.db.Query(ctx, `SELECT id FROM institutions WHERE status='verified'`)
-	defer instRows.Close()
-	for instRows.Next() {
-		var instID string
-		instRows.Scan(&instID)
-
-		iRows, _ := s.db.Query(ctx,
-			`SELECT id, display_name, total_points, current_streak,
-			        RANK() OVER (ORDER BY total_points DESC) as rank
-			 FROM users WHERE institution_id=$1 AND status='active' AND role IN ('student','teacher')
-			 ORDER BY total_points DESC LIMIT 100`, instID)
-
-		var instRankings []rankEntry
-		for iRows.Next() {
-			var e rankEntry
-			iRows.Scan(&e.UserID, &e.DisplayName, &e.TotalPoints, &e.CurrentStreak, &e.Rank)
-			instRankings = append(instRankings, e)
-		}
-		iRows.Close()
-
-		instJSON, _ := json.Marshal(instRankings)
-		s.db.Exec(ctx,
-			`INSERT INTO leaderboard_snapshots (scope, institution_id, week_start, rankings)
-			 VALUES ('institution',$1,$2,$3)`,
-			instID, weekStart.Format("2006-01-02"), instJSON)
+	// Per-institution snapshots: one statement for every institution instead of
+	// a list query plus two round trips each. The top-100-per-institution cut is
+	// a partitioned ROW_NUMBER, and the JSON is assembled in the database, so
+	// nothing has to travel to Go and back.
+	if _, err := s.db.Exec(ctx, `
+		WITH ranked AS (
+		  SELECT u.institution_id,
+		         u.id, u.display_name, u.total_points, u.current_streak,
+		         RANK() OVER (PARTITION BY u.institution_id ORDER BY u.total_points DESC) AS rank,
+		         ROW_NUMBER() OVER (PARTITION BY u.institution_id ORDER BY u.total_points DESC) AS rn
+		    FROM users u
+		    JOIN institutions i ON i.id = u.institution_id AND i.status = 'verified'
+		   WHERE u.status = 'active' AND u.role IN ('student','teacher')
+		)
+		INSERT INTO leaderboard_snapshots (scope, institution_id, week_start, rankings)
+		SELECT 'institution', institution_id, $1,
+		       jsonb_agg(jsonb_build_object(
+		         'rank', rank, 'user_id', id, 'display_name', display_name,
+		         'total_points', total_points, 'current_streak', current_streak
+		       ) ORDER BY rank)
+		  FROM ranked
+		 WHERE rn <= 100
+		 GROUP BY institution_id`, weekStart.Format("2006-01-02")); err != nil {
+		return err
 	}
 
 	log.Println("[cron] snapshot-leaderboard done")
@@ -277,6 +286,8 @@ func (s *Scheduler) SendRankChangeAlerts(ctx context.Context) error {
 	}
 	rows.Close()
 	sent := 0
+	ids := make([]string, 0, len(entries))
+	ranks := make([]int, 0, len(entries))
 	for _, e := range entries {
 		// Notify only on an improvement (lower rank number) the user opted into.
 		if e.notify && e.prevRank != nil && e.rank < *e.prevRank {
@@ -286,7 +297,15 @@ func (s *Scheduler) SendRankChangeAlerts(ctx context.Context) error {
 				notification.WithReference("rank_change"))
 			sent++
 		}
-		s.db.Exec(ctx, `UPDATE users SET last_notified_rank=$1 WHERE id=$2`, e.rank, e.id)
+		ids = append(ids, e.id)
+		ranks = append(ranks, e.rank)
+	}
+	// One write-back for every user instead of one per user.
+	if len(ids) > 0 {
+		s.db.Exec(ctx,
+			`UPDATE users u SET last_notified_rank = t.rank
+			   FROM unnest($1::uuid[], $2::int[]) AS t(id, rank)
+			  WHERE u.id = t.id`, ids, ranks)
 	}
 	log.Printf("[cron] rank-change-alerts done (%d sent)", sent)
 	return nil
@@ -438,9 +457,21 @@ func (s *Scheduler) RecomputeQuestionDifficulty(ctx context.Context) error {
 	}
 	rows.Close()
 
-	// Buffer then write so we don't hold the read cursor while updating.
-	for _, u := range updates {
-		s.db.Exec(ctx, `UPDATE questions SET difficulty=$1 WHERE id=$2`, u.diff, u.id)
+	// One UPDATE for the whole batch. The difficulty model itself stays in Go —
+	// it is easier to test there — but writing it back a row at a time meant one
+	// round trip per question in the platform.
+	if len(updates) > 0 {
+		ids := make([]string, len(updates))
+		diffs := make([]float64, len(updates))
+		for i, u := range updates {
+			ids[i], diffs[i] = u.id, u.diff
+		}
+		if _, err := s.db.Exec(ctx,
+			`UPDATE questions q SET difficulty = t.diff
+			   FROM unnest($1::uuid[], $2::float8[]) AS t(id, diff)
+			  WHERE q.id = t.id`, ids, diffs); err != nil {
+			return err
+		}
 	}
 
 	log.Printf("[cron] recompute-question-difficulty done (%d questions)", len(updates))

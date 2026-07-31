@@ -145,22 +145,58 @@ var streakBands = []band{
 	{"31+ days", 31, 1e9},
 }
 
-// countBands runs one COUNT per band. Keeping the edges in Go means the labels
-// and the ranges live in one place instead of being duplicated in SQL.
-// The band edges are always $1 and $2; any scope argument follows at $3, and
-// an unscoped call passes none at all.
+// countBands counts every band in a single round trip. The band edges stay in
+// Go so the labels and ranges live in one place instead of being duplicated in
+// SQL; they are shipped as arrays and the caller's query runs once per band as
+// a LATERAL. The per-band loop this replaces cost one round trip per band — six
+// for the streak histogram — for counts Postgres computes in one pass.
+//
+// The query must reference the band edges as the lateral columns e.lo and e.hi
+// (not placeholders: inside a LATERAL, $1 is still a query parameter and would
+// bind to the whole array). The caller's own placeholders — the scope filter,
+// or none at all when unscoped — occupy $1..$n, so the two edge arrays follow
+// at $n+1 and $n+2.
 func (s *MetricsService) countBands(
 	ctx context.Context, bands []band, query string, args ...any,
 ) ([]map[string]any, error) {
-	out := make([]map[string]any, 0, len(bands))
-	for _, b := range bands {
+	los := make([]float64, len(bands))
+	his := make([]float64, len(bands))
+	for i, b := range bands {
+		los[i], his[i] = b.Lo, b.Hi
+	}
+
+	loN, hiN := len(args)+1, len(args)+2
+	full := fmt.Sprintf(
+		`SELECT e.ord, c.count
+		   FROM unnest($%d::float8[], $%d::float8[]) WITH ORDINALITY AS e(lo, hi, ord)
+		   CROSS JOIN LATERAL (%s) AS c(count)
+		  ORDER BY e.ord`, loN, hiN, query)
+
+	rows, err := s.db.Query(ctx, full, append(append([]any{}, args...), los, his)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := make([]int64, len(bands))
+	for rows.Next() {
+		var ord int
 		var n int64
-		full := append([]any{b.Lo, b.Hi}, args...)
-		if err := s.db.QueryRow(ctx, query, full...).Scan(&n); err != nil {
+		if err := rows.Scan(&ord, &n); err != nil {
 			return nil, err
 		}
+		if ord >= 1 && ord <= len(counts) {
+			counts[ord-1] = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]map[string]any, 0, len(bands))
+	for i, b := range bands {
 		out = append(out, map[string]any{
-			"label": b.Label, "lo": b.Lo, "hi": b.Hi, "count": n,
+			"label": b.Label, "lo": b.Lo, "hi": b.Hi, "count": counts[i],
 		})
 	}
 	return out, nil
@@ -205,7 +241,7 @@ func (s *MetricsService) Distributions(ctx context.Context, sc Scope) (map[strin
 	}
 	out["score_histogram"] = hist
 
-	if quizScopePred(sc, "q", 3) == "FALSE" {
+	if quizScopePred(sc, "q", 1) == "FALSE" {
 		drop("difficulty_bands")
 	} else {
 		bands, err := s.countBands(ctx, difficultyBands, `
@@ -213,8 +249,8 @@ func (s *MetricsService) Distributions(ctx context.Context, sc Scope) (map[strin
 			FROM questions qn
 			JOIN quizzes q ON q.id = qn.quiz_id
 			WHERE q.deleted_at IS NULL
-			  AND qn.difficulty >= $1 AND qn.difficulty < $2
-			  AND `+quizScopePred(sc, "q", 3), args...)
+			  AND qn.difficulty >= e.lo AND qn.difficulty < e.hi
+			  AND `+quizScopePred(sc, "q", 1), args...)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -222,7 +258,7 @@ func (s *MetricsService) Distributions(ctx context.Context, sc Scope) (map[strin
 	}
 
 	// streaks has no institution column, so it scopes through users.
-	if userScopePred(sc, "u", 3) == "FALSE" {
+	if userScopePred(sc, "u", 1) == "FALSE" {
 		drop("streak_bands")
 	} else {
 		streaks, err := s.countBands(ctx, streakBands, `
@@ -230,8 +266,8 @@ func (s *MetricsService) Distributions(ctx context.Context, sc Scope) (map[strin
 			FROM streaks st
 			JOIN users u ON u.id = st.user_id
 			WHERE u.deleted_at IS NULL
-			  AND st.current_streak >= $1 AND st.current_streak < $2
-			  AND `+userScopePred(sc, "u", 3), args...)
+			  AND st.current_streak >= e.lo AND st.current_streak < e.hi
+			  AND `+userScopePred(sc, "u", 1), args...)
 		if err != nil {
 			return nil, nil, err
 		}

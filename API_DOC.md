@@ -3609,3 +3609,196 @@ because widget shapes change every frontend release. A duplicate name is `409`.
 
 An unknown `institution_id` on `/admin/metrics` now returns **`400`** rather than
 `404`; the parameter is a filter, and a filter naming nothing is a bad request.
+
+---
+
+# Student Management
+
+Implements `docs/superpowers/specs/2026-08-01-student-management-design.md`.
+
+A student record has two halves. The **person** is a `users` row. The
+**enrollment** is that person's relationship with one institution, in
+`enrollments`. Institution-owned academic fields live on the enrollment and
+have no student-facing write path — that table boundary *is* the permission
+model, not a per-field permission flag.
+
+A student may hold **at most one live enrollment**. A student with **none** is
+institution-less and entirely valid: they own their whole record, never appear
+in a roster, and can join later without anything being migrated.
+
+## Student
+
+### POST `/students/claim`
+Redeem a roster row the institution pre-provisioned.
+```json
+{ "claim_code": "K7M2QX9P4T" }
+```
+Returns the enrollment. Import-supplied personal values (phone, guardian
+contact) are copied onto the user row **only where the student left the field
+blank** — the student's own entry always wins.
+
+Errors: `400 CLAIM_CODE_INVALID`, `409 CLAIM_CODE_USED`,
+`409 ENROLLMENT_EXISTS` (already enrolled elsewhere; leave first).
+
+### POST `/students/join-class`
+Self-signup path — join a class directly with its `groups.invite_code`.
+```json
+{ "invite_code": "INV1738..." }
+```
+Creates an `active` enrollment with `roll_number`, `grade` and `section` left
+`null` for an admin to fill in, and adds the student to the class.
+
+Errors: `400 CLAIM_CODE_INVALID`, `409 ENROLLMENT_EXISTS`.
+
+### GET `/users/me/enrollment`
+Returns the live enrollment, or **`null`** for an institution-less student.
+numpie keys its shell off this: `null` hides institution navigation and shows
+the join prompt.
+
+### PATCH `/users/me`
+Now also accepts the student-owned personal fields. Omitting a field leaves it
+untouched; sending `""` clears it.
+```
+date_of_birth, gender, phone, address,
+guardian_name, guardian_phone, guardian_email, highest_qualification
+```
+
+### Profile entries (the rest of the CV)
+```
+GET    /users/me/profile-entries?kind=experience
+POST   /users/me/profile-entries
+PATCH  /users/me/profile-entries/{entryId}
+DELETE /users/me/profile-entries/{entryId}
+```
+`kind` is one of `experience`, `certification`, `achievement`, `course`.
+Education and skills keep their own existing endpoints.
+
+## Teacher
+
+Teachers manage rosters, never identities. Every call is bounded to classes the
+teacher is assigned to via `group_teachers`; acting outside that returns
+`403 NOT_IN_YOUR_CLASS`.
+
+```
+POST   /teacher/classes/{classId}/students        {user_id}
+DELETE /teacher/classes/{classId}/students/{userId}
+```
+The student must already hold a live enrollment at the same institution, so a
+teacher cannot pull in an outsider.
+
+### POST `/teacher/enrollments/{enrollmentId}/edit-requests`
+Propose a correction to an institution-owned field. This **never** writes the
+enrollment; an admin decides.
+```json
+{ "field": "section", "proposed_value": "B", "note": "moved in January" }
+```
+`field` ∈ `roll_number`, `grade`, `section`, `admission_date`.
+
+### GET `/teacher/edit-requests`
+The teacher's own proposals and where they landed.
+
+## Institution
+
+### POST `/institution/students`
+Create one roster entry. Returns the enrollment including its `claim_code`.
+Body: `full_name` (required), `email`, `roll_number`, `grade`, `section`,
+`admission_date`, `phone`, `guardian_name`, `guardian_phone`, `guardian_email`.
+
+Errors: `409 ROLL_NUMBER_TAKEN`.
+
+### POST `/institution/students/import?dry_run=true`
+`multipart/form-data` with a CSV in a field named `file`.
+
+Columns (order is read from the header, not assumed): `full_name` (required),
+`email`, `roll_number`, `grade`, `section`, `admission_date` (YYYY-MM-DD),
+`guardian_name`, `guardian_phone`, `guardian_email`, `phone`.
+
+With `dry_run=true` nothing is written and every row comes back with a verdict:
+```json
+{ "ok": false,
+  "verdicts": [
+    { "row": 2, "action": "create", "full_name": "Asha R", "roll_number": "9A-01" },
+    { "row": 3, "action": "update", "full_name": "Vikram S", "roll_number": "9A-02" },
+    { "row": 4, "action": "error",  "full_name": "",
+      "reason": "full_name is required" } ] }
+```
+A row matches an existing live enrollment by `roll_number`, or by `email` when
+no roll number is given.
+
+Committing (no `dry_run`) runs in one transaction and returns
+`text/csv` — `full_name, roll_number, claim_code` — for the school to
+distribute. If any row failed validation the commit is refused with
+`422 IMPORT_VALIDATION_FAILED` and the offending verdicts.
+
+### GET `/institution/students`
+Now reads from `enrollments`, so unclaimed roster rows appear and graduated
+students drop off. Each row gains `enrollment_id`, `roll_number`, `grade`,
+`section`; **`id` is `null` until the row is claimed**. `average_score` counts
+only attempts on or after `joined_at`, so a transferred-in student's previous
+school's results never land in this institution's numbers.
+
+Filters: `search`, `status`, `group_id`, `sort`, `page`, `limit`.
+
+### PATCH `/institution/enrollments/{enrollmentId}`
+Write the institution-owned fields. Same body as create.
+Errors: `409 ROLL_NUMBER_TAKEN`, `404`.
+
+### PATCH `/institution/enrollments/{enrollmentId}/status`
+```json
+{ "status": "graduated", "reason": "" }
+```
+`status` ∈ `active`, `suspended`, `graduated`, `transferred`. All four are the
+same state change, so they are one endpoint.
+
+- `active` / `suspended` mirror onto `users.status`, which is what blocks login.
+- `graduated` / `transferred` set `ended_at` and clear `users.institution_id`.
+  The student keeps their account, points, streak and CV; the institution keeps
+  its own attempt and report data but loses roster access.
+
+`PATCH /institution/students/{userId}/status` still exists with its original
+`{action: suspend|reactivate}` body and now routes through the same service.
+
+### POST `/institution/enrollments/promote`
+```json
+{ "from_grade": "9", "from_section": "A", "to_grade": "10", "to_section": "A" }
+```
+Advances a cohort in one transaction. `from_section` empty means the whole
+grade; `to_section` empty leaves each student's section unchanged. Returns
+`{"promoted": 42}`.
+
+### Edit request review
+```
+GET   /institution/edit-requests?status=pending
+PATCH /institution/edit-requests/{requestId}    {"decision": "approved"}
+```
+Approving applies the field and closes the request in one transaction.
+Deciding twice returns `409 EDIT_REQUEST_RESOLVED`.
+
+## Super Admin
+
+```
+GET    /admin/students/search?q=<email|roll|name>   (super_admin + moderator)
+POST   /admin/students/merge                        (super_admin)
+DELETE /admin/students/{userId}/purge               (super_admin)
+```
+
+**Merge** folds `merge_user_id` into `keep_user_id`: points sum, attempts,
+points ledger and CV entries repoint, enrollments move where they would not
+violate the one-live-enrollment rule, and the loser is soft-deleted. Logged to
+`audit_log`.
+
+**Purge** is permanent erasure beyond the soft `deleted_at`. Enrollments are
+detached (`user_id` nulled, marked `transferred`) rather than deleted, so the
+institution keeps its historical roster count.
+
+## Error codes
+
+| Code | Status | Condition |
+|---|---|---|
+| `CLAIM_CODE_INVALID` | 400 | No matching `pending_claim` enrollment |
+| `CLAIM_CODE_USED` | 409 | Enrollment already claimed |
+| `ENROLLMENT_EXISTS` | 409 | Student already holds a live enrollment |
+| `ROLL_NUMBER_TAKEN` | 409 | Collides with a live enrollment |
+| `IMPORT_VALIDATION_FAILED` | 422 | Commit refused; body carries per-row detail |
+| `NOT_IN_YOUR_CLASS` | 403 | Teacher acting outside their class scope |
+| `EDIT_REQUEST_RESOLVED` | 409 | Reviewing an already-decided request |

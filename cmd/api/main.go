@@ -101,6 +101,7 @@ func main() {
 	enrollmentInstH := enrollment.NewInstitutionHandler(enrollmentSvc, pool)
 	enrollmentTeacherH := enrollment.NewTeacherHandler(enrollmentSvc)
 	editRequestH := editrequest.NewHandler(editrequest.NewService(pool))
+	studentAdminH := admin.NewStudentAdminHandler(pool)
 	profileEntryH := user.NewProfileEntryHandler(pool)
 
 	_ = notifSvc
@@ -510,6 +511,12 @@ func main() {
 					r.With(mw.RequireRole("super_admin")).Post("/demo/quizzes", demoH.AdminCreate)
 					r.With(mw.RequireRole("super_admin")).Delete("/demo/quizzes/{quizId}", demoH.AdminDelete)
 					r.With(mw.RequireRole("super_admin")).Get("/demo/quizzes/{quizId}/analytics", demoH.AdminAnalytics)
+
+					// Cross-institution student tooling. Search is read-only;
+					// merge and purge are irreversible, so super_admin only.
+					r.Get("/students/search", studentAdminH.Search)
+					r.With(mw.RequireRole("super_admin")).Post("/students/merge", studentAdminH.Merge)
+					r.With(mw.RequireRole("super_admin")).Delete("/students/{userId}/purge", studentAdminH.Purge)
 
 					// Institutions (Super Admin + Moderator read)
 					r.Get("/institutions", adminH.ListInstitutions)

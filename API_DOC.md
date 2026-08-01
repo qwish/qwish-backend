@@ -3650,6 +3650,17 @@ Creates an `active` enrollment with `roll_number`, `grade` and `section` left
 
 Errors: `400 CLAIM_CODE_INVALID`, `409 ENROLLMENT_EXISTS`.
 
+### PATCH `/auth/referral-code`
+Unchanged on the wire, but it now creates an enrollment for a student rather
+than only setting `users.institution_id` — without one the student would be
+invisible to the roster, which is built from enrollments. Moving institutions
+ends the previous enrollment as `transferred` in the same transaction, since a
+student may hold only one live enrollment. Re-entering the code for the
+institution the student is already at is a no-op.
+
+Teachers take the column-only path: a teacher's institution relationship is the
+`users` row plus `group_teachers`, not an enrollment.
+
 ### GET `/users/me/enrollment`
 Returns the live enrollment, or **`null`** for an institution-less student.
 numpie keys its shell off this: `null` hides institution navigation and shows
@@ -3685,6 +3696,17 @@ DELETE /teacher/classes/{classId}/students/{userId}
 ```
 The student must already hold a live enrollment at the same institution, so a
 teacher cannot pull in an outsider.
+
+### GET `/teacher/students` — shape change
+Now built from enrollments rather than `users`. Rows gain `enrollment_id`,
+`roll_number`, `grade` and `section`. **Graduated and transferred students no
+longer appear**, and `average_score` counts only attempts on or after
+`joined_at`, so a transferred-in student does not carry their previous school's
+scores into this institution's view.
+
+`GET /teacher/students/{userId}` and `GET /teacher/classes/{classId}` gain the
+same four fields. A class roster contains only claimed accounts, so
+`enrollment_id` is always present there.
 
 ### POST `/teacher/enrollments/{enrollmentId}/edit-requests`
 Propose a correction to an institution-owned field. This **never** writes the

@@ -246,15 +246,66 @@ func (s *Service) GetInstitutionName(ctx context.Context, id string) string {
 }
 
 // UpdateUserInstitution switches a user's institution via referral code.
+//
+// For a student this is an enrollment change, not just a column write. Rosters
+// are built from enrollments, so setting users.institution_id alone would leave
+// the student invisible to the institution they just joined.
+//
+// Teachers have no enrollment — their institution relationship is the users row
+// plus group_teachers — so they take the column-only path.
 func (s *Service) UpdateUserInstitution(ctx context.Context, userID, code string) error {
 	instID, role, err := s.FindInstitutionByReferralCode(ctx, code)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(ctx,
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx,
 		`UPDATE users SET institution_id = $1, role = $2, updated_at = now() WHERE id = $3`,
-		instID, role, userID)
-	return err
+		instID, role, userID); err != nil {
+		return err
+	}
+
+	if role == "student" {
+		// Already here: re-entering the same code is a no-op rather than a
+		// transfer out and straight back in, which would leave a dead row in
+		// the student's history for nothing.
+		var alreadyHere int
+		if err := tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM enrollments
+			  WHERE user_id=$1 AND institution_id=$2 AND status IN ('active','suspended')`,
+			userID, instID).Scan(&alreadyHere); err != nil {
+			return err
+		}
+		if alreadyHere == 0 {
+			// End any live enrollment first: enrollments_one_active_per_user
+			// would reject the insert while the old row is still live.
+			if _, err := tx.Exec(ctx,
+				`UPDATE enrollments
+				    SET status='transferred', ended_at=now(), updated_at=now()
+				  WHERE user_id=$1 AND status IN ('active','suspended')`, userID); err != nil {
+				return err
+			}
+
+			var fullName string
+			if err := tx.QueryRow(ctx,
+				`SELECT full_name FROM users WHERE id=$1`, userID).Scan(&fullName); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at)
+				 VALUES ($1,$2,$3,'active',now())`, instID, userID, fullName); err != nil {
+				return err
+			}
+		}
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (s *Service) supabasePost(ctx context.Context, path string, body map[string]string) (*SupabaseAuthResponse, error) {

@@ -126,8 +126,12 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	}
 	offset := (page - 1) * limit
 
+	// Students are reached through their live enrollment, so graduated and
+	// transferred students drop off the roster. The join is inner: a teacher's
+	// students are always claimed accounts, unlike the institution roster which
+	// also shows unclaimed rows.
 	args := []interface{}{instID}
-	where := `u.institution_id=$1 AND u.role='student' AND u.deleted_at IS NULL`
+	where := `e.institution_id=$1 AND e.status IN ('active','suspended') AND u.deleted_at IS NULL`
 	n := 2
 
 	if s := q.Get("search"); s != "" {
@@ -149,7 +153,9 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var total int
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users u WHERE `+where, args...).Scan(&total)
+	h.db.QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM enrollments e JOIN users u ON u.id = e.user_id WHERE `+where,
+		args...).Scan(&total)
 
 	sortCol := "u.display_name"
 	switch q.Get("sort") {
@@ -162,10 +168,16 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	args = append(args, limit, offset)
+	// Attempts are counted only from joined_at forward, so a student who
+	// transferred in does not bring their previous school's scores with them.
 	rows, err := h.db.Query(r.Context(),
-		`SELECT u.id, u.display_name, u.email, u.total_points, u.current_streak, u.last_active_at, u.status,
-		        COALESCE((SELECT AVG(score_pct) FROM quiz_attempts WHERE user_id=u.id AND status='completed'),0) as avg_score
-		 FROM users u WHERE `+where+` ORDER BY `+sortCol+
+		`SELECT u.id, e.id, u.display_name, u.email, e.roll_number, e.grade, e.section,
+		        u.total_points, u.current_streak, u.last_active_at, u.status,
+		        COALESCE((SELECT AVG(score_pct) FROM quiz_attempts
+		                   WHERE user_id=u.id AND status='completed'
+		                     AND completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)),0) as avg_score
+		 FROM enrollments e JOIN users u ON u.id = e.user_id
+		 WHERE `+where+` ORDER BY `+sortCol+
 			fmt.Sprintf(` LIMIT $%d OFFSET $%d`, n, n+1),
 		args...)
 	if err != nil {
@@ -176,8 +188,12 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 
 	type studentRow struct {
 		ID            string     `json:"id"`
+		EnrollmentID  string     `json:"enrollment_id"`
 		DisplayName   string     `json:"display_name"`
 		Email         string     `json:"email"`
+		RollNumber    *string    `json:"roll_number,omitempty"`
+		Grade         *string    `json:"grade,omitempty"`
+		Section       *string    `json:"section,omitempty"`
 		TotalPoints   int64      `json:"total_points"`
 		CurrentStreak int        `json:"current_streak"`
 		LastActiveAt  *time.Time `json:"last_active_at,omitempty"`
@@ -187,7 +203,8 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	students := []studentRow{}
 	for rows.Next() {
 		var s studentRow
-		rows.Scan(&s.ID, &s.DisplayName, &s.Email, &s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.Status, &s.AverageScore)
+		rows.Scan(&s.ID, &s.EnrollmentID, &s.DisplayName, &s.Email, &s.RollNumber, &s.Grade, &s.Section,
+			&s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.Status, &s.AverageScore)
 		students = append(students, s)
 	}
 	middleware.JSONWithMeta(w, http.StatusOK, students, &middleware.Meta{Page: page, Limit: limit, Total: total})
@@ -276,10 +293,23 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 		classes = append(classes, c)
 	}
 
+	// The enrollment carries the institution-owned academic fields and the id a
+	// teacher needs to propose a correction to them.
+	var enrollmentID string
+	var rollNumber, grade, section *string
+	h.db.QueryRow(r.Context(), `
+		SELECT id, roll_number, grade, section FROM enrollments
+		 WHERE user_id=$1 AND institution_id=$2 AND status IN ('active','suspended')`,
+		studentID, instID).Scan(&enrollmentID, &rollNumber, &grade, &section)
+
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"id":             studentID,
+		"enrollment_id":  enrollmentID,
 		"display_name":   displayName,
 		"email":          email,
+		"roll_number":    rollNumber,
+		"grade":          grade,
+		"section":        section,
 		"status":         status,
 		"total_points":   points,
 		"current_streak": streak,
@@ -358,17 +388,27 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 	).Scan(&name, &description, &inviteCode, &createdAt, &studentCount, &avgScore)
 
 	sRows, _ := h.db.Query(r.Context(), `
-		SELECT u.id, u.display_name, u.email, u.total_points, u.current_streak, u.last_active_at, u.status,
-		       COALESCE((SELECT AVG(score_pct) FROM quiz_attempts WHERE user_id=u.id AND status='completed'),0) AS avg_score
+		SELECT u.id, e.id, u.display_name, u.email, e.roll_number, e.grade, e.section,
+		       u.total_points, u.current_streak, u.last_active_at, u.status,
+		       COALESCE((SELECT AVG(score_pct) FROM quiz_attempts
+		                  WHERE user_id=u.id AND status='completed'
+		                    AND completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)),0) AS avg_score
 		FROM users u
 		JOIN group_students gs ON gs.user_id=u.id
+		JOIN enrollments e ON e.user_id = u.id AND e.status IN ('active','suspended')
 		WHERE gs.group_id=$1 AND u.deleted_at IS NULL
 		ORDER BY u.display_name`, classID)
 	defer sRows.Close()
+	// enrollment_id is what the panel needs to propose a correction; a class
+	// roster only ever contains claimed accounts, so the join is inner.
 	type studentRow struct {
 		ID            string     `json:"id"`
+		EnrollmentID  string     `json:"enrollment_id"`
 		DisplayName   string     `json:"display_name"`
 		Email         string     `json:"email"`
+		RollNumber    *string    `json:"roll_number,omitempty"`
+		Grade         *string    `json:"grade,omitempty"`
+		Section       *string    `json:"section,omitempty"`
 		TotalPoints   int64      `json:"total_points"`
 		CurrentStreak int        `json:"current_streak"`
 		LastActiveAt  *time.Time `json:"last_active_at,omitempty"`
@@ -378,7 +418,8 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 	students := []studentRow{}
 	for sRows.Next() {
 		var s studentRow
-		sRows.Scan(&s.ID, &s.DisplayName, &s.Email, &s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.Status, &s.AverageScore)
+		sRows.Scan(&s.ID, &s.EnrollmentID, &s.DisplayName, &s.Email, &s.RollNumber, &s.Grade, &s.Section,
+			&s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.Status, &s.AverageScore)
 		students = append(students, s)
 	}
 

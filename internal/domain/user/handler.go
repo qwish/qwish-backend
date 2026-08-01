@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -32,16 +34,37 @@ func (h *Handler) GetMe(w http.ResponseWriter, r *http.Request) {
 
 // PATCH /api/v1/users/me
 func (h *Handler) UpdateMe(w http.ResponseWriter, r *http.Request) {
+	// The body is read once and unmarshalled twice: display_name goes through
+	// the service, the rest are plain column writes.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		middleware.BadRequest(w, "invalid request body")
+		return
+	}
 	var req struct {
 		DisplayName *string `json:"display_name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(body, &req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
 	userID := middleware.GetUserID(r)
 	if req.DisplayName != nil {
 		if err := h.svc.UpdateDisplayName(r.Context(), userID, *req.DisplayName); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+	}
+
+	var pf personalFields
+	if err := json.Unmarshal(body, &pf); err != nil {
+		middleware.BadRequest(w, "invalid request body")
+		return
+	}
+	if set, args := buildUserPatch(pf); set != "" {
+		args = append(args, userID)
+		if err := h.svc.UpdatePersonalFields(r.Context(), set, args); err != nil {
+			log.Printf("UpdateMe: personal fields: %v", err)
 			middleware.InternalError(w)
 			return
 		}

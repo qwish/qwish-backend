@@ -2,6 +2,17 @@
 
 Status: **approved, not implemented.** Written 2026-07-31.
 
+> **Amended 2026-08-01.** Two things moved out of this spec:
+>
+> - **Teacher roster writes** (add/remove a student on an assigned class) are
+>   implemented by `2026-08-01-student-management-backend.md` Task 9, which
+>   also introduces the `enrollments` table those endpoints validate against.
+>   Do not build them here; build focus groups on top of them. This spec's
+>   ruling that a teacher edits roster only — never profile, email or account
+>   status — stands unchanged and is what that task implements.
+> - **This spec's migration is still `030`.** Student management took `031`
+>   because this one was approved first.
+
 Gives teachers roster control over the classes they are assigned, lets them carve
 those classes into weak-domain focus groups that receive targeted quizzes, and
 gives institution admins a real handover flow for moving a class between

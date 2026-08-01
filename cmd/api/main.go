@@ -19,6 +19,7 @@ import (
 	"github.com/qwish/backend/internal/domain/avatar"
 	"github.com/qwish/backend/internal/domain/contact"
 	"github.com/qwish/backend/internal/domain/demo"
+	"github.com/qwish/backend/internal/domain/editrequest"
 	"github.com/qwish/backend/internal/domain/enrollment"
 	"github.com/qwish/backend/internal/domain/institution"
 	"github.com/qwish/backend/internal/domain/leaderboard"
@@ -99,6 +100,7 @@ func main() {
 	enrollmentStudentH := enrollment.NewStudentHandler(enrollmentSvc)
 	enrollmentInstH := enrollment.NewInstitutionHandler(enrollmentSvc, pool)
 	enrollmentTeacherH := enrollment.NewTeacherHandler(enrollmentSvc)
+	editRequestH := editrequest.NewHandler(editrequest.NewService(pool))
 	profileEntryH := user.NewProfileEntryHandler(pool)
 
 	_ = notifSvc
@@ -379,6 +381,10 @@ func main() {
 					// to. Identity fields stay institution-owned.
 					r.Post("/classes/{classId}/students", enrollmentTeacherH.AddStudent)
 					r.Delete("/classes/{classId}/students/{userId}", enrollmentTeacherH.RemoveStudent)
+					// Corrections to institution-owned fields are proposals,
+					// not writes; an admin decides them.
+					r.Post("/enrollments/{enrollmentId}/edit-requests", editRequestH.Propose)
+					r.Get("/edit-requests", editRequestH.ListMine)
 					r.Get("/classes/{classId}", teacherH.GetClass)
 					r.Get("/reports/quiz-analytics", teacherH.QuizAnalyticsReport)
 					r.Get("/reports/student-performance", teacherH.StudentPerformanceReport)
@@ -423,6 +429,8 @@ func main() {
 					r.Post("/students/import", enrollmentInstH.ImportStudents)
 					r.Patch("/enrollments/{enrollmentId}/status", enrollmentInstH.SetStudentStatus)
 					r.Post("/enrollments/promote", enrollmentInstH.PromoteStudents)
+					r.Get("/edit-requests", editRequestH.ListForReview)
+					r.Patch("/edit-requests/{requestId}", editRequestH.Review)
 					r.Get("/students/{userId}", institutionH.GetStudent)
 					r.Patch("/students/{userId}/status", institutionH.UpdateStudentStatus)
 					r.Get("/teachers", institutionH.ListTeachers)

@@ -80,7 +80,8 @@ func main() {
 	parentH := parent.NewHandler(pool)
 	topicH := topicrequest.NewHandler(pool)
 	uploadH := upload.NewHandler(r2Client)
-	institutionH := institution.NewHandler(pool, notifSvc, cfg.AppURL, cfg.TeacherURL)
+	enrollmentSvc := enrollment.NewService(pool)
+	institutionH := institution.NewHandler(pool, notifSvc, enrollmentSvc, cfg.AppURL, cfg.TeacherURL)
 	teacherH := teacher.NewHandler(pool)
 	adminH := admin.NewHandler(pool, cfg, notifSvc)
 	metricsH := metrics.NewHandler(pool, admin.MetricsScopeResolver(pool))
@@ -95,7 +96,6 @@ func main() {
 	offlineH := offline.NewHandler(offlineSvc)
 	studyGroupH := studygroup.NewHandler(studyGroupSvc)
 
-	enrollmentSvc := enrollment.NewService(pool)
 	enrollmentStudentH := enrollment.NewStudentHandler(enrollmentSvc)
 	enrollmentInstH := enrollment.NewInstitutionHandler(enrollmentSvc, pool)
 	profileEntryH := user.NewProfileEntryHandler(pool)
@@ -416,6 +416,8 @@ func main() {
 					// cannot collide with the existing /students/{userId}/status.
 					r.Patch("/enrollments/{enrollmentId}", enrollmentInstH.UpdateStudent)
 					r.Post("/students/import", enrollmentInstH.ImportStudents)
+					r.Patch("/enrollments/{enrollmentId}/status", enrollmentInstH.SetStudentStatus)
+					r.Post("/enrollments/promote", enrollmentInstH.PromoteStudents)
 					r.Get("/students/{userId}", institutionH.GetStudent)
 					r.Patch("/students/{userId}/status", institutionH.UpdateStudentStatus)
 					r.Get("/teachers", institutionH.ListTeachers)

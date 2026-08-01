@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/domain/enrollment"
 	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/middleware"
 )
@@ -19,12 +20,13 @@ import (
 type Handler struct {
 	db         *pgxpool.Pool
 	notif      *notification.Service
+	enrollment *enrollment.Service
 	appURL     string
 	teacherURL string // teacher panel base; used in teacher-verified emails
 }
 
-func NewHandler(db *pgxpool.Pool, notif *notification.Service, appURL, teacherURL string) *Handler {
-	return &Handler{db: db, notif: notif, appURL: appURL, teacherURL: teacherURL}
+func NewHandler(db *pgxpool.Pool, notif *notification.Service, enr *enrollment.Service, appURL, teacherURL string) *Handler {
+	return &Handler{db: db, notif: notif, enrollment: enr, appURL: appURL, teacherURL: teacherURL}
 }
 
 // GET /api/v1/institution/overview
@@ -276,19 +278,30 @@ func (h *Handler) UpdateStudentStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var check int
-	h.db.QueryRow(r.Context(), `SELECT 1 FROM users WHERE id=$1 AND institution_id=$2 AND role='student'`, studentID, instID).Scan(&check)
-	if check == 0 {
-		middleware.NotFound(w, "student")
-		return
-	}
-
 	newStatus := "active"
 	if req.Action == "suspend" {
 		newStatus = "suspended"
 	}
-	h.db.Exec(r.Context(),
-		`UPDATE users SET status=$1, suspension_reason=$2, updated_at=now() WHERE id=$3`, newStatus, req.Reason, studentID)
+
+	// The enrollment is the source of truth; the service mirrors users.status,
+	// which is what actually blocks login.
+	var enrollmentID string
+	h.db.QueryRow(r.Context(),
+		`SELECT id FROM enrollments
+		  WHERE user_id=$1 AND institution_id=$2 AND status IN ('active','suspended')`,
+		studentID, instID).Scan(&enrollmentID)
+	if enrollmentID == "" {
+		middleware.NotFound(w, "student")
+		return
+	}
+	if err := h.enrollment.SetStatus(r.Context(), instID, enrollmentID, newStatus); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if req.Reason != "" {
+		h.db.Exec(r.Context(),
+			`UPDATE users SET suspension_reason=$1 WHERE id=$2`, req.Reason, studentID)
+	}
 
 	// Audit log
 	logAudit(r.Context(), h.db, adminID, req.Action+"_student", "user", studentID, req.Reason)

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/base32"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -267,4 +268,88 @@ func (s *Service) UpdateRosterEntry(ctx context.Context, instID, enrollmentID st
 		return ErrNotFound
 	}
 	return nil
+}
+
+// terminalStatuses end the relationship: the enrollment is closed and the
+// student returns to institution-less, keeping account, points and history.
+var terminalStatuses = map[string]bool{"graduated": true, "transferred": true}
+
+// SetStatus moves an enrollment through its lifecycle.
+//
+// users.status is what actually blocks login, so live transitions mirror onto
+// it; terminal transitions instead clear users.institution_id.
+func (s *Service) SetStatus(ctx context.Context, instID, enrollmentID, status string) error {
+	switch status {
+	case "active", "suspended", "graduated", "transferred":
+	default:
+		return fmt.Errorf("unknown status %q", status)
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var userID *string
+	err = tx.QueryRow(ctx,
+		`UPDATE enrollments
+		    SET status=$1,
+		        ended_at = CASE WHEN $1 IN ('graduated','transferred') THEN now() ELSE NULL END,
+		        updated_at = now()
+		  WHERE id=$2 AND institution_id=$3
+		  RETURNING user_id`, status, enrollmentID, instID).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+
+	// Unclaimed roster rows have no user to mirror onto.
+	if userID != nil {
+		if terminalStatuses[status] {
+			_, err = tx.Exec(ctx,
+				`UPDATE users SET institution_id=NULL, status='active', updated_at=now() WHERE id=$1`, *userID)
+		} else {
+			_, err = tx.Exec(ctx,
+				`UPDATE users SET status=$1, institution_id=$2, updated_at=now() WHERE id=$3`,
+				status, instID, *userID)
+		}
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+// PromoteFilter selects the cohort to advance. FromSection empty means the
+// whole grade; ToSection empty leaves each student's section unchanged.
+type PromoteFilter struct {
+	FromGrade   string
+	FromSection string
+	ToGrade     string
+	ToSection   string
+}
+
+// Promote advances a cohort in one statement. Only live enrollments move.
+func (s *Service) Promote(ctx context.Context, instID string, f PromoteFilter) (int64, error) {
+	if f.FromGrade == "" || f.ToGrade == "" {
+		return 0, fmt.Errorf("from_grade and to_grade are required")
+	}
+	tag, err := s.db.Exec(ctx,
+		`UPDATE enrollments
+		    SET grade=$1,
+		        section = CASE WHEN $2 <> '' THEN $2 ELSE section END,
+		        updated_at = now()
+		  WHERE institution_id=$3
+		    AND grade=$4
+		    AND ($5='' OR section=$5)
+		    AND status IN ('pending_claim','active','suspended')`,
+		f.ToGrade, f.ToSection, instID, f.FromGrade, f.FromSection)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }

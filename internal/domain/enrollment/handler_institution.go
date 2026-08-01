@@ -170,3 +170,53 @@ func (h *InstitutionHandler) ImportStudents(w http.ResponseWriter, r *http.Reque
 	}
 	cw.Flush()
 }
+
+// PATCH /api/v1/institution/enrollments/{enrollmentId}/status  {status, reason}
+func (h *InstitutionHandler) SetStudentStatus(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Status string `json:"status"` // active | suspended | graduated | transferred
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid request body")
+		return
+	}
+
+	enrollmentID := chi.URLParam(r, "enrollmentId")
+	err := h.svc.SetStatus(r.Context(), middleware.GetInstitutionID(r), enrollmentID, req.Status)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		middleware.NotFound(w, "student")
+		return
+	case err != nil:
+		log.Printf("SetStudentStatus: %v", err)
+		middleware.BadRequest(w, err.Error())
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]string{"status": req.Status})
+}
+
+// POST /api/v1/institution/enrollments/promote
+//   {from_grade, from_section, to_grade, to_section}
+func (h *InstitutionHandler) PromoteStudents(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		FromGrade   string `json:"from_grade"`
+		FromSection string `json:"from_section"`
+		ToGrade     string `json:"to_grade"`
+		ToSection   string `json:"to_section"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid request body")
+		return
+	}
+
+	n, err := h.svc.Promote(r.Context(), middleware.GetInstitutionID(r), PromoteFilter{
+		FromGrade: req.FromGrade, FromSection: req.FromSection,
+		ToGrade: req.ToGrade, ToSection: req.ToSection,
+	})
+	if err != nil {
+		middleware.BadRequest(w, err.Error())
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]int64{"promoted": n})
+}

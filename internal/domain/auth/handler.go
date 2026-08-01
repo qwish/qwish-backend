@@ -78,15 +78,15 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 				"your teacher account is awaiting verification by your institution")
 			return
 		}
+		// The institution has to travel with the sign-in: the client caches
+		// this user and does not re-read the profile on later launches, so a
+		// payload without it reads as "joined nothing" on every new device.
+		instName := ""
+		if existingUser.InstitutionID != nil {
+			instName = h.svc.GetInstitutionName(r.Context(), *existingUser.InstitutionID)
+		}
 		middleware.JSON(w, http.StatusOK, map[string]interface{}{
-			"user": map[string]interface{}{
-				"id":           existingUser.ID,
-				"full_name":    existingUser.FullName,
-				"display_name": existingUser.DisplayName,
-				"email":        existingUser.Email,
-				"role":         existingUser.Role,
-				"status":       existingUser.Status,
-			},
+			"user":          userPayload(existingUser, instName),
 			"access_token":  authResp.AccessToken,
 			"refresh_token": authResp.RefreshToken,
 			"is_new_user":   false,
@@ -211,21 +211,21 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var instData interface{}
+	// A referral-code signup is a real enrollment; without one the student
+	// carries an institution_id that no roster query would ever surface.
+	if instID != nil && role == "student" {
+		if _, err := h.svc.CreateStudentEnrollment(r.Context(), *instID, newUser.ID, req.FullName); err != nil {
+			log.Printf("CreateProfile: enrollment for %s: %v", newUser.ID, err)
+		}
+	}
+
+	instName := ""
 	if instID != nil {
-		instData = map[string]string{"id": *instID, "name": h.svc.GetInstitutionName(r.Context(), *instID)}
+		instName = h.svc.GetInstitutionName(r.Context(), *instID)
 	}
 
 	middleware.JSON(w, http.StatusCreated, map[string]interface{}{
-		"user": map[string]interface{}{
-			"id":           newUser.ID,
-			"full_name":    newUser.FullName,
-			"display_name": newUser.DisplayName,
-			"email":        newUser.Email,
-			"role":         newUser.Role,
-			"status":       newUser.Status,
-			"institution":  instData,
-		},
+		"user": userPayload(&newUser, instName),
 		// Pending teachers can't enter the panel until their institution verifies them.
 		"requires_verification": newUser.Status == "pending",
 	})

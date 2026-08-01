@@ -19,6 +19,7 @@ import (
 	"github.com/qwish/backend/internal/domain/avatar"
 	"github.com/qwish/backend/internal/domain/contact"
 	"github.com/qwish/backend/internal/domain/demo"
+	"github.com/qwish/backend/internal/domain/enrollment"
 	"github.com/qwish/backend/internal/domain/institution"
 	"github.com/qwish/backend/internal/domain/leaderboard"
 	"github.com/qwish/backend/internal/domain/metrics"
@@ -93,6 +94,9 @@ func main() {
 	pushH := push.NewHandler(pool)
 	offlineH := offline.NewHandler(offlineSvc)
 	studyGroupH := studygroup.NewHandler(studyGroupSvc)
+
+	enrollmentSvc := enrollment.NewService(pool)
+	enrollmentStudentH := enrollment.NewStudentHandler(enrollmentSvc)
 
 	_ = notifSvc
 	_ = scoring.LoadConfig // referenced by services
@@ -283,6 +287,12 @@ func main() {
 				// Offline mode: prefetch practice pack + sync offline results
 				r.Get("/offline/pack", offlineH.GetPack)
 				r.Post("/offline/sync", offlineH.Sync)
+
+				// Enrollment: claim a roster row, or join a class directly.
+				// A student with neither is institution-less and stays valid.
+				r.Post("/students/claim", enrollmentStudentH.Claim)
+				r.Post("/students/join-class", enrollmentStudentH.JoinClass)
+				r.Get("/users/me/enrollment", enrollmentStudentH.Mine)
 
 				// Social: batchmate follows
 				r.Post("/users/{userId}/follow", studyGroupH.Follow)

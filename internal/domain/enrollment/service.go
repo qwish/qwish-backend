@@ -18,6 +18,7 @@ var (
 	ErrClaimCodeInvalid = errors.New("claim code invalid")
 	ErrClaimCodeUsed    = errors.New("claim code already used")
 	ErrEnrollmentExists = errors.New("student already holds a live enrollment")
+	ErrClassCodeInvalid = errors.New("class invite code invalid")
 )
 
 type Enrollment struct {
@@ -130,6 +131,60 @@ func (s *Service) Claim(ctx context.Context, userID, code string) (Enrollment, e
 			updated_at     = now()
 		FROM enrollments e
 		WHERE u.id=$1 AND e.id=$2`, userID, id); err != nil {
+		return Enrollment{}, err
+	}
+
+	return e, tx.Commit(ctx)
+}
+
+// JoinByClassCode is the self-signup path: a student with no institution joins
+// a class directly. Academic fields stay blank for an admin to fill in later.
+func (s *Service) JoinByClassCode(ctx context.Context, userID, inviteCode string) (Enrollment, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return Enrollment{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var groupID, instID string
+	err = tx.QueryRow(ctx,
+		`SELECT id, institution_id FROM groups WHERE invite_code=$1 AND archived_at IS NULL`,
+		inviteCode).Scan(&groupID, &instID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Enrollment{}, ErrClassCodeInvalid
+	}
+	if err != nil {
+		return Enrollment{}, err
+	}
+
+	var live int
+	tx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM enrollments
+		 WHERE user_id=$1 AND status IN ('active','suspended')`, userID).Scan(&live)
+	if live > 0 {
+		return Enrollment{}, ErrEnrollmentExists
+	}
+
+	var fullName string
+	if err := tx.QueryRow(ctx, `SELECT full_name FROM users WHERE id=$1`, userID).Scan(&fullName); err != nil {
+		return Enrollment{}, err
+	}
+
+	e, err := scanEnrollment(tx.QueryRow(ctx,
+		`INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at)
+		 VALUES ($1, $2, $3, 'active', now())
+		 RETURNING `+selectCols, instID, userID, fullName))
+	if err != nil {
+		return Enrollment{}, err
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO group_students (group_id, user_id) VALUES ($1,$2)
+		 ON CONFLICT DO NOTHING`, groupID, userID); err != nil {
+		return Enrollment{}, err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE users SET institution_id=$1, updated_at=now() WHERE id=$2`, instID, userID); err != nil {
 		return Enrollment{}, err
 	}
 

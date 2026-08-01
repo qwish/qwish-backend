@@ -168,6 +168,19 @@ func (s *Service) CreateUser(ctx context.Context, supabaseUID, fullName, email, 
 	return u, nil
 }
 
+// CreateStudentEnrollment records a referral-code signup as an active
+// enrollment with the academic fields left blank for an admin to fill in.
+//
+// Without this the student would carry an institution_id that no roster query
+// would ever surface, since rosters are built from enrollments.
+func (s *Service) CreateStudentEnrollment(ctx context.Context, instID, userID, fullName string) (string, error) {
+	var id string
+	err := s.db.QueryRow(ctx,
+		`INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at)
+		 VALUES ($1,$2,$3,'active',now()) RETURNING id`, instID, userID, fullName).Scan(&id)
+	return id, err
+}
+
 // TeacherInvite is a pending teacher invitation looked up by its email token.
 type TeacherInvite struct {
 	ID              string    `json:"id"`

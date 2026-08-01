@@ -415,6 +415,7 @@ func main() {
 					// Enrollment-addressed routes stay off /students/... so they
 					// cannot collide with the existing /students/{userId}/status.
 					r.Patch("/enrollments/{enrollmentId}", enrollmentInstH.UpdateStudent)
+					r.Post("/students/import", enrollmentInstH.ImportStudents)
 					r.Get("/students/{userId}", institutionH.GetStudent)
 					r.Patch("/students/{userId}/status", institutionH.UpdateStudentStatus)
 					r.Get("/teachers", institutionH.ListTeachers)

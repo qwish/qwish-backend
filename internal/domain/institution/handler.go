@@ -112,27 +112,31 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	groupID := q.Get("group_id")
 	status := q.Get("status")
 
+	// Students are listed through their live enrollment: unclaimed roster rows
+	// appear (user_id IS NULL), graduated and transferred students do not.
 	args := []interface{}{instID}
-	where := `u.institution_id=$1 AND u.role='student' AND u.deleted_at IS NULL`
+	where := `e.institution_id=$1 AND e.status IN ('pending_claim','active','suspended')`
 	n := 2
 	if search != "" {
-		where += fmt.Sprintf(` AND (u.display_name ILIKE $%d OR u.email ILIKE $%d)`, n, n)
+		where += fmt.Sprintf(` AND (COALESCE(u.display_name, e.full_name) ILIKE $%d OR COALESCE(u.email, e.email) ILIKE $%d)`, n, n)
 		args = append(args, "%"+search+"%")
 		n++
 	}
 	if status != "" {
-		where += fmt.Sprintf(` AND u.status=$%d`, n)
+		where += fmt.Sprintf(` AND e.status=$%d`, n)
 		args = append(args, status)
 		n++
 	}
 	if groupID != "" {
-		where += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM group_students gs WHERE gs.user_id=u.id AND gs.group_id=$%d)`, n)
+		where += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM group_students gs WHERE gs.user_id=e.user_id AND gs.group_id=$%d)`, n)
 		args = append(args, groupID)
 		n++
 	}
 
 	var total int
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users u WHERE `+where, args...).Scan(&total)
+	h.db.QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM enrollments e LEFT JOIN users u ON u.id = e.user_id WHERE `+where,
+		args...).Scan(&total)
 
 	sortCol := "u.display_name"
 	switch q.Get("sort") {
@@ -145,10 +149,17 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	args = append(args, limit, offset)
+	// The completed_at >= joined_at clause is what keeps a transferred-in
+	// student's previous school's attempts out of this institution's numbers.
 	rows, err := h.db.Query(r.Context(),
-		`SELECT u.id, u.display_name, u.email, u.total_points, u.current_streak, u.last_active_at, u.status,
-		        COALESCE((SELECT AVG(score_pct) FROM quiz_attempts WHERE user_id=u.id AND status='completed'),0) as avg_score
-		 FROM users u WHERE `+where+` ORDER BY `+sortCol+fmt.Sprintf(` LIMIT $%d OFFSET $%d`, n, n+1),
+		`SELECT e.id, e.user_id, COALESCE(u.display_name, e.full_name), COALESCE(u.email, e.email, ''),
+		        e.roll_number, e.grade, e.section, e.status,
+		        COALESCE(u.total_points,0), COALESCE(u.current_streak,0), u.last_active_at,
+		        COALESCE((SELECT AVG(score_pct) FROM quiz_attempts
+		                   WHERE user_id=e.user_id AND status='completed'
+		                     AND completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)),0) AS avg_score
+		   FROM enrollments e LEFT JOIN users u ON u.id = e.user_id
+		  WHERE `+where+` ORDER BY `+sortCol+fmt.Sprintf(` LIMIT $%d OFFSET $%d`, n, n+1),
 		args...)
 	if err != nil {
 		middleware.InternalError(w)
@@ -157,19 +168,24 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type studentRow struct {
-		ID            string     `json:"id"`
+		EnrollmentID  string     `json:"enrollment_id"`
+		ID            *string    `json:"id"` // null until the roster row is claimed
 		DisplayName   string     `json:"display_name"`
 		Email         string     `json:"email"`
+		RollNumber    *string    `json:"roll_number,omitempty"`
+		Grade         *string    `json:"grade,omitempty"`
+		Section       *string    `json:"section,omitempty"`
+		Status        string     `json:"status"`
 		TotalPoints   int64      `json:"total_points"`
 		CurrentStreak int        `json:"current_streak"`
 		LastActiveAt  *time.Time `json:"last_active_at,omitempty"`
-		Status        string     `json:"status"`
 		AverageScore  float64    `json:"average_score"`
 	}
 	var students []studentRow
 	for rows.Next() {
 		var s studentRow
-		rows.Scan(&s.ID, &s.DisplayName, &s.Email, &s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.Status, &s.AverageScore)
+		rows.Scan(&s.EnrollmentID, &s.ID, &s.DisplayName, &s.Email, &s.RollNumber, &s.Grade,
+			&s.Section, &s.Status, &s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.AverageScore)
 		students = append(students, s)
 	}
 	if students == nil { students = []studentRow{} }

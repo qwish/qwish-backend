@@ -97,6 +97,7 @@ func main() {
 
 	enrollmentSvc := enrollment.NewService(pool)
 	enrollmentStudentH := enrollment.NewStudentHandler(enrollmentSvc)
+	enrollmentInstH := enrollment.NewInstitutionHandler(enrollmentSvc, pool)
 	profileEntryH := user.NewProfileEntryHandler(pool)
 
 	_ = notifSvc
@@ -410,6 +411,10 @@ func main() {
 					r.Use(mw.RequireRole("institution_admin"))
 					r.Get("/overview", institutionH.Overview)
 					r.Get("/students", institutionH.ListStudents)
+					r.Post("/students", enrollmentInstH.CreateStudent)
+					// Enrollment-addressed routes stay off /students/... so they
+					// cannot collide with the existing /students/{userId}/status.
+					r.Patch("/enrollments/{enrollmentId}", enrollmentInstH.UpdateStudent)
 					r.Get("/students/{userId}", institutionH.GetStudent)
 					r.Patch("/students/{userId}/status", institutionH.UpdateStudentStatus)
 					r.Get("/teachers", institutionH.ListTeachers)

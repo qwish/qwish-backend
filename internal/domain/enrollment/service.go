@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -19,7 +20,37 @@ var (
 	ErrClaimCodeUsed    = errors.New("claim code already used")
 	ErrEnrollmentExists = errors.New("student already holds a live enrollment")
 	ErrClassCodeInvalid = errors.New("class invite code invalid")
+	ErrRollNumberTaken  = errors.New("roll number already in use")
+	ErrNotFound         = errors.New("enrollment not found")
 )
+
+// RosterInput is the institution-owned half of a student record. Empty strings
+// mean "not supplied" and are stored as NULL.
+type RosterInput struct {
+	FullName      string
+	Email         string
+	RollNumber    string
+	Grade         string
+	Section       string
+	AdmissionDate string // YYYY-MM-DD
+	Phone         string
+	GuardianName  string
+	GuardianPhone string
+	GuardianEmail string
+}
+
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// isUniqueViolation reports whether err is a Postgres 23505 on the given index.
+func isUniqueViolation(err error, index string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == index
+}
 
 type Enrollment struct {
 	ID            string     `json:"id"`
@@ -189,4 +220,51 @@ func (s *Service) JoinByClassCode(ctx context.Context, userID, inviteCode string
 	}
 
 	return e, tx.Commit(ctx)
+}
+
+// CreateRosterEntry pre-provisions a student the institution knows about but
+// who has not signed up yet. The claim code is what the student later redeems.
+func (s *Service) CreateRosterEntry(ctx context.Context, instID string, in RosterInput) (Enrollment, error) {
+	code, err := GenerateClaimCode()
+	if err != nil {
+		return Enrollment{}, err
+	}
+
+	e, err := scanEnrollment(s.db.QueryRow(ctx,
+		`INSERT INTO enrollments
+			(institution_id, full_name, email, roll_number, grade, section, admission_date,
+			 import_phone, import_guardian_name, import_guardian_phone, import_guardian_email,
+			 claim_code, status)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending_claim')
+		 RETURNING `+selectCols,
+		instID, in.FullName, nilIfEmpty(in.Email), nilIfEmpty(in.RollNumber),
+		nilIfEmpty(in.Grade), nilIfEmpty(in.Section), nilIfEmpty(in.AdmissionDate),
+		nilIfEmpty(in.Phone), nilIfEmpty(in.GuardianName), nilIfEmpty(in.GuardianPhone),
+		nilIfEmpty(in.GuardianEmail), code))
+	if isUniqueViolation(err, "enrollments_roll_unique") {
+		return Enrollment{}, ErrRollNumberTaken
+	}
+	return e, err
+}
+
+// UpdateRosterEntry writes the institution-owned fields. The institution_id
+// predicate is the authorization check.
+func (s *Service) UpdateRosterEntry(ctx context.Context, instID, enrollmentID string, in RosterInput) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE enrollments
+		    SET full_name=$1, email=$2, roll_number=$3, grade=$4, section=$5,
+		        admission_date=$6, updated_at=now()
+		  WHERE id=$7 AND institution_id=$8`,
+		in.FullName, nilIfEmpty(in.Email), nilIfEmpty(in.RollNumber), nilIfEmpty(in.Grade),
+		nilIfEmpty(in.Section), nilIfEmpty(in.AdmissionDate), enrollmentID, instID)
+	if isUniqueViolation(err, "enrollments_roll_unique") {
+		return ErrRollNumberTaken
+	}
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

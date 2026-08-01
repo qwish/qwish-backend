@@ -97,6 +97,7 @@ func main() {
 
 	enrollmentSvc := enrollment.NewService(pool)
 	enrollmentStudentH := enrollment.NewStudentHandler(enrollmentSvc)
+	profileEntryH := user.NewProfileEntryHandler(pool)
 
 	_ = notifSvc
 	_ = scoring.LoadConfig // referenced by services
@@ -266,6 +267,14 @@ func main() {
 				r.Get("/users/me/skills", userH.GetMySkills)
 				r.Post("/users/me/skills", userH.AddMySkill)
 				r.Delete("/users/me/skills/{skill}", userH.DeleteMySkill)
+
+				// The rest of the CV. Education and skills have their own
+				// tables already; experience, certifications, achievements and
+				// courses share one shape, so they share one endpoint.
+				r.Get("/users/me/profile-entries", profileEntryH.List)
+				r.Post("/users/me/profile-entries", profileEntryH.Create)
+				r.Patch("/users/me/profile-entries/{entryId}", profileEntryH.Update)
+				r.Delete("/users/me/profile-entries/{entryId}", profileEntryH.Delete)
 				r.Patch("/users/me/domain", userH.UpdateMyDomain)
 				r.Get("/users/me/recommendations", userH.GetMyRecommendations)
 				r.Get("/users/me/report-card", userH.GetMyReportCardPDF)

@@ -98,6 +98,7 @@ func main() {
 
 	enrollmentStudentH := enrollment.NewStudentHandler(enrollmentSvc)
 	enrollmentInstH := enrollment.NewInstitutionHandler(enrollmentSvc, pool)
+	enrollmentTeacherH := enrollment.NewTeacherHandler(enrollmentSvc)
 	profileEntryH := user.NewProfileEntryHandler(pool)
 
 	_ = notifSvc
@@ -374,6 +375,10 @@ func main() {
 					r.Get("/students", teacherH.ListStudents)
 					r.Get("/students/{userId}", teacherH.GetStudent)
 					r.Get("/classes", teacherH.ListClasses)
+					// Roster writes, bounded to classes the teacher is assigned
+					// to. Identity fields stay institution-owned.
+					r.Post("/classes/{classId}/students", enrollmentTeacherH.AddStudent)
+					r.Delete("/classes/{classId}/students/{userId}", enrollmentTeacherH.RemoveStudent)
 					r.Get("/classes/{classId}", teacherH.GetClass)
 					r.Get("/reports/quiz-analytics", teacherH.QuizAnalyticsReport)
 					r.Get("/reports/student-performance", teacherH.StudentPerformanceReport)

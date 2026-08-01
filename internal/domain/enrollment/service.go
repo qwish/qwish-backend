@@ -353,3 +353,56 @@ func (s *Service) Promote(ctx context.Context, instID string, f PromoteFilter) (
 	}
 	return tag.RowsAffected(), nil
 }
+
+var ErrNotYourClass = errors.New("teacher is not assigned to this class")
+
+// TeacherOwnsClass is the scope check for every teacher write: a teacher may
+// act only on classes they are assigned to via group_teachers.
+func (s *Service) TeacherOwnsClass(ctx context.Context, teacherID, groupID string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM group_teachers WHERE group_id=$1 AND user_id=$2`,
+		groupID, teacherID).Scan(&n)
+	return n > 0, err
+}
+
+func (s *Service) AddStudentToClass(ctx context.Context, teacherID, groupID, studentID string) error {
+	ok, err := s.TeacherOwnsClass(ctx, teacherID, groupID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNotYourClass
+	}
+
+	// The student must hold a live enrollment at the same institution as the class.
+	var n int
+	if err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM enrollments e
+		   JOIN groups g ON g.institution_id = e.institution_id
+		  WHERE e.user_id=$1 AND g.id=$2 AND e.status IN ('active','suspended')`,
+		studentID, groupID).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+
+	_, err = s.db.Exec(ctx,
+		`INSERT INTO group_students (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+		groupID, studentID)
+	return err
+}
+
+func (s *Service) RemoveStudentFromClass(ctx context.Context, teacherID, groupID, studentID string) error {
+	ok, err := s.TeacherOwnsClass(ctx, teacherID, groupID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNotYourClass
+	}
+	_, err = s.db.Exec(ctx,
+		`DELETE FROM group_students WHERE group_id=$1 AND user_id=$2`, groupID, studentID)
+	return err
+}

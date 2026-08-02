@@ -555,9 +555,9 @@ func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 	type groupRow struct {
 		ID          string     `json:"id"`
 		Name        string     `json:"name"`
-		Description *string    `json:"description,omitempty"`
+		Description *string    `json:"description"`
 		InviteCode  string     `json:"invite_code"`
-		ArchivedAt  *time.Time `json:"archived_at,omitempty"`
+		ArchivedAt  *time.Time `json:"archived_at"`
 		CreatedAt   time.Time  `json:"created_at"`
 	}
 	var groups []groupRow
@@ -597,8 +597,16 @@ func (h *Handler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/institution/groups/:groupId
 func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 	groupID := chi.URLParam(r, "groupId")
-	var name string
-	h.db.QueryRow(r.Context(), `SELECT name FROM groups WHERE id=$1`, groupID).Scan(&name)
+	instID := middleware.GetInstitutionID(r)
+
+	var name, inviteCode string
+	var description *string
+	if err := h.db.QueryRow(r.Context(),
+		`SELECT name, description, invite_code FROM groups WHERE id=$1 AND institution_id=$2`,
+		groupID, instID).Scan(&name, &description, &inviteCode); err != nil {
+		middleware.NotFound(w, "group not found")
+		return
+	}
 
 	var studentCount int
 	var avgScore float64
@@ -609,8 +617,66 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 		 JOIN group_students gs ON gs.user_id=qa.user_id
 		 WHERE gs.group_id=$1 AND qa.status='completed'`, groupID).Scan(&avgScore)
 
+	type studentRow struct {
+		EnrollmentID  *string `json:"enrollment_id"`
+		ID            string  `json:"id"`
+		DisplayName   string  `json:"display_name"`
+		Email         string  `json:"email"`
+		Status        string  `json:"status"`
+		TotalPoints   int64   `json:"total_points"`
+		CurrentStreak int     `json:"current_streak"`
+		AverageScore  float64 `json:"average_score"`
+	}
+	students := []studentRow{}
+	srows, err := h.db.Query(r.Context(),
+		`SELECT e.id, u.id, COALESCE(u.display_name, ''), COALESCE(u.email, ''),
+		        COALESCE(e.status, 'active'),
+		        COALESCE(u.total_points,0), COALESCE(u.current_streak,0),
+		        COALESCE((SELECT AVG(score_pct) FROM quiz_attempts
+		                   WHERE user_id=u.id AND status='completed'),0)
+		   FROM group_students gs
+		   JOIN users u ON u.id = gs.user_id
+		   LEFT JOIN enrollments e ON e.user_id = u.id AND e.institution_id = $2
+		  WHERE gs.group_id=$1
+		  ORDER BY u.display_name`, groupID, instID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	for srows.Next() {
+		var s studentRow
+		srows.Scan(&s.EnrollmentID, &s.ID, &s.DisplayName, &s.Email, &s.Status,
+			&s.TotalPoints, &s.CurrentStreak, &s.AverageScore)
+		students = append(students, s)
+	}
+	srows.Close()
+
+	type teacherRow struct {
+		ID          string `json:"id"`
+		DisplayName string `json:"display_name"`
+		Email       string `json:"email"`
+		Status      string `json:"status"`
+	}
+	teachers := []teacherRow{}
+	trows, err := h.db.Query(r.Context(),
+		`SELECT u.id, COALESCE(u.display_name,''), COALESCE(u.email,''), u.status
+		   FROM group_teachers gt JOIN users u ON u.id = gt.user_id
+		  WHERE gt.group_id=$1 ORDER BY u.display_name`, groupID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	for trows.Next() {
+		var t teacherRow
+		trows.Scan(&t.ID, &t.DisplayName, &t.Email, &t.Status)
+		teachers = append(teachers, t)
+	}
+	trows.Close()
+
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
-		"id": groupID, "name": name, "student_count": studentCount, "average_score": avgScore,
+		"id": groupID, "name": name, "description": description, "invite_code": inviteCode,
+		"student_count": studentCount, "average_score": avgScore,
+		"students": students, "teachers": teachers,
 	})
 }
 

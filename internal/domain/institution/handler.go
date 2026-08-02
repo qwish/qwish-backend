@@ -758,6 +758,14 @@ func (h *Handler) AddTeacherToGroup(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "teacher assigned to group"})
 }
 
+// DELETE /api/v1/institution/groups/:groupId/teachers/:userId
+func (h *Handler) RemoveTeacherFromGroup(w http.ResponseWriter, r *http.Request) {
+	h.db.Exec(r.Context(),
+		`DELETE FROM group_teachers WHERE group_id=$1 AND user_id=$2`,
+		chi.URLParam(r, "groupId"), chi.URLParam(r, "userId"))
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "teacher removed from group"})
+}
+
 // PATCH /api/v1/institution/groups/:groupId
 func (h *Handler) UpdateGroup(w http.ResponseWriter, r *http.Request) {
 	groupID := chi.URLParam(r, "groupId")

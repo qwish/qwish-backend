@@ -281,11 +281,31 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 		groups = append(groups, g)
 	}
 
+	// The live enrollment. Without it this page cannot address the enrollment
+	// at all, and PATCH /enrollments/{id} replaces every column it is sent —
+	// so admission_date has to come back here or an edit would blank it.
+	var enrollmentID, enrollmentStatus string
+	var rollNumber, grade, section *string
+	var admissionDate *time.Time
+	h.db.QueryRow(r.Context(),
+		`SELECT id, status, roll_number, grade, section, admission_date FROM enrollments
+		  WHERE user_id=$1 AND institution_id=$2 AND status IN ('active','suspended')`,
+		studentID, instID).Scan(&enrollmentID, &enrollmentStatus, &rollNumber, &grade, &section, &admissionDate)
+
+	var admissionDateStr *string
+	if admissionDate != nil {
+		s := admissionDate.Format("2006-01-02")
+		admissionDateStr = &s
+	}
+
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"id": studentID, "display_name": displayName, "email": email, "status": status,
 		"total_points": points, "current_streak": streak, "average_score": avgScore,
 		"quizzes_taken": quizCount, "member_since": memberSince,
 		"quiz_history": attempts, "groups": groups,
+		"enrollment_id": enrollmentID, "enrollment_status": enrollmentStatus,
+		"roll_number": rollNumber, "grade": grade, "section": section,
+		"admission_date": admissionDateStr,
 	})
 }
 

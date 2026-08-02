@@ -447,6 +447,7 @@ func main() {
 					r.Post("/groups/{groupId}/students", institutionH.AddStudentToGroup)
 					r.Delete("/groups/{groupId}/students/{userId}", institutionH.RemoveStudentFromGroup)
 					r.Post("/groups/{groupId}/teachers", institutionH.AddTeacherToGroup)
+					r.Delete("/groups/{groupId}/teachers/{userId}", institutionH.RemoveTeacherFromGroup)
 					r.Get("/quizzes", quizH.List)
 					r.Get("/quizzes/{quizId}", quizH.Get)
 					r.Get("/topic-requests", topicH.TeacherList)

@@ -134,6 +134,19 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 		args = append(args, groupID)
 		n++
 	}
+	// Grade and section filter here rather than in the browser because the
+	// endpoint paginates: a client-side filter would narrow one page, not the
+	// roster.
+	if grade := q.Get("grade"); grade != "" {
+		where += fmt.Sprintf(` AND e.grade=$%d`, n)
+		args = append(args, grade)
+		n++
+	}
+	if section := q.Get("section"); section != "" {
+		where += fmt.Sprintf(` AND e.section=$%d`, n)
+		args = append(args, section)
+		n++
+	}
 
 	var total int
 	h.db.QueryRow(r.Context(),
@@ -159,7 +172,11 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 		        COALESCE(u.total_points,0), COALESCE(u.current_streak,0), u.last_active_at,
 		        COALESCE((SELECT AVG(score_pct) FROM quiz_attempts
 		                   WHERE user_id=e.user_id AND status='completed'
-		                     AND completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)),0) AS avg_score
+		                     AND completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)),0) AS avg_score,
+		        e.claim_code,
+		        COALESCE((SELECT json_agg(json_build_object('id', g.id, 'name', g.name))
+		                    FROM group_students gs JOIN groups g ON g.id = gs.group_id
+		                   WHERE gs.user_id = e.user_id), '[]'::json) AS groups
 		   FROM enrollments e LEFT JOIN users u ON u.id = e.user_id
 		  WHERE `+where+` ORDER BY `+sortCol+fmt.Sprintf(` LIMIT $%d OFFSET $%d`, n, n+1),
 		args...)
@@ -169,6 +186,10 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
+	type groupRef struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
 	type studentRow struct {
 		EnrollmentID  string     `json:"enrollment_id"`
 		ID            *string    `json:"id"` // null until the roster row is claimed
@@ -182,12 +203,17 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 		CurrentStreak int        `json:"current_streak"`
 		LastActiveAt  *time.Time `json:"last_active_at,omitempty"`
 		AverageScore  float64    `json:"average_score"`
+		// Only a pending_claim row has a live code. Claimed rows carry NULL,
+		// which is what stops the roster screen offering a code to copy.
+		ClaimCode *string    `json:"claim_code"`
+		Groups    []groupRef `json:"groups"`
 	}
 	var students []studentRow
 	for rows.Next() {
 		var s studentRow
 		rows.Scan(&s.EnrollmentID, &s.ID, &s.DisplayName, &s.Email, &s.RollNumber, &s.Grade,
-			&s.Section, &s.Status, &s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.AverageScore)
+			&s.Section, &s.Status, &s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.AverageScore,
+			&s.ClaimCode, &s.Groups)
 		students = append(students, s)
 	}
 	if students == nil { students = []studentRow{} }
@@ -255,11 +281,31 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 		groups = append(groups, g)
 	}
 
+	// The live enrollment. Without it this page cannot address the enrollment
+	// at all, and PATCH /enrollments/{id} replaces every column it is sent —
+	// so admission_date has to come back here or an edit would blank it.
+	var enrollmentID, enrollmentStatus string
+	var rollNumber, grade, section *string
+	var admissionDate *time.Time
+	h.db.QueryRow(r.Context(),
+		`SELECT id, status, roll_number, grade, section, admission_date FROM enrollments
+		  WHERE user_id=$1 AND institution_id=$2 AND status IN ('active','suspended')`,
+		studentID, instID).Scan(&enrollmentID, &enrollmentStatus, &rollNumber, &grade, &section, &admissionDate)
+
+	var admissionDateStr *string
+	if admissionDate != nil {
+		s := admissionDate.Format("2006-01-02")
+		admissionDateStr = &s
+	}
+
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"id": studentID, "display_name": displayName, "email": email, "status": status,
 		"total_points": points, "current_streak": streak, "average_score": avgScore,
 		"quizzes_taken": quizCount, "member_since": memberSince,
 		"quiz_history": attempts, "groups": groups,
+		"enrollment_id": enrollmentID, "enrollment_status": enrollmentStatus,
+		"roll_number": rollNumber, "grade": grade, "section": section,
+		"admission_date": admissionDateStr,
 	})
 }
 

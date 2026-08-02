@@ -2,7 +2,7 @@
 
 Date: 2026-08-02
 Status: Approved for planning
-Scope: `qwish-institute-dashboard`, `qwish-teacher-panel`
+Scope: `qwish-institute-dashboard`, `qwish-teacher-panel`, one handler in `qwish-backend`
 Depends on: `2026-08-01-student-management-design.md` (shipped)
 
 ## Problem
@@ -28,7 +28,8 @@ run a roster.
   institution-owned enrollment fields, manage group membership, or show the
   pending edit-requests that belong to that student.
 
-This is entirely a frontend gap. Every endpoint the work needs already exists.
+Every endpoint this work needs already exists. The gap is the screens, plus
+three missing fields on one existing list payload (see Backend Delta).
 
 ## Approach
 
@@ -43,6 +44,30 @@ stays cheap whenever the UI stops churning.
 
 Bulk actions are client-side sequential loops over the existing per-student
 endpoints. No new backend routes.
+
+## Backend Delta
+
+The claim that this is purely frontend work holds for routes but not quite for
+payloads. `GET /institution/students` is missing three things the roster screen
+needs, all inside the one handler at
+`internal/domain/institution/handler.go:104`:
+
+1. **`claim_code` is not selected.** Without it the claim-code copy action and
+   the codes CSV cannot exist at all — the value is only otherwise returned by
+   `POST /institution/students`, once, at creation.
+2. **No `grade` or `section` filter.** The endpoint paginates server-side, so
+   filtering these in the browser would filter one page rather than the roster.
+3. **`groups` is never populated.** `StudentRow.groups` is declared in the
+   frontend types and rendered as a column today, but the handler does not
+   select it, so the column always shows an em dash. Bulk group assignment
+   needs it to show its own result.
+
+Together these are about a dozen lines of SQL in a single existing handler: two
+extra selected columns, a group-name aggregate subquery, and two `WHERE`
+clauses. No new route, no migration, no service change.
+
+The grade and section filters are free-text inputs rather than dropdowns, which
+avoids a distinct-values endpoint that would exist only to populate two selects.
 
 ## Design System
 
@@ -86,7 +111,8 @@ it. The toast provider mounts in each app's `(dashboard)/layout.tsx`.
 - Filters extend from search and status to include grade, section and group.
 - Claim codes become usable: `pending_claim` rows expose a copy-code action, and
   the toolbar offers "Download codes CSV" for the current filter, built in the
-  browser from the list response. No new endpoint.
+  browser from the list response once that response carries `claim_code`. No new
+  endpoint.
 - `window.confirm` calls become `ConfirmDialog`, keeping the existing copy that
   states what actually happens to the student's account. Errors become toasts.
 
@@ -112,6 +138,12 @@ it. The toast provider mounts in each app's `(dashboard)/layout.tsx`.
   student" control and a per-row Remove appear, wired to the existing
   class-student endpoints; with no class selected the roster is read-only,
   because those endpoints are addressed by class.
+- The Add-student picker offers the teacher's own students who are not already
+  in the selected class. `GET /teacher/students` is class-scoped, so a teacher
+  can move a student between their classes but cannot pull in a student they do
+  not already teach. The backend would accept any student of the institution;
+  the teacher panel simply has no way to enumerate them, and inventing one is
+  out of scope.
 - "Suggest a correction" survives, moved into a per-row action menu.
   `NOT_IN_YOUR_CLASS` renders as a toast naming the student.
 
@@ -145,7 +177,8 @@ Verification is:
 
 ## Out of Scope
 
-- Backend changes of any kind. Every endpoint this UI needs exists.
+- New backend routes, migrations or service logic. The only backend change is
+  the payload delta above, inside one existing handler.
 - Batch API endpoints. The client-side loop is the deliberate first version.
 - Extracting a shared `@qwish/ui` package. Revisit once these screens settle.
 - The super-admin console and numpie. Their student surfaces are separate work.

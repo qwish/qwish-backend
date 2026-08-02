@@ -542,7 +542,10 @@ func main() {
 					r.With(mw.RequireRole("super_admin")).Post("/users/{userId}/reset-password", adminH.ResetPassword)
 
 					// Quizzes moderation
+					// /moderation-queue precedes the list so chi does not read
+					// "moderation-queue" as a quiz id.
 					r.Get("/quizzes/moderation-queue", adminH.ModerationQueue)
+					r.Get("/quizzes", adminH.ListQuizzes)
 					r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/approve", adminH.ApproveQuiz)
 					r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/reject", adminH.RejectQuiz)
 					r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/request-edits", adminH.RequestEdits)

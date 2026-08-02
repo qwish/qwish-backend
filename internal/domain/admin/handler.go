@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -622,6 +623,91 @@ func (h *Handler) EndImpersonation(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/v1/admin/quizzes/moderation-queue
+// GET /api/v1/admin/quizzes?institution_id=&status=&search=&page=&limit=
+//
+// The console's own quiz list. The console previously read the learner-facing
+// /quizzes for this, which answers only what a learner may browse — so drafts,
+// rejected and institution-private quizzes were invisible to an admin looking
+// at an institution's catalogue.
+//
+// attempt_count is counted from quiz_attempts rather than read off the quizzes
+// row: there is no denormalised counter on the table.
+func (h *Handler) ListQuizzes(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
+	offset := (page - 1) * limit
+
+	args := []interface{}{}
+	where := `qz.deleted_at IS NULL`
+	n := 1
+	if v := q.Get("institution_id"); v != "" {
+		where += fmt.Sprintf(` AND qz.institution_id=$%d`, n)
+		args = append(args, v)
+		n++
+	}
+	if v := q.Get("status"); v != "" {
+		where += fmt.Sprintf(` AND qz.status=$%d`, n)
+		args = append(args, v)
+		n++
+	}
+	if s := q.Get("search"); s != "" {
+		where += fmt.Sprintf(` AND (qz.title ILIKE $%d OR u.display_name ILIKE $%d)`, n, n)
+		args = append(args, "%"+s+"%")
+		n++
+	}
+
+	var total int
+	h.db.QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM quizzes qz JOIN users u ON u.id=qz.created_by WHERE `+where,
+		args...).Scan(&total)
+	args = append(args, limit, offset)
+
+	rows, err := h.db.Query(r.Context(),
+		`SELECT qz.id, qz.title, u.display_name, COALESCE(i.name,''), qz.status, qz.visibility,
+		        qz.question_count,
+		        (SELECT COUNT(*) FROM quiz_attempts a WHERE a.quiz_id=qz.id),
+		        qz.published_at, qz.created_at
+		   FROM quizzes qz
+		   JOIN users u ON u.id=qz.created_by
+		   LEFT JOIN institutions i ON i.id=qz.institution_id
+		  WHERE `+where+fmt.Sprintf(` ORDER BY qz.created_at DESC LIMIT $%d OFFSET $%d`, n, n+1),
+		args...)
+	if err != nil {
+		log.Printf("ListQuizzes: %v", err)
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+
+	type quizRow struct {
+		ID            string     `json:"id"`
+		Title         string     `json:"title"`
+		Author        string     `json:"author"`
+		Institution   string     `json:"institution"`
+		Status        string     `json:"status"`
+		Visibility    string     `json:"visibility"`
+		QuestionCount int        `json:"question_count"`
+		AttemptCount  int64      `json:"attempt_count"`
+		PublishedAt   *time.Time `json:"published_at,omitempty"`
+		CreatedAt     time.Time  `json:"created_at"`
+	}
+	quizzes := []quizRow{}
+	for rows.Next() {
+		var x quizRow
+		rows.Scan(&x.ID, &x.Title, &x.Author, &x.Institution, &x.Status, &x.Visibility,
+			&x.QuestionCount, &x.AttemptCount, &x.PublishedAt, &x.CreatedAt)
+		quizzes = append(quizzes, x)
+	}
+	middleware.JSONWithMeta(w, http.StatusOK, quizzes, &middleware.Meta{Page: page, Limit: limit, Total: total})
+}
+
 func (h *Handler) ModerationQueue(w http.ResponseWriter, r *http.Request) {
 	rows, _ := h.db.Query(r.Context(),
 		`SELECT q.id, q.title, u.display_name, i.name, q.question_count, q.created_at
@@ -1249,12 +1335,19 @@ func (h *Handler) ListAnnouncements(w http.ResponseWriter, r *http.Request) {
 	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM announcements WHERE `+where, args...).Scan(&total)
 	args = append(args, limit, offset)
 
+	// cta_*, the author and the reach estimate are stored on create but were
+	// never selected here, so the console rendered them as blank.
 	rows, err := h.db.Query(r.Context(),
-		`SELECT id, title, body, delivery_types, audience, status, scheduled_at, sent_at, created_at
-		 FROM announcements WHERE `+where+
-			fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, n, n+1),
+		`SELECT a.id, a.title, a.body, a.cta_label, a.cta_url, a.delivery_types, a.audience,
+		        a.status, a.scheduled_at, a.sent_at, a.created_at,
+		        COALESCE(ac.name,''), COALESCE(a.estimated_reach, 0)
+		 FROM announcements a
+		 LEFT JOIN admin_accounts ac ON ac.id = a.created_by
+		 WHERE `+where+
+			fmt.Sprintf(` ORDER BY a.created_at DESC LIMIT $%d OFFSET $%d`, n, n+1),
 		args...)
 	if err != nil {
+		log.Printf("ListAnnouncements: %v", err)
 		middleware.InternalError(w)
 		return
 	}
@@ -1264,17 +1357,22 @@ func (h *Handler) ListAnnouncements(w http.ResponseWriter, r *http.Request) {
 		ID            string          `json:"id"`
 		Title         string          `json:"title"`
 		Body          string          `json:"body"`
+		CTALabel      *string         `json:"cta_label,omitempty"`
+		CTAURL        *string         `json:"cta_url,omitempty"`
 		DeliveryTypes json.RawMessage `json:"delivery_types"`
 		Audience      string          `json:"audience"`
 		Status        string          `json:"status"`
 		ScheduledAt   *time.Time      `json:"scheduled_at,omitempty"`
 		SentAt        *time.Time      `json:"sent_at,omitempty"`
 		CreatedAt     time.Time       `json:"created_at"`
+		SentBy        string          `json:"sent_by"`
+		Reach         int             `json:"reach"`
 	}
 	var items []ann
 	for rows.Next() {
 		var a ann
-		rows.Scan(&a.ID, &a.Title, &a.Body, &a.DeliveryTypes, &a.Audience, &a.Status, &a.ScheduledAt, &a.SentAt, &a.CreatedAt)
+		rows.Scan(&a.ID, &a.Title, &a.Body, &a.CTALabel, &a.CTAURL, &a.DeliveryTypes, &a.Audience,
+			&a.Status, &a.ScheduledAt, &a.SentAt, &a.CreatedAt, &a.SentBy, &a.Reach)
 		items = append(items, a)
 	}
 	if items == nil {
@@ -1326,17 +1424,27 @@ func (h *Handler) ListPromos(w http.ResponseWriter, r *http.Request) {
 	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM promotional_content WHERE `+where, args...).Scan(&total)
 	args = append(args, limit, offset)
 
+	// The author was stored but never selected, so the console rendered
+	// "by undefined". There is no impression counter on this table — see
+	// the note on the response type.
 	rows, err := h.db.Query(r.Context(),
-		`SELECT id, type, title, body, cta_label, cta_url, audience, status, starts_at, ends_at, created_at
-		 FROM promotional_content WHERE `+where+
-			fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, n, n+1),
+		`SELECT p.id, p.type, p.title, p.body, p.cta_label, p.cta_url, p.audience, p.status,
+		        p.starts_at, p.ends_at, p.created_at, COALESCE(ac.name,'')
+		 FROM promotional_content p
+		 LEFT JOIN admin_accounts ac ON ac.id = p.created_by
+		 WHERE `+where+
+			fmt.Sprintf(` ORDER BY p.created_at DESC LIMIT $%d OFFSET $%d`, n, n+1),
 		args...)
 	if err != nil {
+		log.Printf("ListPromos: %v", err)
 		middleware.InternalError(w)
 		return
 	}
 	defer rows.Close()
 
+	// No Impressions field: nothing records promo impressions yet, and a
+	// hardcoded zero dressed as a metric is worse than an absent one. The
+	// console treats it as unavailable.
 	type promo struct {
 		ID        string     `json:"id"`
 		Type      string     `json:"placement"`
@@ -1349,11 +1457,13 @@ func (h *Handler) ListPromos(w http.ResponseWriter, r *http.Request) {
 		StartsAt  *time.Time `json:"start_date,omitempty"`
 		EndsAt    *time.Time `json:"end_date,omitempty"`
 		CreatedAt time.Time  `json:"created_at"`
+		CreatedBy string     `json:"created_by"`
 	}
 	var promos []promo
 	for rows.Next() {
 		var p promo
-		rows.Scan(&p.ID, &p.Type, &p.Title, &p.Body, &p.CTALabel, &p.CTAURL, &p.Audience, &p.Status, &p.StartsAt, &p.EndsAt, &p.CreatedAt)
+		rows.Scan(&p.ID, &p.Type, &p.Title, &p.Body, &p.CTALabel, &p.CTAURL, &p.Audience, &p.Status,
+			&p.StartsAt, &p.EndsAt, &p.CreatedAt, &p.CreatedBy)
 		promos = append(promos, p)
 	}
 	if promos == nil {
@@ -1464,12 +1574,19 @@ func (h *Handler) ListBrands(w http.ResponseWriter, r *http.Request) {
 	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM brands WHERE `+where, args...).Scan(&total)
 	args = append(args, limit, offset)
 
+	// joined_at and active_sponsors were expected by the console but never
+	// sent. Nothing tracks reward-pool spend anywhere in the schema, so no
+	// reward_pool_used is invented here.
 	rows, err := h.db.Query(r.Context(),
-		`SELECT id, name, industry, contact_email, website, reward_pool, status, created_at
-		 FROM brands WHERE `+where+
-			fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, n, n+1),
+		`SELECT b.id, b.name, b.industry, b.contact_email, b.website, b.reward_pool, b.status,
+		        b.created_at,
+		        (SELECT COUNT(*) FROM sponsorship_requests s
+		          WHERE s.brand_id = b.id AND s.status = 'approved')
+		 FROM brands b WHERE `+where+
+			fmt.Sprintf(` ORDER BY b.created_at DESC LIMIT $%d OFFSET $%d`, n, n+1),
 		args...)
 	if err != nil {
+		log.Printf("ListBrands: %v", err)
 		middleware.InternalError(w)
 		return
 	}
@@ -1484,11 +1601,16 @@ func (h *Handler) ListBrands(w http.ResponseWriter, r *http.Request) {
 		RewardPool   float64   `json:"reward_pool"`
 		Status       string    `json:"status"`
 		CreatedAt    time.Time `json:"created_at"`
+		// Alias of CreatedAt: the console labels this "Joined".
+		JoinedAt       time.Time `json:"joined_at"`
+		ActiveSponsors int       `json:"active_sponsors"`
 	}
 	var brands []brand
 	for rows.Next() {
 		var b brand
-		rows.Scan(&b.ID, &b.Name, &b.Industry, &b.ContactEmail, &b.Website, &b.RewardPool, &b.Status, &b.CreatedAt)
+		rows.Scan(&b.ID, &b.Name, &b.Industry, &b.ContactEmail, &b.Website, &b.RewardPool, &b.Status,
+			&b.CreatedAt, &b.ActiveSponsors)
+		b.JoinedAt = b.CreatedAt
 		brands = append(brands, b)
 	}
 	if brands == nil {

@@ -601,6 +601,18 @@ func main() {
 				})
 			})
 
+			// ---- Query profiling (EXPLAIN ANALYZE on the real list queries) ----
+			// Runs in production too — that's where the data lives — so it is
+			// registered ONLY when CRON_SECRET is actually set. With an empty
+			// secret the header check would match a missing header and leave
+			// the endpoint open.
+			if cfg.CronSecret != "" {
+				r.Route("/internal/profile", func(r chi.Router) {
+					r.Use(mw.RequireCronSecret(cfg.CronSecret))
+					r.Get("/quiz-list", quizH.Profile)
+				})
+			}
+
 			// ---- Internal cron endpoints (development/manual trigger only) ----
 			if cfg.AppEnv != "production" {
 				r.Route("/internal/cron", func(r chi.Router) {

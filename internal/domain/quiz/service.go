@@ -75,10 +75,22 @@ type AddQuestionReq struct {
 	Clues            json.RawMessage `json:"clues,omitempty"`
 }
 
-func (s *Service) ListForStudent(ctx context.Context, institutionID, quizType, saved, search, userID string, page, limit int) ([]Quiz, int, error) {
-	offset := (page - 1) * limit
-	var total int
+// studentListSelect is the SELECT/FROM prefix of the student quiz list query.
+// Shared with the profiling endpoint so profiled plans match production SQL.
+const studentListSelect = `SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
+		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
+		        (SELECT COUNT(*) FROM quiz_attempts qa WHERE qa.quiz_id = q.id AND qa.status = 'completed') AS taker_count,
+		        q.ends_at, q.published_at, q.group_id, q.created_at
+		 FROM quizzes q
+		 JOIN users u ON u.id = q.created_by
+		 LEFT JOIN institutions i ON i.id = u.institution_id
+		 WHERE `
 
+// studentListWhere builds the WHERE clause and its args for the student quiz
+// list. Extracted so ListForStudent and the profiling endpoint always run the
+// same SQL — a profiler that drifts from the real query is worse than none.
+// Invariant: the next free placeholder is always $(len(args)+1).
+func studentListWhere(institutionID, quizType, saved, search, userID string) (string, []interface{}) {
 	var baseWhere string
 	var args []interface{}
 	if institutionID != "" {
@@ -103,21 +115,24 @@ func (s *Service) ListForStudent(ctx context.Context, institutionID, quizType, s
 	if search != "" {
 		baseWhere += fmt.Sprintf(` AND (q.title ILIKE $%d OR q.description ILIKE $%d)`, argN, argN)
 		args = append(args, "%"+search+"%")
-		argN++
 	}
+	return baseWhere, args
+}
 
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quizzes q WHERE `+baseWhere, args...).Scan(&total)
+func (s *Service) ListForStudent(ctx context.Context, institutionID, quizType, saved, search, userID string, page, limit int) ([]Quiz, int, error) {
+	offset := (page - 1) * limit
+	var total int
+
+	baseWhere, args := studentListWhere(institutionID, quizType, saved, search, userID)
+	argN := len(args) + 1
+
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quizzes q WHERE `+baseWhere, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(ctx,
-		`SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
-		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
-		        (SELECT COUNT(*) FROM quiz_attempts qa WHERE qa.quiz_id = q.id AND qa.status = 'completed') AS taker_count,
-		        q.ends_at, q.published_at, q.group_id, q.created_at
-		 FROM quizzes q
-		 JOIN users u ON u.id = q.created_by
-		 LEFT JOIN institutions i ON i.id = u.institution_id
-		 WHERE `+baseWhere+
+		studentListSelect+baseWhere+
 			fmt.Sprintf(` ORDER BY q.published_at DESC LIMIT $%d OFFSET $%d`, argN, argN+1),
 		args...)
 	if err != nil {

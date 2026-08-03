@@ -147,6 +147,22 @@ func main() {
 			r.Get("/users/me/notifications/stream", notifH.Stream)
 		})
 
+		// ---- Query profiling (EXPLAIN ANALYZE on the real list queries) ----
+		// Authenticated by CRON_SECRET only, so it sits outside the Supabase
+		// auth group — an ops/cron caller has no JWT. Runs in production too,
+		// since that is where the data lives, and is registered ONLY when
+		// CRON_SECRET is non-empty: RequireCronSecret compares a missing
+		// header against the configured value, so an empty secret would leave
+		// the endpoint unauthenticated.
+		// Outside the 30s timeout group as well — EXPLAIN ANALYZE executes
+		// every query and the handler enforces its own 60s budget.
+		if cfg.CronSecret != "" {
+			r.Route("/internal/profile", func(r chi.Router) {
+				r.Use(mw.RequireCronSecret(cfg.CronSecret))
+				r.Get("/quiz-list", quizH.Profile)
+			})
+		}
+
 		// Normal endpoints subject to 30s timeout
 		r.Group(func(r chi.Router) {
 			r.Use(chimw.Timeout(30 * time.Second))
@@ -600,18 +616,6 @@ func main() {
 					r.With(mw.RequireRole("super_admin")).Post("/admin-accounts/{adminId}/resend", adminH.ResendAdminInvite)
 				})
 			})
-
-			// ---- Query profiling (EXPLAIN ANALYZE on the real list queries) ----
-			// Runs in production too — that's where the data lives — so it is
-			// registered ONLY when CRON_SECRET is actually set. With an empty
-			// secret the header check would match a missing header and leave
-			// the endpoint open.
-			if cfg.CronSecret != "" {
-				r.Route("/internal/profile", func(r chi.Router) {
-					r.Use(mw.RequireCronSecret(cfg.CronSecret))
-					r.Get("/quiz-list", quizH.Profile)
-				})
-			}
 
 			// ---- Internal cron endpoints (development/manual trigger only) ----
 			if cfg.AppEnv != "production" {

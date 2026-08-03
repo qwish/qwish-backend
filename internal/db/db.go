@@ -19,8 +19,12 @@ func Connect(databaseURL string) *pgxpool.Pool {
 	// MinConns of 0, idle connections are dropped and every burst after a quiet
 	// spell re-pays that cost — which is why endpoints "feel slow" even with a
 	// handful of users. MinConns pre-warms the pool so requests reuse live conns.
-	cfg.MinConns = 10
-	cfg.MaxConns = 50
+	// ponytail: sized for a single 0.1-CPU / 512MB Render instance against the
+	// Supabase session pooler. 0.1 CPU cannot drive 50 parallel queries, and a
+	// large pool just holds pooler slots hostage. Raise MaxConns only after
+	// pool.Stat().EmptyAcquireCount() is actually climbing.
+	cfg.MinConns = 2
+	cfg.MaxConns = 10
 	cfg.MaxConnLifetime = time.Hour
 	cfg.MaxConnIdleTime = 30 * time.Minute
 	cfg.HealthCheckPeriod = time.Minute

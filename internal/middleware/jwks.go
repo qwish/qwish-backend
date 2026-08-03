@@ -7,11 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/qwish/backend/internal/httpx"
 )
 
 type jwksKey struct {
@@ -27,15 +28,24 @@ type jwksResponse struct {
 }
 
 type jwksCache struct {
-	mu        sync.RWMutex
-	keys      map[string]*ecdsa.PublicKey
-	fetchedAt time.Time
-	url       string
+	mu sync.RWMutex
+	// keys/fetchedAt describe the last successful fetch; lastAttempt also covers
+	// failed ones so a dead JWKS endpoint isn't retried per request.
+	keys        map[string]*ecdsa.PublicKey
+	fetchedAt   time.Time
+	lastAttempt time.Time
+	url         string
 }
 
 var globalJWKS = &jwksCache{
 	keys: make(map[string]*ecdsa.PublicKey),
 }
+
+// jwksMinRefreshInterval throttles refetches. Without it an unauthenticated
+// caller can send tokens with a bogus `kid` and make every request miss the
+// cache, serializing all ES256 auth behind the write lock and hammering the
+// JWKS endpoint.
+const jwksMinRefreshInterval = time.Minute
 
 func (c *jwksCache) getKey(kid string) (*ecdsa.PublicKey, error) {
 	c.mu.RLock()
@@ -50,10 +60,25 @@ func (c *jwksCache) getKey(kid string) (*ecdsa.PublicKey, error) {
 }
 
 func (c *jwksCache) refresh(kid string) (*ecdsa.PublicKey, error) {
+	// Claim the right to fetch under the lock, then release it: the HTTP call
+	// must not happen while holding the mutex, or one slow JWKS response blocks
+	// every concurrent ES256 verification for its whole duration.
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	// Another goroutine may have refreshed while we waited for the lock, and a
+	// recent refresh that didn't produce this kid won't produce it now either.
+	if key, ok := c.keys[kid]; ok && time.Since(c.fetchedAt) < time.Hour {
+		c.mu.Unlock()
+		return key, nil
+	}
+	if time.Since(c.lastAttempt) < jwksMinRefreshInterval {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("kid %q not found in jwks", kid)
+	}
+	c.lastAttempt = time.Now()
+	url := c.url
+	c.mu.Unlock()
 
-	resp, err := http.Get(c.url) //nolint:gosec
+	resp, err := httpx.Client.Get(url) //nolint:gosec
 	if err != nil {
 		return nil, fmt.Errorf("fetch jwks: %w", err)
 	}
@@ -83,13 +108,32 @@ func (c *jwksCache) refresh(kid string) (*ecdsa.PublicKey, error) {
 			Y:     new(big.Int).SetBytes(yBytes),
 		}
 	}
+	c.mu.Lock()
 	c.keys = newKeys
 	c.fetchedAt = time.Now()
+	key, ok := newKeys[kid]
+	c.mu.Unlock()
 
-	if key, ok := c.keys[kid]; ok {
+	if ok {
 		return key, nil
 	}
 	return nil, fmt.Errorf("kid %q not found in jwks", kid)
+}
+
+// SupabaseIssuer is the `iss` claim Supabase (and our own passkey token minting)
+// puts on access tokens.
+func SupabaseIssuer(supabaseURL string) string {
+	return strings.TrimRight(supabaseURL, "/") + "/auth/v1"
+}
+
+// parseOpts are the validation rules applied to every access token: signature
+// algorithm, and the issuer so a token minted for another project can't be
+// replayed here.
+func parseOpts(supabaseURL string) []jwt.ParserOption {
+	return []jwt.ParserOption{
+		jwt.WithValidMethods([]string{"HS256", "ES256"}),
+		jwt.WithIssuer(SupabaseIssuer(supabaseURL)),
+	}
 }
 
 // makeKeyFunc returns a jwt.Keyfunc that handles both HS256 and ES256 Supabase tokens.

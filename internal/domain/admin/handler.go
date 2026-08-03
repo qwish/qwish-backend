@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+
+	"github.com/qwish/backend/internal/httpx"
 	"strconv"
 	"time"
 
@@ -1265,7 +1267,7 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	req.Header.Set("apikey", h.cfg.SupabaseServiceKey)
 	req.Header.Set("Authorization", "Bearer "+h.cfg.SupabaseServiceKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpx.Client.Do(req)
 	if err != nil {
 		middleware.InternalError(w)
 		return

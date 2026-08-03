@@ -264,6 +264,7 @@ func (s *Service) mintAccessToken(supabaseUID, email string) (string, error) {
 		"email": email,
 		"role":  "authenticated",
 		"aud":   "authenticated",
+		"iss":   middleware.SupabaseIssuer(s.cfg.SupabaseURL),
 		"iat":   now.Unix(),
 		"exp":   now.Add(passkeyAccessTTL).Unix(),
 		"amr":   []map[string]any{{"method": "webauthn"}},

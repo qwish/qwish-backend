@@ -7,6 +7,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // RowVerdict is one row's outcome. In a dry run this is the whole response;
@@ -101,26 +103,82 @@ func ParseCSV(r io.Reader) ([]RosterInput, []RowVerdict, error) {
 	return rows, bad, nil
 }
 
+// querier is the subset of pgxpool.Pool and pgx.Tx that matchRoster needs, so
+// preview (pool) and commit (transaction) can share one lookup.
+type querier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+// rosterMatch indexes the institution's live enrollments by roll number and by
+// email, in a single query, so importing N rows costs one round trip instead of
+// N. A 500-row spreadsheet used to mean 500 sequential queries.
+type rosterMatch struct {
+	byRoll  map[string]string
+	byEmail map[string]string
+}
+
+// id returns the live enrollment this row updates, or "" to create. Roll number
+// wins over email when both are present, matching the original per-row order.
+func (m rosterMatch) id(in RosterInput) string {
+	if in.RollNumber != "" {
+		return m.byRoll[in.RollNumber]
+	}
+	if in.Email != "" {
+		return m.byEmail[in.Email]
+	}
+	return ""
+}
+
+func matchRoster(ctx context.Context, q querier, instID string, rows []RosterInput) (rosterMatch, error) {
+	m := rosterMatch{byRoll: map[string]string{}, byEmail: map[string]string{}}
+	rollNumbers := make([]string, 0, len(rows))
+	emails := make([]string, 0, len(rows))
+	for _, in := range rows {
+		if in.RollNumber != "" {
+			rollNumbers = append(rollNumbers, in.RollNumber)
+		} else if in.Email != "" {
+			emails = append(emails, in.Email)
+		}
+	}
+	if len(rollNumbers) == 0 && len(emails) == 0 {
+		return m, nil
+	}
+
+	res, err := q.Query(ctx, `
+		SELECT id, COALESCE(roll_number,''), COALESCE(email,'')
+		  FROM enrollments
+		 WHERE institution_id=$1 AND ended_at IS NULL
+		   AND (roll_number = ANY($2::text[]) OR email = ANY($3::text[]))`,
+		instID, rollNumbers, emails)
+	if err != nil {
+		return m, err
+	}
+	defer res.Close()
+	for res.Next() {
+		var id, roll, email string
+		if err := res.Scan(&id, &roll, &email); err != nil {
+			return m, err
+		}
+		if roll != "" {
+			m.byRoll[roll] = id
+		}
+		if email != "" {
+			m.byEmail[email] = id
+		}
+	}
+	return m, res.Err()
+}
+
 // PreviewImport validates rows against the live roster and writes nothing.
 func (s *Service) PreviewImport(ctx context.Context, instID string, rows []RosterInput) ([]RowVerdict, error) {
+	match, err := matchRoster(ctx, s.db, instID, rows)
+	if err != nil {
+		return nil, err
+	}
 	verdicts := make([]RowVerdict, 0, len(rows))
 	for i, in := range rows {
 		v := RowVerdict{Row: i + 2, FullName: in.FullName, RollNumber: in.RollNumber, Action: "create"}
-
-		var existing int
-		switch {
-		case in.RollNumber != "":
-			s.db.QueryRow(ctx,
-				`SELECT COUNT(*) FROM enrollments
-				  WHERE institution_id=$1 AND roll_number=$2 AND ended_at IS NULL`,
-				instID, in.RollNumber).Scan(&existing)
-		case in.Email != "":
-			s.db.QueryRow(ctx,
-				`SELECT COUNT(*) FROM enrollments
-				  WHERE institution_id=$1 AND email=$2 AND ended_at IS NULL`,
-				instID, in.Email).Scan(&existing)
-		}
-		if existing > 0 {
+		if match.id(in) != "" {
 			v.Action = "update"
 		}
 		verdicts = append(verdicts, v)
@@ -137,20 +195,16 @@ func (s *Service) CommitImport(ctx context.Context, instID string, rows []Roster
 	}
 	defer tx.Rollback(ctx)
 
+	// Matched inside the transaction so the reads see the same snapshot as the
+	// writes below.
+	match, err := matchRoster(ctx, tx, instID, rows)
+	if err != nil {
+		return nil, err
+	}
+
 	created := make([]Enrollment, 0, len(rows))
 	for i, in := range rows {
-		var existingID string
-		if in.RollNumber != "" {
-			tx.QueryRow(ctx,
-				`SELECT id FROM enrollments
-				  WHERE institution_id=$1 AND roll_number=$2 AND ended_at IS NULL`,
-				instID, in.RollNumber).Scan(&existingID)
-		} else if in.Email != "" {
-			tx.QueryRow(ctx,
-				`SELECT id FROM enrollments
-				  WHERE institution_id=$1 AND email=$2 AND ended_at IS NULL`,
-				instID, in.Email).Scan(&existingID)
-		}
+		existingID := match.id(in)
 
 		if existingID != "" {
 			if _, err := tx.Exec(ctx,

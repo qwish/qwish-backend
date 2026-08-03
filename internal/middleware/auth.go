@@ -29,6 +29,7 @@ type userRow struct {
 
 func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Handler) http.Handler {
 	keyFunc := makeKeyFunc(jwtSecret, supabaseURL)
+	opts := parseOpts(supabaseURL)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
@@ -43,7 +44,7 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 				return
 			}
 
-			token, err := jwt.Parse(tokenStr, keyFunc, jwt.WithValidMethods([]string{"HS256", "ES256"}))
+			token, err := jwt.Parse(tokenStr, keyFunc, opts...)
 			if err != nil || !token.Valid {
 				Unauthorized(w)
 				return
@@ -61,21 +62,39 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 				return
 			}
 
-			// Look up in users table first, then admin_accounts
+			// One round trip for everything the rest of this middleware needs:
+			// the users row, its institution's status, and any admin_accounts
+			// row for the same uid. This used to be two or three sequential
+			// queries on every authenticated request. The outer LEFT JOINs off a
+			// single-row VALUES mean exactly one row always comes back, so a
+			// scan error here is a real failure, not "no such user".
 			var u userRow
-			err = db.QueryRow(r.Context(),
-				`SELECT id, role, institution_id, status FROM users WHERE supabase_uid = $1 AND deleted_at IS NULL`,
+			var instStatus, adminID, adminRole, adminStatus string
+			err = db.QueryRow(r.Context(), `
+				SELECT COALESCE(u.id::text,''), COALESCE(u.role,''),
+				       u.institution_id, COALESCE(u.status,''),
+				       COALESCE(i.status,''),
+				       COALESCE(a.id::text,''), COALESCE(a.role,''), COALESCE(a.status,'')
+				  FROM (VALUES ($1::uuid)) AS p(uid)
+				  LEFT JOIN users u
+				         ON u.supabase_uid = p.uid AND u.deleted_at IS NULL
+				  LEFT JOIN institutions i ON i.id = u.institution_id
+				  LEFT JOIN admin_accounts a
+				         ON a.supabase_uid = p.uid AND a.deleted_at IS NULL`,
 				supabaseUID,
-			).Scan(&u.ID, &u.Role, &u.InstitutionID, &u.Status)
-
+			).Scan(&u.ID, &u.Role, &u.InstitutionID, &u.Status,
+				&instStatus, &adminID, &adminRole, &adminStatus)
 			if err != nil {
-				// Try admin_accounts
-				var adminID, adminRole, adminStatus string
-				err2 := db.QueryRow(r.Context(),
-					`SELECT id, role, status FROM admin_accounts WHERE supabase_uid = $1 AND deleted_at IS NULL`,
-					supabaseUID,
-				).Scan(&adminID, &adminRole, &adminStatus)
-				if err2 != nil {
+				// Malformed sub (not a uuid) or a dead database — either way the
+				// request cannot be authenticated.
+				Unauthorized(w)
+				return
+			}
+
+			// No users row: fall back to the admin_accounts identity, exactly as
+			// the previous two-query version did.
+			if u.ID == "" {
+				if adminID == "" {
 					Unauthorized(w)
 					return
 				}
@@ -103,16 +122,10 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 			}
 
 			// Check institution suspension for non-admin users
-			if u.InstitutionID != nil && (u.Role == "student" || u.Role == "teacher") {
-				var instStatus string
-				_ = db.QueryRow(r.Context(),
-					`SELECT status FROM institutions WHERE id = $1`,
-					*u.InstitutionID,
-				).Scan(&instStatus)
-				if instStatus == "suspended" {
-					Error(w, http.StatusForbidden, "INSTITUTION_SUSPENDED", "your institution is currently suspended")
-					return
-				}
+			if u.InstitutionID != nil && (u.Role == "student" || u.Role == "teacher") &&
+				instStatus == "suspended" {
+				Error(w, http.StatusForbidden, "INSTITUTION_SUSPENDED", "your institution is currently suspended")
+				return
 			}
 
 			ctx := context.WithValue(r.Context(), ContextKeyUserID, u.ID)
@@ -127,14 +140,9 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 			// the audit log, so surface that admin id when one exists. Best-effort:
 			// when there's no admin_accounts row, GetAdminID stays empty and the
 			// handlers fall back to NULL.
-			if u.Role == "super_admin" || u.Role == "moderator" || u.Role == "support_agent" {
-				var adminID string
-				if e := db.QueryRow(r.Context(),
-					`SELECT id FROM admin_accounts WHERE supabase_uid = $1 AND deleted_at IS NULL`,
-					supabaseUID,
-				).Scan(&adminID); e == nil {
-					ctx = context.WithValue(ctx, ContextKeyAdminID, adminID)
-				}
+			if adminID != "" &&
+				(u.Role == "super_admin" || u.Role == "moderator" || u.Role == "support_agent") {
+				ctx = context.WithValue(ctx, ContextKeyAdminID, adminID)
 			}
 
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -205,6 +213,7 @@ func GetEmail(r *http.Request) string {
 // Use for endpoints where the user may not yet exist in the DB (e.g. create-profile).
 func AuthenticateJWTOnly(jwtSecret, supabaseURL string) func(http.Handler) http.Handler {
 	keyFunc := makeKeyFunc(jwtSecret, supabaseURL)
+	opts := parseOpts(supabaseURL)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
@@ -214,7 +223,7 @@ func AuthenticateJWTOnly(jwtSecret, supabaseURL string) func(http.Handler) http.
 			}
 			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
-			token, err := jwt.Parse(tokenStr, keyFunc, jwt.WithValidMethods([]string{"HS256", "ES256"}))
+			token, err := jwt.Parse(tokenStr, keyFunc, opts...)
 			if err != nil || !token.Valid {
 				Unauthorized(w)
 				return

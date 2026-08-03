@@ -20,6 +20,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+
+	"github.com/qwish/backend/internal/httpx"
 	"net/url"
 	"strings"
 	"sync"
@@ -128,7 +130,7 @@ func (s *Service) accessToken(ctx context.Context) (string, error) {
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpx.Client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -215,9 +217,9 @@ func (s *Service) sendOne(ctx context.Context, deviceToken string, p Payload) er
 			"android": map[string]any{
 				"priority": "HIGH",
 				"notification": map[string]any{
-					"sound":             "default",
-					"default_sound":     true,
-					"channel_id":        "qwish_default",
+					"sound":         "default",
+					"default_sound": true,
+					"channel_id":    "qwish_default",
 				},
 			},
 			"apns": map[string]any{
@@ -243,7 +245,7 @@ func (s *Service) sendOne(ctx context.Context, deviceToken string, p Payload) er
 	req.Header.Set("Authorization", "Bearer "+at)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpx.Client.Do(req)
 	if err != nil {
 		return err
 	}

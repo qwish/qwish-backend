@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+
+	"github.com/qwish/backend/internal/httpx"
 	"strings"
 	"time"
 
@@ -55,7 +57,7 @@ func (s *Service) SupabaseSendOTP(ctx context.Context, email string) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("apikey", s.cfg.SupabaseAnonKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpx.Client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -92,7 +94,7 @@ func (s *Service) SupabaseLogout(ctx context.Context, accessToken string) error 
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("apikey", s.cfg.SupabaseServiceKey)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpx.Client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -318,7 +320,7 @@ func (s *Service) supabasePost(ctx context.Context, path string, body map[string
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("apikey", s.cfg.SupabaseAnonKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpx.Client.Do(req)
 	if err != nil {
 		return nil, err
 	}

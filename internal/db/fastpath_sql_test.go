@@ -161,6 +161,26 @@ var fastPathStatements = map[string]string{
 
 	"push.prune": `DELETE FROM device_tokens WHERE token = ANY($1)`,
 
+	// Runs on every authenticated request — the users row, its institution's
+	// status and any admin_accounts row for the same uid, in one round trip.
+	"middleware.Authenticate": `
+		SELECT COALESCE(u.id::text,''), COALESCE(u.role,''),
+		       u.institution_id, COALESCE(u.status,''),
+		       COALESCE(i.status,''),
+		       COALESCE(a.id::text,''), COALESCE(a.role,''), COALESCE(a.status,'')
+		  FROM (VALUES ($1::uuid)) AS p(uid)
+		  LEFT JOIN users u
+		         ON u.supabase_uid = p.uid AND u.deleted_at IS NULL
+		  LEFT JOIN institutions i ON i.id = u.institution_id
+		  LEFT JOIN admin_accounts a
+		         ON a.supabase_uid = p.uid AND a.deleted_at IS NULL`,
+
+	"enrollment.matchRoster": `
+		SELECT id, COALESCE(roll_number,''), COALESCE(email,'')
+		  FROM enrollments
+		 WHERE institution_id=$1 AND ended_at IS NULL
+		   AND (roll_number = ANY($2::text[]) OR email = ANY($3::text[]))`,
+
 	"admin.countBands/difficulty": `
 		SELECT e.ord, c.count
 		  FROM unnest($2::float8[], $3::float8[]) WITH ORDINALITY AS e(lo, hi, ord)

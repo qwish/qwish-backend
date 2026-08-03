@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+
+	"github.com/qwish/backend/internal/httpx"
 	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -75,7 +77,7 @@ func (s *Service) SendEmail(ctx context.Context, to, subject, html string, refer
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.apiKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpx.Client.Do(req)
 	if err != nil {
 		s.logSend(ctx, to, subject, "failed", err.Error(), ref)
 		return err

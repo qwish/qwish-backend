@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/qwish/backend/internal/httpx"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/config"
 )
@@ -64,7 +66,7 @@ func (c *InviteClient) Invite(ctx context.Context, email, redirectTo string, met
 		req.Header.Set("apikey", c.cfg.SupabaseServiceKey)
 		req.Header.Set("Authorization", "Bearer "+c.cfg.SupabaseServiceKey)
 
-		resp, derr := http.DefaultClient.Do(req)
+		resp, derr := httpx.Client.Do(req)
 		if derr == nil {
 			defer resp.Body.Close()
 			raw, _ := io.ReadAll(resp.Body)
@@ -123,7 +125,7 @@ func (c *InviteClient) SetPassword(ctx context.Context, uid, password string) er
 	req.Header.Set("apikey", c.cfg.SupabaseServiceKey)
 	req.Header.Set("Authorization", "Bearer "+c.cfg.SupabaseServiceKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpx.Client.Do(req)
 	if err != nil {
 		return err
 	}

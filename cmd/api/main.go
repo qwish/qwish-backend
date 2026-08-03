@@ -109,7 +109,7 @@ func main() {
 
 	// Router
 	r := chi.NewRouter()
-	r.Use(chimw.Logger)
+	r.Use(mw.RequestLog)
 	r.Use(chimw.Recoverer)
 	allowedOrigins := buildOriginSet(cfg.AllowedOrigins)
 	r.Use(func(next http.Handler) http.Handler {

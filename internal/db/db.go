@@ -19,8 +19,8 @@ func Connect(databaseURL string) *pgxpool.Pool {
 	// MinConns of 0, idle connections are dropped and every burst after a quiet
 	// spell re-pays that cost — which is why endpoints "feel slow" even with a
 	// handful of users. MinConns pre-warms the pool so requests reuse live conns.
-	cfg.MinConns = 2
-	cfg.MaxConns = 10
+	cfg.MinConns = 10
+	cfg.MaxConns = 50
 	cfg.MaxConnLifetime = time.Hour
 	cfg.MaxConnIdleTime = 30 * time.Minute
 	cfg.HealthCheckPeriod = time.Minute

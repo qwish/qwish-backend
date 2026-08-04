@@ -11,9 +11,16 @@ services:
         value: 8080
       - key: APP_ENV
         value: production
+      # go.mod requires 1.26.1; Render's default toolchain lags, so pin it.
+      - key: GO_VERSION
+        value: 1.26.1
+      # The five below are mustEnv in internal/config/config.go — the process
+      # log.Fatalf's on boot if any is unset.
       - key: DATABASE_URL
         sync: false
       - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
@@ -35,6 +42,15 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false
+      # Firebase push. Without these, notifications (streak recovery included)
+      # are written in-app and streamed, but never reach a closed app.
+      - key: FCM_PROJECT_ID
+        sync: false
+      - key: FCM_SERVICE_ACCOUNT_JSON
+        sync: false
+      # Cloudflare Turnstile; empty disables bot checks on the public forms.
+      - key: TURNSTILE_SECRET
+        sync: false
       # Passkey / WebAuthn (super-admin login). RP_ID must be the registrable
       # domain (e.g. qwish.in); RP_ORIGINS the exact admin origin(s) with scheme.
       - key: WEBAUTHN_RP_ID
@@ -45,6 +61,8 @@ services:
         sync: false
       # Frontend URLs used in invite emails & generated links. Code defaults
       # already point here; set explicitly so ops can see/override per env.
+      - key: APP_URL
+        value: https://app.qwish.in
       - key: SUPER_ADMIN_URL
         value: https://superadmin.qwish.in
       - key: INSTITUTE_DASHBOARD_URL
@@ -53,3 +71,99 @@ services:
         value: https://teacher.qwish.in
       - key: BRAND_URL
         value: https://qwish.in
+
+  # ---- Scheduled jobs ----
+  # These replace the in-process ticker loop that used to run inside the web
+  # service. That loop lost any run a restart or deploy happened to land on —
+  # which is how streak resets silently stopped firing. Render owns the
+  # schedule now, retries are visible in the dashboard, and a failed POST shows
+  # up as a failed cron run instead of nothing at all.
+  #
+  # Each job POSTs the CRON_SECRET-protected endpoints in cmd/api/main.go.
+  # Jobs sharing a slot are chained with && so ordering is explicit (streaks
+  # settle before rank alerts read them) — the old version guessed at ordering
+  # with 5-minute wall-clock gaps.
+  #
+  # All times UTC. Adding a job = add its curl to the matching chain.
+
+  - type: cron
+    name: qwish-cron-hourly
+    runtime: image
+    image:
+      url: docker.io/curlimages/curl:8.11.1
+    schedule: "0 * * * *"
+    dockerCommand: >
+      sh -c '
+      set -e;
+      post() { curl -fsS --max-time 900 -X POST -H "X-Cron-Secret: $CRON_SECRET" "https://$API_HOST/api/v1/internal/cron/$1"; echo; };
+      post close-expired-quizzes;
+      post abandon-stale-attempts;
+      '
+    envVars: &cronEnv
+      - key: API_HOST
+        fromService:
+          type: web
+          name: qwish-backend
+          property: host
+      - key: CRON_SECRET
+        fromService:
+          type: web
+          name: qwish-backend
+          envVarKey: CRON_SECRET
+
+  # Nightly sweep. Streaks must run before rank-change alerts, which read the
+  # streak/points state this chain settles.
+  - type: cron
+    name: qwish-cron-nightly
+    runtime: image
+    image:
+      url: docker.io/curlimages/curl:8.11.1
+    schedule: "0 0 * * *"
+    dockerCommand: >
+      sh -c '
+      set -e;
+      post() { curl -fsS --max-time 900 -X POST -H "X-Cron-Secret: $CRON_SECRET" "https://$API_HOST/api/v1/internal/cron/$1"; echo; };
+      post expire-points;
+      post reset-streaks;
+      post rank-change-alerts;
+      post recompute-question-difficulty;
+      '
+    envVars: *cronEnv
+
+  # Evening across IST users — nudges users whose streak is still unclaimed today.
+  - type: cron
+    name: qwish-cron-streak-nudges
+    runtime: image
+    image:
+      url: docker.io/curlimages/curl:8.11.1
+    schedule: "0 14 * * *"
+    dockerCommand: >
+      sh -c 'curl -fsS --max-time 900 -X POST -H "X-Cron-Secret: $CRON_SECRET"
+      "https://$API_HOST/api/v1/internal/cron/streak-nudges"'
+    envVars: *cronEnv
+
+  - type: cron
+    name: qwish-cron-weekly-snapshot
+    runtime: image
+    image:
+      url: docker.io/curlimages/curl:8.11.1
+    schedule: "1 0 * * 1"
+    dockerCommand: >
+      sh -c 'curl -fsS --max-time 900 -X POST -H "X-Cron-Secret: $CRON_SECRET"
+      "https://$API_HOST/api/v1/internal/cron/snapshot-leaderboard"'
+    envVars: *cronEnv
+
+  - type: cron
+    name: qwish-cron-weekly-digests
+    runtime: image
+    image:
+      url: docker.io/curlimages/curl:8.11.1
+    schedule: "0 8 * * 1"
+    dockerCommand: >
+      sh -c '
+      set -e;
+      post() { curl -fsS --max-time 900 -X POST -H "X-Cron-Secret: $CRON_SECRET" "https://$API_HOST/api/v1/internal/cron/$1"; echo; };
+      post weekly-digests;
+      post weekly-insights-email;
+      '
+    envVars: *cronEnv

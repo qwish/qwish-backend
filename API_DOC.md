@@ -2966,13 +2966,31 @@ Approves a `pending` sponsorship request.
 # 12. Internal Cron
 
 All cron endpoints require the `X-Cron-Secret` header matching the `CRON_SECRET` environment variable.
+They are registered only when `CRON_SECRET` is non-empty (an empty secret would match a missing header
+and leave them open), and they take no Supabase JWT.
 
-| Method | Route | Description |
-|--------|-------|-------------|
-| `POST` | `/internal/cron/expire-points` | Deactivates expired point ledger entries |
-| `POST` | `/internal/cron/reset-streaks` | Resets missed streaks at 00:05 UTC |
-| `POST` | `/internal/cron/snapshot-leaderboard` | Snapshots weekly leaderboard rankings |
-| `POST` | `/internal/cron/close-expired-quizzes` | Closes quizzes past their `expires_at` |
+Scheduling is external: the `type: cron` services in `render.yaml` POST these on the schedules below.
+Jobs sharing a slot run as one chained shell command, so ordering is explicit.
+
+| Method | Route | Schedule (UTC) | Description |
+|--------|-------|----------------|-------------|
+| `POST` | `/internal/cron/close-expired-quizzes` | `0 * * * *` | Closes quizzes past their `expires_at` |
+| `POST` | `/internal/cron/abandon-stale-attempts` | `0 * * * *` | Marks stale in-progress attempts `abandoned` |
+| `POST` | `/internal/cron/expire-points` | `0 0 * * *` | Deactivates expired point ledger entries |
+| `POST` | `/internal/cron/reset-streaks` | `0 0 * * *` | Zeroes streaks past their grace window; sends recovery alerts |
+| `POST` | `/internal/cron/rank-change-alerts` | `0 0 * * *` | Notifies users whose leaderboard rank moved |
+| `POST` | `/internal/cron/recompute-question-difficulty` | `0 0 * * *` | Recomputes derived question difficulty |
+| `POST` | `/internal/cron/streak-nudges` | `0 14 * * *` | Reminds users whose streak is unclaimed today |
+| `POST` | `/internal/cron/snapshot-leaderboard` | `1 0 * * 1` | Snapshots weekly leaderboard rankings |
+| `POST` | `/internal/cron/weekly-digests` | `0 8 * * 1` | Weekly summary push |
+| `POST` | `/internal/cron/weekly-insights-email` | `0 8 * * 1` | Weekly insights email |
+
+Every endpoint is idempotent within its window, so a manual re-trigger is safe:
+
+```bash
+curl -fsS -X POST -H "X-Cron-Secret: $CRON_SECRET" \
+  https://<api-host>/api/v1/internal/cron/reset-streaks
+```
 
 All return:
 ```json

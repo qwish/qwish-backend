@@ -9,7 +9,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/qwish/backend/internal/config"
 	"github.com/qwish/backend/internal/db"
@@ -160,6 +159,91 @@ func main() {
 			r.Route("/internal/profile", func(r chi.Router) {
 				r.Use(mw.RequireCronSecret(cfg.CronSecret))
 				r.Get("/quiz-list", quizH.Profile)
+			})
+		}
+
+		// ---- Internal cron endpoints ----
+		// Triggered by the Render cron services declared in render.yaml (see
+		// runInProcessCron removal): scheduling lives outside the process, so a
+		// restart or deploy can no longer swallow a run. Authenticated by
+		// CRON_SECRET only — a cron caller has no Supabase JWT — and registered
+		// ONLY when the secret is non-empty, since RequireCronSecret compares a
+		// missing header against the configured value and an empty secret would
+		// leave these open. Outside the 30s timeout group: nightly sweeps over
+		// the whole ledger take longer than a request.
+		if cfg.CronSecret != "" {
+			r.Route("/internal/cron", func(r chi.Router) {
+				r.Use(mw.RequireCronSecret(cfg.CronSecret))
+				r.Post("/expire-points", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.ExpirePoints(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/reset-streaks", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.ResetStreaks(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/snapshot-leaderboard", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.SnapshotLeaderboard(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/close-expired-quizzes", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.CloseExpiredQuizzes(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/abandon-stale-attempts", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.AbandonStaleAttempts(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/streak-nudges", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.SendStreakNudges(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/weekly-digests", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.SendWeeklyDigests(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/rank-change-alerts", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.SendRankChangeAlerts(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/weekly-insights-email", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.SendWeeklyInsightsEmail(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/recompute-question-difficulty", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.RecomputeQuestionDifficulty(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
 			})
 		}
 
@@ -616,83 +700,6 @@ func main() {
 					r.With(mw.RequireRole("super_admin")).Post("/admin-accounts/{adminId}/resend", adminH.ResendAdminInvite)
 				})
 			})
-
-			// ---- Internal cron endpoints (development/manual trigger only) ----
-			if cfg.AppEnv != "production" {
-				r.Route("/internal/cron", func(r chi.Router) {
-					r.Use(mw.RequireCronSecret(cfg.CronSecret))
-					r.Post("/expire-points", func(w http.ResponseWriter, r *http.Request) {
-						if err := sched.ExpirePoints(r.Context()); err != nil {
-							mw.InternalError(w)
-							return
-						}
-						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-					})
-					r.Post("/reset-streaks", func(w http.ResponseWriter, r *http.Request) {
-						if err := sched.ResetStreaks(r.Context()); err != nil {
-							mw.InternalError(w)
-							return
-						}
-						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-					})
-					r.Post("/snapshot-leaderboard", func(w http.ResponseWriter, r *http.Request) {
-						if err := sched.SnapshotLeaderboard(r.Context()); err != nil {
-							mw.InternalError(w)
-							return
-						}
-						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-					})
-					r.Post("/close-expired-quizzes", func(w http.ResponseWriter, r *http.Request) {
-						if err := sched.CloseExpiredQuizzes(r.Context()); err != nil {
-							mw.InternalError(w)
-							return
-						}
-						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-					})
-					r.Post("/abandon-stale-attempts", func(w http.ResponseWriter, r *http.Request) {
-						if err := sched.AbandonStaleAttempts(r.Context()); err != nil {
-							mw.InternalError(w)
-							return
-						}
-						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-					})
-					r.Post("/streak-nudges", func(w http.ResponseWriter, r *http.Request) {
-						if err := sched.SendStreakNudges(r.Context()); err != nil {
-							mw.InternalError(w)
-							return
-						}
-						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-					})
-					r.Post("/weekly-digests", func(w http.ResponseWriter, r *http.Request) {
-						if err := sched.SendWeeklyDigests(r.Context()); err != nil {
-							mw.InternalError(w)
-							return
-						}
-						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-					})
-					r.Post("/rank-change-alerts", func(w http.ResponseWriter, r *http.Request) {
-						if err := sched.SendRankChangeAlerts(r.Context()); err != nil {
-							mw.InternalError(w)
-							return
-						}
-						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-					})
-					r.Post("/weekly-insights-email", func(w http.ResponseWriter, r *http.Request) {
-						if err := sched.SendWeeklyInsightsEmail(r.Context()); err != nil {
-							mw.InternalError(w)
-							return
-						}
-						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-					})
-					r.Post("/recompute-question-difficulty", func(w http.ResponseWriter, r *http.Request) {
-						if err := sched.RecomputeQuestionDifficulty(r.Context()); err != nil {
-							mw.InternalError(w)
-							return
-						}
-						mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
-					})
-				})
-			}
 		})
 	})
 
@@ -707,10 +714,10 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Optionally run in-process cron on Render (no separate worker)
-	if cfg.AppEnv == "production" {
-		go runInProcessCron(pool, sched)
-	}
+	// Scheduling lives outside this process: the Render cron services in
+	// render.yaml POST the /api/v1/internal/cron/* endpoints. The old
+	// in-process ticker loop lost any run that a restart or deploy landed on,
+	// which silently froze streak resets.
 
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
@@ -730,130 +737,4 @@ func buildOriginSet(raw string) map[string]bool {
 		}
 	}
 	return set
-}
-
-// runInProcessCron runs scheduled jobs using Go tickers (alternative to external cron triggers).
-// It acquires a PostgreSQL advisory lock so only one instance runs cron when scaled horizontally.
-func runInProcessCron(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
-	ctx := context.Background()
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		log.Printf("[cron] failed to acquire db connection: %v", err)
-		return
-	}
-	// Advisory lock key — unique fixed integer for this service's cron scheduler.
-	// The lock is held for the lifetime of conn (i.e. the process).
-	const lockKey = 7654321
-	var acquired bool
-	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey).Scan(&acquired); err != nil {
-		log.Printf("[cron] advisory lock query failed: %v", err)
-		conn.Release()
-		return
-	}
-	if !acquired {
-		log.Println("[cron] another instance holds the scheduler lock — skipping in-process cron")
-		conn.Release()
-		return
-	}
-	// conn intentionally not released: the advisory lock is tied to this session.
-	log.Println("[cron] in-process scheduler started")
-
-	// Close expired quizzes every hour
-	go func() {
-		for {
-			time.Sleep(1 * time.Hour)
-			sched.CloseExpiredQuizzes(context.Background())
-		}
-	}()
-
-	// Sweep stale in-progress attempts to 'abandoned' every hour. Nothing else
-	// writes that status, so abandon_rate reads whatever this job records.
-	go func() {
-		for {
-			time.Sleep(1 * time.Hour)
-			sched.AbandonStaleAttempts(context.Background())
-		}
-	}()
-
-	// Reset streaks daily at 00:05 UTC
-	go func() {
-		for {
-			now := time.Now().UTC()
-			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 5, 0, 0, time.UTC)
-			time.Sleep(time.Until(next))
-			sched.ResetStreaks(context.Background())
-		}
-	}()
-
-	// Expire points nightly at midnight UTC
-	go func() {
-		for {
-			now := time.Now().UTC()
-			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
-			time.Sleep(time.Until(next))
-			sched.ExpirePoints(context.Background())
-		}
-	}()
-
-	// Recompute derived question difficulty nightly at 00:20 UTC
-	go func() {
-		for {
-			now := time.Now().UTC()
-			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 20, 0, 0, time.UTC)
-			time.Sleep(time.Until(next))
-			sched.RecomputeQuestionDifficulty(context.Background())
-		}
-	}()
-
-	// Snapshot leaderboard every Monday 00:01 UTC
-	go func() {
-		for {
-			now := time.Now().UTC()
-			daysUntilMonday := (8 - int(now.Weekday())) % 7
-			if daysUntilMonday == 0 {
-				daysUntilMonday = 7
-			}
-			next := time.Date(now.Year(), now.Month(), now.Day()+daysUntilMonday, 0, 1, 0, 0, time.UTC)
-			time.Sleep(time.Until(next))
-			sched.SnapshotLeaderboard(context.Background())
-		}
-	}()
-
-	// Rank-change alerts daily at 00:10 UTC (after streaks/points settle)
-	go func() {
-		for {
-			now := time.Now().UTC()
-			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 10, 0, 0, time.UTC)
-			time.Sleep(time.Until(next))
-			sched.SendRankChangeAlerts(context.Background())
-		}
-	}()
-
-	// Streak nudges daily at 14:00 UTC (evening across IST users)
-	go func() {
-		for {
-			now := time.Now().UTC()
-			next := time.Date(now.Year(), now.Month(), now.Day(), 14, 0, 0, 0, time.UTC)
-			if !next.After(now) {
-				next = next.AddDate(0, 0, 1)
-			}
-			time.Sleep(time.Until(next))
-			sched.SendStreakNudges(context.Background())
-		}
-	}()
-
-	// Weekly digest push + insights email every Monday 08:00 UTC
-	go func() {
-		for {
-			now := time.Now().UTC()
-			daysUntilMonday := (8 - int(now.Weekday())) % 7
-			if daysUntilMonday == 0 {
-				daysUntilMonday = 7
-			}
-			next := time.Date(now.Year(), now.Month(), now.Day()+daysUntilMonday, 8, 0, 0, 0, time.UTC)
-			time.Sleep(time.Until(next))
-			sched.SendWeeklyDigests(context.Background())
-			sched.SendWeeklyInsightsEmail(context.Background())
-		}
-	}()
 }

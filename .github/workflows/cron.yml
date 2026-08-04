@@ -1,0 +1,92 @@
+# Scheduled jobs for environments without Render cron services (the free plan
+# has none). Same endpoints, same schedules, same chaining as the `type: cron`
+# services in render.yaml — GitHub runs the clock instead of Render.
+#
+# Setup: repo Settings → Secrets and variables → Actions
+#   API_URL      e.g. https://qwish-backend-dev.onrender.com  (no trailing slash)
+#   CRON_SECRET  same value as the web service's CRON_SECRET
+#
+# GitHub's scheduler is best-effort and can fire late (occasionally by 30+ min)
+# or skip a tick under load. That is survivable here: every job is idempotent
+# within its window and the streak reset is keyed on last_completed_date, so a
+# late or missed run heals on the next one rather than freezing state — which is
+# exactly what the old in-process ticker got wrong.
+name: Scheduled jobs
+
+on:
+  schedule:
+    - cron: "0 * * * *" # hourly sweeps
+    - cron: "0 0 * * *" # nightly chain
+    - cron: "0 14 * * *" # streak nudges (evening across IST)
+    - cron: "1 0 * * 1" # weekly leaderboard snapshot
+    - cron: "0 8 * * 1" # weekly digests
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Single endpoint to run (e.g. reset-streaks). Blank runs the nightly chain."
+        required: false
+        default: ""
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST cron endpoints
+        env:
+          API_URL: ${{ secrets.API_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          SCHEDULE: ${{ github.event.schedule }}
+          MANUAL: ${{ inputs.job }}
+        run: |
+          set -euo pipefail
+          test -n "$API_URL" || { echo "API_URL secret is not set"; exit 1; }
+          test -n "$CRON_SECRET" || { echo "CRON_SECRET secret is not set"; exit 1; }
+
+          # A free-plan web service sleeps after 15 min idle and needs ~50s to
+          # wake. Absorb that here so the first real POST isn't the one paying
+          # for it (and timing out).
+          echo "waking $API_URL"
+          curl -fsS --max-time 180 --retry 5 --retry-all-errors --retry-delay 10 \
+            "$API_URL/health" > /dev/null
+          echo "awake"
+
+          post() {
+            echo "--> $1"
+            curl -fsS --max-time 900 --retry 2 --retry-all-errors \
+              -X POST -H "X-Cron-Secret: $CRON_SECRET" \
+              "$API_URL/api/v1/internal/cron/$1"
+            echo
+          }
+
+          if [ -n "$MANUAL" ]; then
+            post "$MANUAL"
+            exit 0
+          fi
+
+          case "$SCHEDULE" in
+            "0 * * * *")
+              post close-expired-quizzes
+              post abandon-stale-attempts
+              ;;
+            # Order matters: rank alerts read the state the streak/points jobs settle.
+            "0 0 * * *")
+              post expire-points
+              post reset-streaks
+              post rank-change-alerts
+              post recompute-question-difficulty
+              ;;
+            "0 14 * * *")
+              post streak-nudges
+              ;;
+            "1 0 * * 1")
+              post snapshot-leaderboard
+              ;;
+            "0 8 * * 1")
+              post weekly-digests
+              post weekly-insights-email
+              ;;
+            *)
+              echo "unrecognised schedule: '$SCHEDULE'"
+              exit 1
+              ;;
+          esac

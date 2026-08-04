@@ -9,3 +9,4 @@ bin/
 
 # generated email preview output
 email_previews.html
+supabase_otp_email.html

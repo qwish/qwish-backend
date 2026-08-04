@@ -88,8 +88,60 @@ func (s *Scheduler) ExpirePoints(ctx context.Context) error {
 func (s *Scheduler) ResetStreaks(ctx context.Context) error {
 	log.Println("[cron] running reset-streaks")
 	err := s.streakSvc.DailyReset(ctx)
+	if err == nil {
+		s.sendStreakRecoveryAlerts(ctx)
+	}
 	log.Println("[cron] reset-streaks done")
 	return err
+}
+
+// sendStreakRecoveryAlerts tells users who missed yesterday that their streak
+// is in its grace window: completing a quiz before midnight tonight keeps it,
+// otherwise tomorrow's reset drops it to zero. Runs right after DailyReset, so
+// grace_window_active is current. The NOT EXISTS makes a second run on the same
+// day a no-op (the cron endpoint can be triggered manually).
+func (s *Scheduler) sendStreakRecoveryAlerts(ctx context.Context) {
+	if s.notifSvc == nil {
+		return
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT u.id, st.current_streak
+		   FROM streaks st
+		   JOIN users u ON u.id = st.user_id
+		   LEFT JOIN notification_preferences np ON np.user_id = u.id
+		  WHERE st.grace_window_active
+		    AND st.last_completed_date = (CURRENT_DATE - INTERVAL '2 days')::date
+		    AND st.current_streak > 0
+		    AND u.status='active' AND u.role IN ('student','teacher')
+		    AND COALESCE(np.push_streak_nudge, true)
+		    AND NOT EXISTS (
+		      SELECT 1 FROM user_notifications n
+		       WHERE n.user_id = u.id AND n.reference = 'streak_recovery'
+		         AND n.created_at >= CURRENT_DATE
+		    )`)
+	if err != nil {
+		log.Printf("[cron] streak-recovery query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+	type target struct {
+		id     string
+		streak int
+	}
+	var targets []target
+	for rows.Next() {
+		var t target
+		rows.Scan(&t.id, &t.streak)
+		targets = append(targets, t)
+	}
+	rows.Close()
+	for _, t := range targets {
+		body := fmt.Sprintf("You missed yesterday, so your %d-day streak is on its last chance. Complete a quiz before midnight tonight and it carries on — miss again and it resets to zero.", t.streak)
+		s.notifSvc.Emit(ctx, t.id, "streak", "Save your streak 🔥", body,
+			notification.WithIcon("local_fire_department"), notification.WithColor("danger"),
+			notification.WithReference("streak_recovery"))
+	}
+	log.Printf("[cron] streak-recovery alerts sent (%d)", len(targets))
 }
 
 // SnapshotLeaderboard runs every Monday at 00:01 UTC.

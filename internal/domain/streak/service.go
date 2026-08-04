@@ -26,8 +26,14 @@ type StreakInfo struct {
 
 func (s *Service) GetInfo(ctx context.Context, userID string) (*StreakInfo, error) {
 	info := &StreakInfo{}
+	// Derived from last_completed_date rather than trusting the stored column:
+	// the nightly reset is an in-process cron, so a restart across the wrong
+	// night used to leave a dead streak on display indefinitely.
 	err := s.db.QueryRow(ctx,
-		`SELECT current_streak, longest_streak, grace_window_active FROM streaks WHERE user_id=$1`, userID,
+		`SELECT CASE WHEN last_completed_date >= CURRENT_DATE - 2 THEN current_streak ELSE 0 END,
+		        longest_streak,
+		        COALESCE(last_completed_date = CURRENT_DATE - 2, false)
+		   FROM streaks WHERE user_id=$1`, userID,
 	).Scan(&info.CurrentStreak, &info.LongestStreak, &info.GraceWindowActive)
 	if err != nil {
 		return nil, err
@@ -47,6 +53,38 @@ func nextMilestone(current int) int {
 	return 30
 }
 
+// localDay is midnight of the calendar day `now` falls on in loc. This used to
+// be time.Truncate(24h), which rounds absolute time since the epoch and so
+// lands on UTC midnight — the wrong calendar day for part of every day in any
+// non-UTC zone (e.g. before 05:30 in IST, after 20:00 in EDT).
+func localDay(now time.Time, loc *time.Location) time.Time {
+	t := now.In(loc)
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc)
+}
+
+// nextStreak decides the streak value for a completion happening on `today`.
+// broke reports that the old streak was lost (milestones re-arm); done reports
+// that today was already counted and nothing should change.
+//
+// The one-day grace (completing the day after a miss keeps the streak) is
+// decided from the date alone, not from streaks.grace_window_active: the flag
+// is only written by a nightly in-process cron, so a restart across that window
+// silently cost users a grace they were entitled to.
+func nextStreak(current int, lastDate *string, today time.Time) (next int, broke, done bool) {
+	if lastDate == nil {
+		return 1, false, false
+	}
+	switch *lastDate {
+	case today.Format("2006-01-02"):
+		return current, false, true
+	case today.AddDate(0, 0, -1).Format("2006-01-02"),
+		today.AddDate(0, 0, -2).Format("2006-01-02"):
+		return current + 1, false, false
+	default:
+		return 1, true, false
+	}
+}
+
 func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scoring.Config) (int64, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -63,7 +101,7 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 	var timezone string
 	var current, longest int
 	var lastDate *string
-	var grace, m7, m15, m30 bool
+	var m7, m15, m30 bool
 
 	err = tx.QueryRow(ctx,
 		`WITH ins AS (
@@ -71,14 +109,14 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 		 )
 		 SELECT COALESCE(i.timezone, 'UTC'),
 		        s.current_streak, s.longest_streak, s.last_completed_date::text,
-		        s.grace_window_active, s.milestone_7_claimed,
+		        s.milestone_7_claimed,
 		        s.milestone_15_claimed, s.milestone_30_claimed
 		   FROM users u
 		   LEFT JOIN institutions i ON i.id = u.institution_id
 		   LEFT JOIN streaks s ON s.user_id = u.id
 		  WHERE u.id = $1
 		    FOR NO KEY UPDATE OF s`, userID,
-	).Scan(&timezone, &current, &longest, &lastDate, &grace, &m7, &m15, &m30)
+	).Scan(&timezone, &current, &longest, &lastDate, &m7, &m15, &m30)
 	if err != nil {
 		// The upsert above runs in the same snapshot as the SELECT, so a row
 		// created by this very statement is not yet visible to it. Re-read.
@@ -87,12 +125,12 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 			                    JOIN institutions i ON i.id = u.institution_id
 			                   WHERE u.id=$1), 'UTC'),
 			        current_streak, longest_streak, last_completed_date::text,
-			        grace_window_active, milestone_7_claimed,
+			        milestone_7_claimed,
 			        milestone_15_claimed, milestone_30_claimed
 			   FROM streaks WHERE user_id=$1 FOR NO KEY UPDATE`, userID,
-		).Scan(&timezone, &current, &longest, &lastDate, &grace, &m7, &m15, &m30); err != nil {
+		).Scan(&timezone, &current, &longest, &lastDate, &m7, &m15, &m30); err != nil {
 			timezone = "UTC"
-			current, longest, lastDate, grace, m7, m15, m30 = 0, 0, nil, false, false, false, false
+			current, longest, lastDate, m7, m15, m30 = 0, 0, nil, false, false, false
 		}
 	}
 
@@ -100,28 +138,16 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 	if err != nil {
 		loc = time.UTC
 	}
-	today := time.Now().In(loc).Truncate(24 * time.Hour)
+	today := localDay(time.Now(), loc)
 	todayDate := today.Format("2006-01-02")
-	yesterdayDate := today.AddDate(0, 0, -1).Format("2006-01-02")
 
-	// Already completed today → no change
-	if lastDate != nil && *lastDate == todayDate {
+	next, broke, done := nextStreak(current, lastDate, today)
+	if done {
+		// Already completed today → no change
 		return 0, nil
 	}
-
-	// Determine new streak value
-	if lastDate == nil {
-		// First ever completion
-		current = 1
-	} else if *lastDate == yesterdayDate {
-		// Consecutive day
-		current++
-	} else if grace && *lastDate == today.AddDate(0, 0, -2).Format("2006-01-02") {
-		// Grace window: missed yesterday, completing within 12h grace
-		current++
-	} else {
-		// Streak broken
-		current = 1
+	current = next
+	if broke {
 		m7, m15, m30 = false, false, false
 	}
 
@@ -203,12 +229,17 @@ func (s *Service) DailyReset(ctx context.Context) error {
 		return err
 	}
 
-	// Reset streaks for users whose grace window expired (last completed 2+ days ago)
+	// Reset streaks whose grace window has passed. Keyed on the date alone: the
+	// old version required grace_window_active, which only the query above sets
+	// and only on the single day last_completed_date = CURRENT_DATE - 2. Miss
+	// that one run (this cron lives in-process, so any restart or deploy can)
+	// and the flag stayed false forever, leaving a dead streak on display
+	// indefinitely. Date-keyed, every run heals whatever earlier runs missed.
 	_, err = s.db.Exec(ctx,
 		`UPDATE streaks SET current_streak=0, grace_window_active=false,
 		 milestone_7_claimed=false, milestone_15_claimed=false, milestone_30_claimed=false
-		 WHERE grace_window_active=true
-		 AND last_completed_date < (CURRENT_DATE - INTERVAL '2 days')::date`)
+		 WHERE last_completed_date < (CURRENT_DATE - INTERVAL '2 days')::date
+		 AND (current_streak > 0 OR grace_window_active)`)
 	if err != nil {
 		return err
 	}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -350,7 +351,7 @@ func (h *Handler) UpdateStudentStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Audit log
-	logAudit(r.Context(), h.db, adminID, req.Action+"_student", "user", studentID, req.Reason)
+	logAuditInst(r.Context(), h.db, adminID, middleware.GetInstitutionID(r), req.Action+"_student", "user", studentID, req.Reason)
 	_ = adminID
 	middleware.JSON(w, http.StatusOK, map[string]string{"status": newStatus})
 }
@@ -473,7 +474,7 @@ func (h *Handler) UpdateTeacherStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.db.Exec(r.Context(), `UPDATE users SET status=$1, updated_at=now() WHERE id=$2`, newStatus, teacherID)
-	logAudit(r.Context(), h.db, middleware.GetUserID(r), req.Action+"_teacher", "user", teacherID, req.Reason)
+	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), req.Action+"_teacher", "user", teacherID, req.Reason)
 
 	// On verification, email the teacher that they can now sign in.
 	if req.Action == "verify" && h.notif != nil {
@@ -500,7 +501,7 @@ func (h *Handler) RemoveTeacher(w http.ResponseWriter, r *http.Request) {
 	// Disassociate from institution but keep account
 	h.db.Exec(r.Context(), `UPDATE users SET institution_id=NULL, updated_at=now() WHERE id=$1`, teacherID)
 	// Quizzes remain, full_name replaced in display
-	logAudit(r.Context(), h.db, middleware.GetUserID(r), "remove_teacher", "user", teacherID, "")
+	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), "remove_teacher", "user", teacherID, "")
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "teacher removed from institution"})
 }
 
@@ -571,7 +572,7 @@ func (h *Handler) InviteTeacher(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	logAudit(r.Context(), h.db, loggedInUser, "invite_teacher", "teacher_invite", inviteID, req.Email)
+	logAuditInst(r.Context(), h.db, loggedInUser, middleware.GetInstitutionID(r), "invite_teacher", "teacher_invite", inviteID, req.Email)
 	middleware.JSON(w, http.StatusCreated, map[string]string{
 		"message":   "invite sent",
 		"invite_id": inviteID,
@@ -630,11 +631,15 @@ func (h *Handler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 	inviteCode := generateCode(8)
 	var id, name, code string
 	var createdAt time.Time
-	h.db.QueryRow(r.Context(),
+	if err := h.db.QueryRow(r.Context(),
 		`INSERT INTO groups (institution_id, name, description, invite_code) VALUES ($1,$2,$3,$4)
 		 RETURNING id, name, invite_code, created_at`,
 		instID, req.Name, req.Description, inviteCode,
-	).Scan(&id, &name, &code, &createdAt)
+	).Scan(&id, &name, &code, &createdAt); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), instID, "create_group", "group", id, req.Name)
 	middleware.JSON(w, http.StatusCreated, map[string]interface{}{
 		"id": id, "name": name, "invite_code": code, "created_at": createdAt,
 	})
@@ -733,16 +738,24 @@ func (h *Handler) AddStudentToGroup(w http.ResponseWriter, r *http.Request) {
 		UserID string `json:"user_id"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
-	h.db.Exec(r.Context(),
-		`INSERT INTO group_students (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, groupID, req.UserID)
+	if _, err := h.db.Exec(r.Context(),
+		`INSERT INTO group_students (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, groupID, req.UserID); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), "add_student_to_group", "group", groupID, req.UserID)
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "student added to group"})
 }
 
 // DELETE /api/v1/institution/groups/:groupId/students/:userId
 func (h *Handler) RemoveStudentFromGroup(w http.ResponseWriter, r *http.Request) {
-	h.db.Exec(r.Context(),
-		`DELETE FROM group_students WHERE group_id=$1 AND user_id=$2`,
-		chi.URLParam(r, "groupId"), chi.URLParam(r, "userId"))
+	groupID, userID := chi.URLParam(r, "groupId"), chi.URLParam(r, "userId")
+	if _, err := h.db.Exec(r.Context(),
+		`DELETE FROM group_students WHERE group_id=$1 AND user_id=$2`, groupID, userID); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), "remove_student_from_group", "group", groupID, userID)
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "student removed from group"})
 }
 
@@ -753,16 +766,24 @@ func (h *Handler) AddTeacherToGroup(w http.ResponseWriter, r *http.Request) {
 		UserID string `json:"user_id"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
-	h.db.Exec(r.Context(),
-		`INSERT INTO group_teachers (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, groupID, req.UserID)
+	if _, err := h.db.Exec(r.Context(),
+		`INSERT INTO group_teachers (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, groupID, req.UserID); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), "add_teacher_to_group", "group", groupID, req.UserID)
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "teacher assigned to group"})
 }
 
 // DELETE /api/v1/institution/groups/:groupId/teachers/:userId
 func (h *Handler) RemoveTeacherFromGroup(w http.ResponseWriter, r *http.Request) {
-	h.db.Exec(r.Context(),
-		`DELETE FROM group_teachers WHERE group_id=$1 AND user_id=$2`,
-		chi.URLParam(r, "groupId"), chi.URLParam(r, "userId"))
+	groupID, userID := chi.URLParam(r, "groupId"), chi.URLParam(r, "userId")
+	if _, err := h.db.Exec(r.Context(),
+		`DELETE FROM group_teachers WHERE group_id=$1 AND user_id=$2`, groupID, userID); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), "remove_teacher_from_group", "group", groupID, userID)
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "teacher removed from group"})
 }
 
@@ -774,13 +795,23 @@ func (h *Handler) UpdateGroup(w http.ResponseWriter, r *http.Request) {
 		Description *string `json:"description"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
-	h.db.Exec(r.Context(), `UPDATE groups SET name=$1, description=$2 WHERE id=$3`, req.Name, req.Description, groupID)
+	if _, err := h.db.Exec(r.Context(),
+		`UPDATE groups SET name=$1, description=$2 WHERE id=$3`, req.Name, req.Description, groupID); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), "update_group", "group", groupID, req.Name)
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "group updated"})
 }
 
 // DELETE /api/v1/institution/groups/:groupId  (archive)
 func (h *Handler) ArchiveGroup(w http.ResponseWriter, r *http.Request) {
-	h.db.Exec(r.Context(), `UPDATE groups SET archived_at=now() WHERE id=$1`, chi.URLParam(r, "groupId"))
+	groupID := chi.URLParam(r, "groupId")
+	if _, err := h.db.Exec(r.Context(), `UPDATE groups SET archived_at=now() WHERE id=$1`, groupID); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), "archive_group", "group", groupID, "")
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "group archived"})
 }
 
@@ -791,11 +822,30 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	var mult float64
 	var graceEnabled, scoreHidden bool
 	var expiryMonths int
-	h.db.QueryRow(r.Context(),
+	// A failed scan used to fall through and serve an all-zero institution:
+	// blank name, 0.0x multiplier, empty referral codes. The dashboard would
+	// then render those zeros as the institution's real configuration.
+	if err := h.db.QueryRow(r.Context(),
 		`SELECT name, type, timezone, student_referral_code, teacher_referral_code,
 		        point_multiplier, streak_grace_enabled, play_win_score_hidden, point_expiry_months
 		 FROM institutions WHERE id=$1`, instID,
-	).Scan(&name, &instType, &timezone, &sCode, &tCode, &mult, &graceEnabled, &scoreHidden, &expiryMonths)
+	).Scan(&name, &instType, &timezone, &sCode, &tCode, &mult, &graceEnabled, &scoreHidden, &expiryMonths); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+
+	// The open reset request travels with the settings: the referral panel has
+	// to know whether this admin has already asked, or it offers a button that
+	// the unique index would reject.
+	var pending *pendingResetRequest
+	var pr pendingResetRequest
+	if err := h.db.QueryRow(r.Context(),
+		`SELECT id, code_type, reason, created_at
+		   FROM referral_code_reset_requests
+		  WHERE institution_id=$1 AND status='pending'`, instID,
+	).Scan(&pr.ID, &pr.CodeType, &pr.Reason, &pr.CreatedAt); err == nil {
+		pending = &pr
+	}
 
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"name": name, "type": instType, "timezone": timezone,
@@ -804,21 +854,147 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 			"point_multiplier": mult, "streak_grace_enabled": graceEnabled,
 			"play_win_score_hidden": scoreHidden, "point_expiry_months": expiryMonths,
 		},
+		"pending_code_reset": pending,
+	})
+}
+
+type pendingResetRequest struct {
+	ID        string    `json:"id"`
+	CodeType  string    `json:"code_type"`
+	Reason    string    `json:"reason"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// validateResetRequest returns an empty string when the request is fileable, or
+// the message to send back. A super admin triaging this queue needs to know
+// which code and why; a blank reason makes the request unactionable, so it is
+// refused here rather than filed empty.
+func validateResetRequest(codeType, reason string) string {
+	switch codeType {
+	case "student", "teacher", "both":
+	default:
+		return "code_type must be student, teacher or both"
+	}
+	if len([]rune(strings.TrimSpace(reason))) < 10 {
+		return "tell us why the code needs resetting (at least 10 characters)"
+	}
+	return ""
+}
+
+// POST /api/v1/institution/referral-code-reset-request
+//
+// Resetting a code is a super-admin action by design, so the institution files
+// a request instead of holding the power. One open request at a time.
+func (h *Handler) RequestReferralCodeReset(w http.ResponseWriter, r *http.Request) {
+	instID := middleware.GetInstitutionID(r)
+	adminID := middleware.GetUserID(r)
+
+	var req struct {
+		CodeType string `json:"code_type"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid request")
+		return
+	}
+	if msg := validateResetRequest(req.CodeType, req.Reason); msg != "" {
+		middleware.BadRequest(w, msg)
+		return
+	}
+
+	var id string
+	var createdAt time.Time
+	err := h.db.QueryRow(r.Context(),
+		`INSERT INTO referral_code_reset_requests (institution_id, requested_by, code_type, reason)
+		 VALUES ($1,$2,$3,$4) RETURNING id, created_at`,
+		instID, adminID, req.CodeType, strings.TrimSpace(req.Reason),
+	).Scan(&id, &createdAt)
+	if err != nil {
+		// The partial unique index is the only realistic conflict here.
+		middleware.BadRequest(w, "a reset request is already open for your institution")
+		return
+	}
+
+	var instName string
+	h.db.QueryRow(r.Context(), `SELECT name FROM institutions WHERE id=$1`, instID).Scan(&instName)
+
+	// Notify the people who can actually action it. Best-effort: the request row
+	// is the record of truth, and the super-admin queue reads that table.
+	rows, qErr := h.db.Query(r.Context(),
+		`SELECT id FROM users WHERE role='super_admin' AND status='active'`)
+	if qErr == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var uid string
+			if rows.Scan(&uid) == nil {
+				h.notif.Emit(r.Context(), uid, "referral_code_reset_requested",
+					"Referral code reset requested",
+					fmt.Sprintf("%s asked to reset their %s referral code.", instName, req.CodeType))
+			}
+		}
+	}
+
+	logAuditInst(r.Context(), h.db, adminID, instID, "request_referral_code_reset", "institution", instID, req.Reason)
+	middleware.JSON(w, http.StatusCreated, pendingResetRequest{
+		ID: id, CodeType: req.CodeType, Reason: strings.TrimSpace(req.Reason), CreatedAt: createdAt,
+	})
+}
+
+// GET /api/v1/institution/setup-checklist
+//
+// Every item is derived from something that actually happened, so the meter
+// cannot congratulate an admin for work they have not done. Nothing here is a
+// client-side "dismissed" flag.
+func (h *Handler) SetupChecklist(w http.ResponseWriter, r *http.Request) {
+	instID := middleware.GetInstitutionID(r)
+	adminID := middleware.GetUserID(r)
+
+	var profileConfirmed, rulesReviewed, hasPasskey bool
+	var teachers, students int
+	if err := h.db.QueryRow(r.Context(), `SELECT
+		 EXISTS(SELECT 1 FROM audit_log WHERE target_id=$1 AND action_type='update_settings'),
+		 EXISTS(SELECT 1 FROM audit_log WHERE target_id=$1 AND action_type='update_point_rules'),
+		 EXISTS(SELECT 1 FROM webauthn_user_credentials WHERE user_id=$2),
+		 (SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher' AND status='active'),
+		 (SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='student' AND status='active')`,
+		instID, adminID,
+	).Scan(&profileConfirmed, &rulesReviewed, &hasPasskey, &teachers, &students); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+
+	middleware.JSON(w, http.StatusOK, map[string]interface{}{
+		"profile_confirmed": profileConfirmed,
+		"rules_reviewed":    rulesReviewed,
+		"passkey_registered": hasPasskey,
+		"teachers_joined":   teachers,
+		"students_joined":   students,
 	})
 }
 
 // PATCH /api/v1/institution/settings
 func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
+	adminID := middleware.GetUserID(r)
 	var req struct {
 		Name     string `json:"name"`
 		Timezone string `json:"timezone"`
 		Type     string `json:"type"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
-	h.db.Exec(r.Context(),
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid request")
+		return
+	}
+	if _, err := h.db.Exec(r.Context(),
 		`UPDATE institutions SET name=COALESCE(NULLIF($1,''),name), timezone=COALESCE(NULLIF($2,''),timezone), type=COALESCE(NULLIF($3,''),type), updated_at=now() WHERE id=$4`,
-		req.Name, req.Timezone, req.Type, instID)
+		req.Name, req.Timezone, req.Type, instID); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	// The institution's display name is what every student sees in the app, and
+	// its timezone decides when a streak day ends. Both belong in the log for the
+	// same reason a suspension does.
+	logAuditInst(r.Context(), h.db, adminID, instID, "update_settings", "institution", instID, "")
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "settings updated"})
 }
 
@@ -848,31 +1024,72 @@ func (h *Handler) UpdatePointRules(w http.ResponseWriter, r *http.Request) {
 	if req.PointExpiryMonths != nil {
 		h.db.Exec(r.Context(), `UPDATE institutions SET point_expiry_months=$1, updated_at=now() WHERE id=$2`, *req.PointExpiryMonths, instID)
 	}
-	logAudit(r.Context(), h.db, adminID, "update_point_rules", "institution", instID, "")
+	logAuditInst(r.Context(), h.db, adminID, instID, "update_point_rules", "institution", instID, "")
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "point rules updated"})
+}
+
+// auditLogWhere builds the WHERE clause and args for the institution audit log.
+//
+// The institution scope is itself an OR (the target is either the institution
+// row or one of its users), so it MUST stay parenthesised: without the parens,
+// an added `AND action_type = $n` binds to the right-hand branch only and the
+// filter silently leaks every institution row into the result.
+//
+// Invariant, as elsewhere: the next free placeholder is $(len(args)+1).
+func auditLogWhere(institutionID, actionType, dateFrom, dateTo string) (string, []interface{}) {
+	// institution_id is the answer for anything written since migration 037 and
+	// for all backfilled history. The two target_id branches stay for entries
+	// written by handlers outside this package, which have no institution to
+	// record — dropping them would hide super-admin actions on this institution.
+	where := `(al.institution_id = $1` +
+		` OR al.target_id = $1` +
+		` OR al.target_id IN (SELECT id FROM users WHERE institution_id = $1))`
+	args := []interface{}{institutionID}
+	if actionType != "" {
+		where += fmt.Sprintf(` AND al.action_type = $%d`, len(args)+1)
+		args = append(args, actionType)
+	}
+	if dateFrom != "" {
+		where += fmt.Sprintf(` AND al.timestamp >= $%d`, len(args)+1)
+		args = append(args, dateFrom)
+	}
+	if dateTo != "" {
+		where += fmt.Sprintf(` AND al.timestamp <= $%d`, len(args)+1)
+		args = append(args, dateTo)
+	}
+	return where, args
 }
 
 // GET /api/v1/institution/audit-log
 func (h *Handler) AuditLog(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
 	if page < 1 { page = 1 }
 	if limit < 1 || limit > 50 { limit = 20 }
 	offset := (page - 1) * limit
 
-	var total int
-	h.db.QueryRow(r.Context(),
-		`SELECT COUNT(*) FROM audit_log al
-		 WHERE al.target_id = $1 OR al.target_id IN (SELECT id FROM users WHERE institution_id=$1)`,
-		instID).Scan(&total)
+	where, args := auditLogWhere(instID, q.Get("action_type"), q.Get("date_from"), q.Get("date_to"))
 
-	rows, _ := h.db.Query(r.Context(),
+	var total int
+	if err := h.db.QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM audit_log al WHERE `+where, args...).Scan(&total); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+
+	n := len(args)
+	rows, err := h.db.Query(r.Context(),
 		`SELECT al.id, al.timestamp, al.admin_name, al.admin_role, al.action_type, al.target_type, al.target_id, al.reason
 		 FROM audit_log al
-		 WHERE al.target_id=$1 OR al.target_id IN (SELECT id FROM users WHERE institution_id=$1)
-		 ORDER BY al.timestamp DESC LIMIT $2 OFFSET $3`,
-		instID, limit, offset)
+		 WHERE `+where+
+			fmt.Sprintf(` ORDER BY al.timestamp DESC LIMIT $%d OFFSET $%d`, n+1, n+2),
+		append(args, limit, offset)...)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
 	defer rows.Close()
 
 	type logEntry struct {
@@ -1252,13 +1469,29 @@ func (h *Handler) QuizResults(w http.ResponseWriter, r *http.Request) {
 }
 
 // logAudit writes an institution-level audit entry.
+// logAudit records an action without naming an owning institution. Prefer
+// logAuditInst inside this package: an entry with no institution_id is only
+// visible to the institution log if its target happens to be the institution
+// row or one of its users.
 func logAudit(ctx context.Context, db *pgxpool.Pool, adminID, action, targetType, targetID, reason string) {
+	logAuditInst(ctx, db, adminID, "", action, targetType, targetID, reason)
+}
+
+// logAuditInst records an action and the institution it belongs to, so the
+// institution's log can find it by ownership rather than by guessing from the
+// target's type.
+func logAuditInst(ctx context.Context, db *pgxpool.Pool, adminID, institutionID, action, targetType, targetID, reason string) {
 	var adminName, adminRole string
 	db.QueryRow(ctx, `SELECT display_name, role FROM users WHERE id=$1`, adminID).Scan(&adminName, &adminRole)
+
+	var inst *string
+	if institutionID != "" {
+		inst = &institutionID
+	}
 	db.Exec(ctx,
-		`INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, reason)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-		adminID, adminName, adminRole, action, targetType, targetID, reason)
+		`INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, reason, institution_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		adminID, adminName, adminRole, action, targetType, targetID, reason, inst)
 }
 
 func generateCode(n int) string {

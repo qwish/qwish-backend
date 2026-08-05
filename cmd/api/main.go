@@ -548,7 +548,7 @@ func main() {
 					r.Delete("/groups/{groupId}/students/{userId}", institutionH.RemoveStudentFromGroup)
 					r.Post("/groups/{groupId}/teachers", institutionH.AddTeacherToGroup)
 					r.Delete("/groups/{groupId}/teachers/{userId}", institutionH.RemoveTeacherFromGroup)
-					r.Get("/quizzes", quizH.List)
+					r.Get("/quizzes", quizH.InstitutionList)
 					r.Get("/quizzes/{quizId}", quizH.Get)
 					r.Get("/topic-requests", topicH.TeacherList)
 					r.Patch("/topic-requests/{requestId}", topicH.InstitutionUpdate)
@@ -562,6 +562,8 @@ func main() {
 					r.Patch("/settings", institutionH.UpdateSettings)
 					r.Patch("/settings/point-rules", institutionH.UpdatePointRules)
 					r.Get("/audit-log", institutionH.AuditLog)
+					r.Get("/setup-checklist", institutionH.SetupChecklist)
+					r.Post("/referral-code-reset-request", institutionH.RequestReferralCodeReset)
 
 					// Analytics. Scope is pinned to the caller's institution by
 					// the resolver — there is no institution_id parameter here.

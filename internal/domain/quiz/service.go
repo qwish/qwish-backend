@@ -520,6 +520,81 @@ func (s *Service) ListForTeacher(ctx context.Context, teacherID, statusFilter st
 	return s.scanQuizRows(rows), total, nil
 }
 
+// InstitutionQuiz is a Quiz as an institution admin sees it: the admin list is
+// the only view that reports an average score, so the field lives here rather
+// than on Quiz where every other caller would carry a nil.
+type InstitutionQuiz struct {
+	Quiz
+	AverageScore *float64 `json:"average_score,omitempty"`
+}
+
+// institutionListWhere builds the WHERE clause and args for the admin quiz
+// roster. Same invariant as studentListWhere: the next free placeholder is
+// always $(len(args)+1), because LIMIT/OFFSET are appended after it.
+func institutionListWhere(institutionID, statusFilter, quizType, search string) (string, []interface{}) {
+	where := `q.institution_id = $1 AND q.deleted_at IS NULL`
+	args := []interface{}{institutionID}
+	if statusFilter != "" {
+		where += fmt.Sprintf(` AND q.status = $%d`, len(args)+1)
+		args = append(args, statusFilter)
+	}
+	if quizType != "" {
+		where += fmt.Sprintf(` AND q.type = $%d`, len(args)+1)
+		args = append(args, quizType)
+	}
+	if search != "" {
+		where += fmt.Sprintf(` AND q.title ILIKE $%d`, len(args)+1)
+		args = append(args, "%"+search+"%")
+	}
+	return where, args
+}
+
+// ListForInstitution lists every quiz owned by the institution — including
+// draft, pending and closed ones. Deliberately not ListForStudent: that query
+// pins status='published' and lets public quizzes from other institutions in,
+// neither of which an admin roster should do.
+func (s *Service) ListForInstitution(ctx context.Context, institutionID, statusFilter, quizType, search string, page, limit int) ([]InstitutionQuiz, int, error) {
+	offset := (page - 1) * limit
+	where, args := institutionListWhere(institutionID, statusFilter, quizType, search)
+
+	var total int
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quizzes q WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	args = append(args, limit, offset)
+	n := len(args)
+	rows, err := s.db.Query(ctx,
+		`SELECT q.id, q.institution_id, q.created_by, u.display_name, '' AS institution_name,
+		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
+		        COUNT(qa.id) FILTER (WHERE qa.status = 'completed') AS taker_count,
+		        AVG(qa.score_pct) FILTER (WHERE qa.status = 'completed') AS average_score,
+		        q.ends_at, q.published_at, q.group_id, q.created_at
+		 FROM quizzes q
+		 JOIN users u ON u.id = q.created_by
+		 LEFT JOIN quiz_attempts qa ON qa.quiz_id = q.id
+		 WHERE `+where+
+			` GROUP BY q.id, u.display_name`+
+			fmt.Sprintf(` ORDER BY q.created_at DESC LIMIT $%d OFFSET $%d`, n-1, n),
+		args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	quizzes := []InstitutionQuiz{}
+	for rows.Next() {
+		var q InstitutionQuiz
+		if err := rows.Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName,
+			&q.Title, &q.Description, &q.Type, &q.Visibility, &q.Status, &q.QuestionCount,
+			&q.TakerCount, &q.AverageScore, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		quizzes = append(quizzes, q)
+	}
+	return quizzes, total, rows.Err()
+}
+
 func (s *Service) SubmitReport(ctx context.Context, reporterID, quizID string, questionID *string, reason, description string) error {
 	// Auto-escalate if 3+ reports on same quiz
 	var existingCount int

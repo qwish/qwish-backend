@@ -38,6 +38,33 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	middleware.JSONWithMeta(w, http.StatusOK, quizzes, &middleware.Meta{Page: page, Limit: limit, Total: total})
 }
 
+// GET /api/v1/institution/quizzes
+//
+// The admin roster, not the student feed: every quiz the institution owns, at
+// any status. Filters are status/type/search; there is no "saved" here.
+func (h *Handler) InstitutionList(w http.ResponseWriter, r *http.Request) {
+	instID := middleware.GetInstitutionID(r)
+	if instID == "" {
+		middleware.BadRequest(w, "no institution on token")
+		return
+	}
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
+	quizzes, total, err := h.svc.ListForInstitution(r.Context(), instID, q.Get("status"), q.Get("type"), q.Get("search"), page, limit)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSONWithMeta(w, http.StatusOK, quizzes, &middleware.Meta{Page: page, Limit: limit, Total: total})
+}
+
 // GET /api/v1/quizzes/:quizId
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	quiz, err := h.svc.GetByID(r.Context(), chi.URLParam(r, "quizId"))

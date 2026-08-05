@@ -103,6 +103,16 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/v1/institution/students
+// avgScoreExpr is a student's mean completed-quiz score inside this
+// institution. Shared between the SELECT list and the score filters so a
+// threshold can never disagree with the number shown next to it.
+//
+// The completed_at >= joined_at clause is what keeps a transferred-in student's
+// previous school's attempts out of this institution's numbers.
+const avgScoreExpr = `COALESCE((SELECT AVG(score_pct) FROM quiz_attempts
+	 WHERE user_id=e.user_id AND status='completed'
+	   AND completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)),0)`
+
 func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
 	q := r.URL.Query()
@@ -149,6 +159,31 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 		args = append(args, section)
 		n++
 	}
+	// Score and activity thresholds. The promotion flow needs to ask "who in
+	// this class is under 40%", which sorting cannot answer across pages.
+	if v := q.Get("min_score"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			where += fmt.Sprintf(` AND %s >= $%d`, avgScoreExpr, n)
+			args = append(args, f)
+			n++
+		}
+	}
+	if v := q.Get("max_score"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			where += fmt.Sprintf(` AND %s <= $%d`, avgScoreExpr, n)
+			args = append(args, f)
+			n++
+		}
+	}
+	// "Nothing for 30 days" must include a student who has never been active at
+	// all, which a bare last_active_at comparison would drop.
+	if v := q.Get("inactive_days"); v != "" {
+		if d, err := strconv.Atoi(v); err == nil && d > 0 {
+			where += fmt.Sprintf(` AND (u.last_active_at IS NULL OR u.last_active_at < now() - ($%d || ' days')::interval)`, n)
+			args = append(args, strconv.Itoa(d))
+			n++
+		}
+	}
 
 	var total int
 	h.db.QueryRow(r.Context(),
@@ -172,9 +207,7 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 		`SELECT e.id, e.user_id, COALESCE(u.display_name, e.full_name), COALESCE(u.email, e.email, ''),
 		        e.roll_number, e.grade, e.section, e.status,
 		        COALESCE(u.total_points,0), COALESCE(u.current_streak,0), u.last_active_at,
-		        COALESCE((SELECT AVG(score_pct) FROM quiz_attempts
-		                   WHERE user_id=e.user_id AND status='completed'
-		                     AND completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)),0) AS avg_score,
+		        ` + avgScoreExpr + ` AS avg_score,
 		        e.claim_code,
 		        COALESCE((SELECT json_agg(json_build_object('id', g.id, 'name', g.name))
 		                    FROM group_students gs JOIN groups g ON g.id = gs.group_id

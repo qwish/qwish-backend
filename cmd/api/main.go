@@ -533,6 +533,11 @@ func main() {
 					r.Post("/students/import", enrollmentInstH.ImportStudents)
 					r.Patch("/enrollments/{enrollmentId}/status", enrollmentInstH.SetStudentStatus)
 					r.Post("/enrollments/promote", enrollmentInstH.PromoteStudents)
+					// Class-based promotion: pick a class, pick students, pick
+					// where they go. Recorded as a batch so it can be undone.
+					r.Post("/promotions", enrollmentInstH.CreatePromotion)
+					r.Get("/promotions", enrollmentInstH.ListPromotions)
+					r.Post("/promotions/{batchId}/revert", enrollmentInstH.RevertPromotion)
 					r.Get("/edit-requests", editRequestH.ListForReview)
 					r.Patch("/edit-requests/{requestId}", editRequestH.Review)
 					r.Get("/students/{userId}", institutionH.GetStudent)

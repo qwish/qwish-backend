@@ -48,8 +48,9 @@ func (s *Service) getUserByID(ctx context.Context, id string) (*userAccount, err
 func (s *Service) getUserByEmail(ctx context.Context, email string) (*userAccount, error) {
 	var u userAccount
 	err := s.db.QueryRow(ctx,
+		// Case-insensitive: see getActiveAdminByEmail.
 		`SELECT id, supabase_uid, display_name, email, status, role FROM users
-		 WHERE email = $1 AND deleted_at IS NULL`, email,
+		 WHERE lower(btrim(email)) = $1 AND deleted_at IS NULL`, NormalizeEmail(email),
 	).Scan(&u.ID, &u.SupabaseUID, &u.Name, &u.Email, &u.Status, &u.Role)
 	if err != nil {
 		return nil, err

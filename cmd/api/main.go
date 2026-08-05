@@ -283,6 +283,9 @@ func main() {
 					mw.RateLimitByJSONField(3, 15*time.Minute, "email"),
 				).Post("/send-otp", authH.SendOTP)
 				r.Post("/verify-otp", authH.VerifyOTP)
+				// Sign-up forms check an address before spending an OTP on it.
+				// Answers only taken/free — never which surface holds it.
+				r.With(mw.RateLimit(20, 15*time.Minute)).Get("/email-availability", authH.EmailAvailability)
 				r.Post("/refresh", authH.Refresh)
 				r.Get("/teacher-invite", authH.GetTeacherInvite)
 

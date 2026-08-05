@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/domain/auth"
 	"github.com/qwish/backend/internal/domain/enrollment"
 	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/middleware"
@@ -519,13 +520,14 @@ func (h *Handler) InviteTeacher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject if the email already belongs to a teacher in this institution
-	var existing int
-	h.db.QueryRow(r.Context(),
-		`SELECT 1 FROM users WHERE email=$1 AND institution_id=$2 AND role='teacher' AND deleted_at IS NULL`,
-		req.Email, instID).Scan(&existing)
-	if existing != 0 {
-		middleware.Error(w, http.StatusConflict, "DUPLICATE_EMAIL", "a teacher with this email is already part of your institution")
+	req.Email = auth.NormalizeEmail(req.Email)
+
+	// One address is one Qwish account. The old check here only looked for a
+	// teacher inside this institution, so an address already registered as a
+	// student, as a teacher elsewhere, or as a super admin still got an invite
+	// — one that could only dead-end when they tried to accept it.
+	if taken := auth.EmailIdentityIn(r.Context(), h.db, req.Email); taken != nil {
+		middleware.Error(w, http.StatusConflict, "EMAIL_ALREADY_REGISTERED", taken.Human())
 		return
 	}
 
@@ -533,7 +535,7 @@ func (h *Handler) InviteTeacher(w http.ResponseWriter, r *http.Request) {
 	var pendingID string
 	h.db.QueryRow(r.Context(),
 		`SELECT id FROM teacher_invites
-		 WHERE email=$1 AND institution_id=$2 AND status='pending' AND expires_at > now()`,
+		 WHERE lower(btrim(email))=$1 AND institution_id=$2 AND status='pending' AND expires_at > now()`,
 		req.Email, instID).Scan(&pendingID)
 	if pendingID != "" {
 		middleware.Error(w, http.StatusConflict, "DUPLICATE_INVITE", "a pending invite for this email already exists")

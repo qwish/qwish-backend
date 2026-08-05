@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/config"
+	"github.com/qwish/backend/internal/domain/auth"
 	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/domain/scoring"
 	"github.com/qwish/backend/internal/middleware"
@@ -1044,6 +1045,16 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	req.Email = auth.NormalizeEmail(req.Email)
+
+	// One address is one Qwish account. Checked before the Supabase invite so a
+	// doomed admin account never gets an auth user, and before the
+	// admin_accounts lookup below, which only ever saw its own table.
+	if taken := auth.EmailIdentityIn(r.Context(), h.db, req.Email); taken != nil {
+		middleware.Error(w, http.StatusConflict, "EMAIL_ALREADY_REGISTERED", taken.Human())
+		return
+	}
+
 	adminID := middleware.GetAdminID(r)
 	// created_by is a nullable FK to admin_accounts.id. When the requester is
 	// authenticated via the users table (not admin_accounts), GetAdminID is empty;
@@ -1081,7 +1092,7 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 
 	var id, existingStatus string
 	err = h.db.QueryRow(r.Context(),
-		`SELECT id, status FROM admin_accounts WHERE email=$1`, req.Email,
+		`SELECT id, status FROM admin_accounts WHERE lower(btrim(email))=$1`, req.Email,
 	).Scan(&id, &existingStatus)
 	switch {
 	case err == nil && existingStatus != "deleted":
@@ -1804,6 +1815,15 @@ func (h *Handler) provisionInstitutionAdmin(ctx context.Context, instID, adminNa
 		instID,
 	).Scan(&existingID, &existingEmail); err == nil {
 		return &provisionResult{UserID: existingID, AdminEmail: existingEmail, AdminName: adminName, Institution: instName, AlreadyExists: true}, nil
+	}
+
+	adminEmail = auth.NormalizeEmail(adminEmail)
+
+	// One address is one Qwish account. Refused here rather than at the INSERT
+	// so an institution admin is never given a Supabase auth user for a row the
+	// one_identity_per_email trigger will reject.
+	if taken := auth.EmailIdentityIn(ctx, h.db, adminEmail); taken != nil {
+		return nil, fmt.Errorf("cannot provision %s: %w", adminEmail, taken)
 	}
 
 	// Provision the Supabase auth user via the shared invite client — same path

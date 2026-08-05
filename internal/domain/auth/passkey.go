@@ -63,8 +63,10 @@ func (s *Service) getAdminByID(ctx context.Context, id string) (*AdminAccount, e
 func (s *Service) getActiveAdminByEmail(ctx context.Context, email string) (*AdminAccount, error) {
 	var a AdminAccount
 	err := s.db.QueryRow(ctx,
+		// Case-insensitive: stored addresses are normalised (038) but the
+		// address arriving from a login form or an identity provider is not.
 		`SELECT id, supabase_uid, name, email, role, status FROM admin_accounts
-		 WHERE email = $1 AND deleted_at IS NULL`, email,
+		 WHERE lower(btrim(email)) = $1 AND deleted_at IS NULL`, NormalizeEmail(email),
 	).Scan(&a.ID, &a.SupabaseUID, &a.Name, &a.Email, &a.Role, &a.Status)
 	if err != nil {
 		return nil, err

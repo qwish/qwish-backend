@@ -130,6 +130,29 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GET /api/v1/auth/email-availability?email=...
+//
+// Lets a sign-up form say "that address is already a teacher account" while the
+// person is still typing, instead of after they have burned an OTP.
+//
+// Deliberately does not reveal the role or the specific surface: this endpoint
+// is unauthenticated, and an enumeration oracle that answers "which kind of
+// account is this?" is worth more to an attacker than to a form. The full
+// sentence is only returned to someone who has already proved control of the
+// address by verifying an OTP.
+func (h *Handler) EmailAvailability(w http.ResponseWriter, r *http.Request) {
+	email := NormalizeEmail(r.URL.Query().Get("email"))
+	if email == "" || !strings.Contains(email, "@") {
+		middleware.BadRequest(w, "email is required")
+		return
+	}
+
+	middleware.JSON(w, http.StatusOK, map[string]interface{}{
+		"email":     email,
+		"available": h.svc.EmailIdentity(r.Context(), email) == nil,
+	})
+}
+
 // POST /api/v1/auth/create-profile
 // Creates a profile for a newly verified user. Requires auth.
 // Body: { full_name, referral_code? }
@@ -193,8 +216,23 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// One address is one Qwish account. Checked here so the caller gets a
+	// sentence naming where the address already lives, rather than the
+	// trigger's generic conflict.
+	if taken := h.svc.EmailIdentity(r.Context(), email); taken != nil {
+		middleware.Error(w, http.StatusConflict, "EMAIL_ALREADY_REGISTERED", taken.Human())
+		return
+	}
+
 	newUser, err := h.svc.CreateUser(r.Context(), uid, req.FullName, email, role, instID, status)
 	if err != nil {
+		// Lost the race to a concurrent signup between the check above and this
+		// insert. The trigger is the authority, and it names itself.
+		if IsEmailTakenErr(err) {
+			middleware.Error(w, http.StatusConflict, "EMAIL_ALREADY_REGISTERED",
+				"That email is already registered to a Qwish account. One email address can hold one Qwish account.")
+			return
+		}
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			middleware.Error(w, http.StatusConflict, "USER_ALREADY_EXISTS", "profile already created")

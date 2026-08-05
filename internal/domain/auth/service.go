@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/config"
 )
@@ -102,13 +104,101 @@ func (s *Service) SupabaseLogout(ctx context.Context, accessToken string) error 
 	return nil
 }
 
+// NormalizeEmail is the one definition of "the same address" in this codebase.
+// The DB trigger from migration 038 applies the identical rule on write, so a
+// value compared here matches the value that will be stored.
+func NormalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
 // UserExistsByEmail returns true if a user with the given email exists in the DB.
 func (s *Service) UserExistsByEmail(ctx context.Context, email string) bool {
 	var exists bool
 	s.db.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL)`, email,
+		`SELECT EXISTS(SELECT 1 FROM users WHERE lower(btrim(email)) = $1 AND deleted_at IS NULL)`,
+		NormalizeEmail(email),
 	).Scan(&exists)
 	return exists
+}
+
+// ErrEmailTaken reports an address that already holds an identity somewhere in
+// Qwish. Surface is a human phrase naming where, Role the role held there.
+//
+// One address is one person on one surface: a student in the app cannot also be
+// a super admin in the console. Enforced in the database by the
+// one_identity_per_email trigger; this type is how the API says so in advance,
+// with a sentence a person can act on.
+type ErrEmailTaken struct {
+	Surface string
+	Role    string
+}
+
+func (e ErrEmailTaken) Error() string {
+	return "email already registered on " + e.Surface + " as " + e.Role
+}
+
+// Human returns the message shown to whoever hit the rule.
+func (e ErrEmailTaken) Human() string {
+	return "That email is already registered on " + e.Surface + " as a " +
+		strings.ReplaceAll(e.Role, "_", " ") + ". One email address can hold one Qwish account."
+}
+
+var surfaceForRole = map[string]string{
+	"student":           "the Qwish app",
+	"parent":            "the Qwish app",
+	"teacher":           "the teacher panel",
+	"institution_admin": "the institute dashboard",
+	"super_admin":       "the admin console",
+	"moderator":         "the admin console",
+	"support_agent":     "the admin console",
+}
+
+// EmailIdentity reports the identity already holding an address, across both
+// identity tables. Returns nil when the address is free.
+//
+// Callers use it to refuse early — at invite or provision time — so nobody is
+// emailed a link that can only dead-end. The trigger is still the authority;
+// this check can lose a race with a concurrent signup, which is exactly why it
+// is not the only guard.
+func (s *Service) EmailIdentity(ctx context.Context, email string) *ErrEmailTaken {
+	return EmailIdentityIn(ctx, s.db, email)
+}
+
+// EmailIdentityIn is EmailIdentity for callers that hold a pool rather than an
+// auth Service — the institution and admin handlers, which must refuse an
+// invite before it is sent.
+func EmailIdentityIn(ctx context.Context, db *pgxpool.Pool, email string) *ErrEmailTaken {
+	norm := NormalizeEmail(email)
+	if norm == "" {
+		return nil
+	}
+
+	var role string
+	err := db.QueryRow(ctx,
+		`SELECT role FROM users
+		  WHERE lower(btrim(email)) = $1 AND deleted_at IS NULL
+		 UNION ALL
+		 SELECT role FROM admin_accounts
+		  WHERE lower(btrim(email)) = $1 AND deleted_at IS NULL
+		 LIMIT 1`,
+		norm,
+	).Scan(&role)
+	if err != nil {
+		return nil // no row, or a read failure: let the trigger be the authority
+	}
+
+	surface, ok := surfaceForRole[role]
+	if !ok {
+		surface = "Qwish"
+	}
+	return &ErrEmailTaken{Surface: surface, Role: role}
+}
+
+// IsEmailTakenErr reports whether a database error is the one_identity_per_email
+// trigger refusing a write, as opposed to an ordinary duplicate key.
+func IsEmailTakenErr(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.ConstraintName == "one_identity_per_email"
 }
 
 // GetUserBySupabaseUID returns the local user record for a Supabase UID, if it exists.
@@ -133,9 +223,13 @@ func (s *Service) GetUserBySupabaseUID(ctx context.Context, uid string) (*UserPr
 func (s *Service) GetAdminForLogin(ctx context.Context, uid, email string) (*AdminAccount, error) {
 	var a AdminAccount
 	err := s.db.QueryRow(ctx,
+		// Case-insensitive on email: stored addresses are normalised (038) and
+		// the address Supabase hands back is whatever the admin typed. A
+		// case-sensitive match here would lock out an invited admin whose
+		// stored row was lowercased.
 		`SELECT id, supabase_uid, name, email, role, status FROM admin_accounts
-		 WHERE (supabase_uid = $1 OR email = $2) AND deleted_at IS NULL`,
-		uid, email,
+		 WHERE (supabase_uid = $1 OR lower(btrim(email)) = $2) AND deleted_at IS NULL`,
+		uid, NormalizeEmail(email),
 	).Scan(&a.ID, &a.SupabaseUID, &a.Name, &a.Email, &a.Role, &a.Status)
 	if err != nil {
 		return nil, err

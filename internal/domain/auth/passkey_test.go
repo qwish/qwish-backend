@@ -16,7 +16,7 @@ func TestMintRefreshTokenTTLAndClaims(t *testing.T) {
 	const secret = "test-secret"
 	s := &Service{cfg: &config.Config{SupabaseJWTSecret: secret}}
 
-	raw, err := s.mintRefreshToken("uid-123", "admin@example.com")
+	raw, err := s.mintRefreshToken("uid-123", "admin@example.com", 0)
 	if err != nil {
 		t.Fatalf("mintRefreshToken: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestMintRefreshTokenTTLAndClaims(t *testing.T) {
 // so a leaked access token has a small blast radius.
 func TestMintAccessTokenShortTTL(t *testing.T) {
 	s := &Service{cfg: &config.Config{SupabaseJWTSecret: "test-secret"}}
-	raw, err := s.mintAccessToken("uid-123", "admin@example.com")
+	raw, err := s.mintAccessToken("uid-123", "admin@example.com", 0)
 	if err != nil {
 		t.Fatalf("mintAccessToken: %v", err)
 	}

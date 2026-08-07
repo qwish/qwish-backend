@@ -325,6 +325,10 @@ func main() {
 				r.Group(func(r chi.Router) {
 					r.Use(mw.Authenticate(cfg.SupabaseJWTSecret, cfg.SupabaseURL, pool))
 					r.Post("/logout", authH.Logout)
+					// Ends every session on every device. Distinct from /logout,
+					// which only forwards to Supabase and is a no-op for a
+					// passkey session.
+					r.Post("/sessions/revoke-all", authH.RevokeAllSessions)
 					r.Patch("/referral-code", authH.UpdateReferralCode)
 
 					// Passkey enrolment & management for the signed-in admin.

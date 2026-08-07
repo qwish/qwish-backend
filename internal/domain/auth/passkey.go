@@ -51,9 +51,10 @@ func (u *passkeyUser) WebAuthnCredentials() []webauthn.Credential { return u.cre
 func (s *Service) getAdminByID(ctx context.Context, id string) (*AdminAccount, error) {
 	var a AdminAccount
 	err := s.db.QueryRow(ctx,
-		`SELECT id, supabase_uid, name, email, role, status FROM admin_accounts
+		`SELECT id, supabase_uid, name, email, role, status, token_generation
+		   FROM admin_accounts
 		 WHERE id = $1 AND deleted_at IS NULL`, id,
-	).Scan(&a.ID, &a.SupabaseUID, &a.Name, &a.Email, &a.Role, &a.Status)
+	).Scan(&a.ID, &a.SupabaseUID, &a.Name, &a.Email, &a.Role, &a.Status, &a.TokenGeneration)
 	if err != nil {
 		return nil, err
 	}
@@ -65,9 +66,10 @@ func (s *Service) getActiveAdminByEmail(ctx context.Context, email string) (*Adm
 	err := s.db.QueryRow(ctx,
 		// Case-insensitive: stored addresses are normalised (038) but the
 		// address arriving from a login form or an identity provider is not.
-		`SELECT id, supabase_uid, name, email, role, status FROM admin_accounts
+		`SELECT id, supabase_uid, name, email, role, status, token_generation
+		   FROM admin_accounts
 		 WHERE lower(btrim(email)) = $1 AND deleted_at IS NULL`, NormalizeEmail(email),
-	).Scan(&a.ID, &a.SupabaseUID, &a.Name, &a.Email, &a.Role, &a.Status)
+	).Scan(&a.ID, &a.SupabaseUID, &a.Name, &a.Email, &a.Role, &a.Status, &a.TokenGeneration)
 	if err != nil {
 		return nil, err
 	}
@@ -77,9 +79,10 @@ func (s *Service) getActiveAdminByEmail(ctx context.Context, email string) (*Adm
 func (s *Service) getAdminBySupabaseUID(ctx context.Context, uid string) (*AdminAccount, error) {
 	var a AdminAccount
 	err := s.db.QueryRow(ctx,
-		`SELECT id, supabase_uid, name, email, role, status FROM admin_accounts
+		`SELECT id, supabase_uid, name, email, role, status, token_generation
+		   FROM admin_accounts
 		 WHERE supabase_uid = $1 AND deleted_at IS NULL`, uid,
-	).Scan(&a.ID, &a.SupabaseUID, &a.Name, &a.Email, &a.Role, &a.Status)
+	).Scan(&a.ID, &a.SupabaseUID, &a.Name, &a.Email, &a.Role, &a.Status, &a.TokenGeneration)
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +262,7 @@ func (s *Service) consumeChallenge(ctx context.Context, subject, purpose string)
 // middleware verifies the signature against SUPABASE_JWT_SECRET and resolves the
 // admin via the `sub` (supabase_uid) claim, so a passkey session is accepted by
 // every protected route exactly like an OTP session.
-func (s *Service) mintAccessToken(supabaseUID, email string) (string, error) {
+func (s *Service) mintAccessToken(supabaseUID, email string, gen int) (string, error) {
 	now := time.Now()
 	claims := jwt.MapClaims{
 		"sub":   supabaseUID,
@@ -270,13 +273,18 @@ func (s *Service) mintAccessToken(supabaseUID, email string) (string, error) {
 		"iat":   now.Unix(),
 		"exp":   now.Add(passkeyAccessTTL).Unix(),
 		"amr":   []map[string]any{{"method": "webauthn"}},
+		// Session generation. The auth middleware compares this against the
+		// account's token_generation column, so bumping that column invalidates
+		// this token within the request that follows — that is the kill switch.
+		// See migrations/040_passkey_token_generation.sql.
+		"gen": gen,
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.cfg.SupabaseJWTSecret))
 }
 
 // mintRefreshToken issues our own refresh JWT (distinct `typ`) so /auth/refresh
 // can renew a passkey session without involving Supabase.
-func (s *Service) mintRefreshToken(supabaseUID, email string) (string, error) {
+func (s *Service) mintRefreshToken(supabaseUID, email string, gen int) (string, error) {
 	now := time.Now()
 	claims := jwt.MapClaims{
 		"sub":   supabaseUID,
@@ -284,36 +292,70 @@ func (s *Service) mintRefreshToken(supabaseUID, email string) (string, error) {
 		"typ":   "passkey_refresh",
 		"iat":   now.Unix(),
 		"exp":   now.Add(passkeyRefreshTTL).Unix(),
+		"gen":   gen,
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.cfg.SupabaseJWTSecret))
 }
 
-func (s *Service) mintSession(supabaseUID, email string) (access, refresh string, err error) {
-	if access, err = s.mintAccessToken(supabaseUID, email); err != nil {
+func (s *Service) mintSession(supabaseUID, email string, gen int) (access, refresh string, err error) {
+	if access, err = s.mintAccessToken(supabaseUID, email, gen); err != nil {
 		return "", "", err
 	}
-	if refresh, err = s.mintRefreshToken(supabaseUID, email); err != nil {
+	if refresh, err = s.mintRefreshToken(supabaseUID, email, gen); err != nil {
 		return "", "", err
 	}
 	return access, refresh, nil
 }
 
+// tokenGeneration reads the `gen` claim.
+//
+// A token minted before migration 040 carries no `gen`, and must keep working
+// rather than logging everyone out on deploy — so an absent claim reads as
+// generation 0, which is also the column's default.
+func tokenGeneration(claims jwt.MapClaims) int {
+	raw, present := claims["gen"]
+	if !present {
+		return 0
+	}
+	// encoding/json decodes JSON numbers into float64.
+	if f, ok := raw.(float64); ok {
+		return int(f)
+	}
+	return 0
+}
+
+// RevokeSessions bumps a user's token generation, invalidating every access and
+// refresh token already issued to them. This is "sign out everywhere".
+func (s *Service) RevokeUserSessions(ctx context.Context, userID string) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE users SET token_generation = token_generation + 1, updated_at = now()
+		  WHERE id = $1`, userID)
+	return err
+}
+
+// RevokeAdminSessions is the admin_accounts counterpart.
+func (s *Service) RevokeAdminSessions(ctx context.Context, adminID string) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE admin_accounts SET token_generation = token_generation + 1 WHERE id = $1`, adminID)
+	return err
+}
+
 // PasskeyRefreshSubject validates a refresh token and, if it is one of our
 // passkey refresh JWTs, returns its subject (supabase_uid). Lets the refresh
 // handler try the admin and user passkey paths without each re-parsing.
-func (s *Service) PasskeyRefreshSubject(refreshToken string) (sub string, ok bool) {
+func (s *Service) PasskeyRefreshSubject(refreshToken string) (sub string, gen int, ok bool) {
 	tok, err := jwt.Parse(refreshToken, func(t *jwt.Token) (interface{}, error) {
 		return []byte(s.cfg.SupabaseJWTSecret), nil
 	}, jwt.WithValidMethods([]string{"HS256"}))
 	if err != nil || !tok.Valid {
-		return "", false
+		return "", 0, false
 	}
 	claims, _ := tok.Claims.(jwt.MapClaims)
 	if claims == nil || claims["typ"] != "passkey_refresh" {
-		return "", false
+		return "", 0, false
 	}
 	sub, _ = claims["sub"].(string)
-	return sub, sub != ""
+	return sub, tokenGeneration(claims), sub != ""
 }
 
 // TryPasskeyRefresh renews a passkey session from its refresh token. It returns
@@ -343,11 +385,16 @@ func (s *Service) TryPasskeyRefresh(ctx context.Context, refreshToken string) (a
 	if err != nil || admin.Status == "suspended" {
 		return "", "", false
 	}
+	// Session generation: a token minted before the last "sign out everywhere"
+	// is refused here, so revocation survives the full 30-day refresh window.
+	if tokenGeneration(claims) != admin.TokenGeneration {
+		return "", "", false
+	}
 	if n, err := s.countCredentials(ctx, admin.ID); err != nil || n == 0 {
 		return "", "", false
 	}
 
-	a, r, err := s.mintSession(admin.SupabaseUID, admin.Email)
+	a, r, err := s.mintSession(admin.SupabaseUID, admin.Email, admin.TokenGeneration)
 	if err != nil {
 		return "", "", false
 	}
@@ -555,7 +602,7 @@ func (h *Handler) PasskeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 // writePasskeySession mints a session for the verified admin and writes the
 // standard auth payload shared by the email and discoverable login finishers.
 func (h *Handler) writePasskeySession(w http.ResponseWriter, admin *AdminAccount) {
-	access, refresh, err := h.svc.mintSession(admin.SupabaseUID, admin.Email)
+	access, refresh, err := h.svc.mintSession(admin.SupabaseUID, admin.Email, admin.TokenGeneration)
 	if err != nil {
 		middleware.InternalError(w)
 		return

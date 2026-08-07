@@ -25,6 +25,18 @@ type userRow struct {
 	Role          string
 	InstitutionID *string
 	Status        string
+	TokenGen      int
+}
+
+// tokenGen reads the `gen` claim stamped into passkey-minted tokens
+// (internal/domain/auth/passkey.go). Absent means either a Supabase-issued token
+// or one minted before migration 040 — both read as generation 0, matching the
+// column default, so nobody is logged out by the deploy that adds this.
+func tokenGen(claims jwt.MapClaims) int {
+	if f, ok := claims["gen"].(float64); ok {
+		return int(f)
+	}
+	return 0
 }
 
 func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Handler) http.Handler {
@@ -70,11 +82,14 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 			// scan error here is a real failure, not "no such user".
 			var u userRow
 			var instStatus, adminID, adminRole, adminStatus string
+			var adminTokenGen int
 			err = db.QueryRow(r.Context(), `
 				SELECT COALESCE(u.id::text,''), COALESCE(u.role,''),
 				       u.institution_id, COALESCE(u.status,''),
+				       COALESCE(u.token_generation,0),
 				       COALESCE(i.status,''),
-				       COALESCE(a.id::text,''), COALESCE(a.role,''), COALESCE(a.status,'')
+				       COALESCE(a.id::text,''), COALESCE(a.role,''), COALESCE(a.status,''),
+				       COALESCE(a.token_generation,0)
 				  FROM (VALUES ($1::uuid)) AS p(uid)
 				  LEFT JOIN users u
 				         ON u.supabase_uid = p.uid AND u.deleted_at IS NULL
@@ -82,8 +97,8 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 				  LEFT JOIN admin_accounts a
 				         ON a.supabase_uid = p.uid AND a.deleted_at IS NULL`,
 				supabaseUID,
-			).Scan(&u.ID, &u.Role, &u.InstitutionID, &u.Status,
-				&instStatus, &adminID, &adminRole, &adminStatus)
+			).Scan(&u.ID, &u.Role, &u.InstitutionID, &u.Status, &u.TokenGen,
+				&instStatus, &adminID, &adminRole, &adminStatus, &adminTokenGen)
 			if err != nil {
 				// Malformed sub (not a uuid) or a dead database — either way the
 				// request cannot be authenticated.
@@ -95,6 +110,13 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 			// the previous two-query version did.
 			if u.ID == "" {
 				if adminID == "" {
+					Unauthorized(w)
+					return
+				}
+				// Session revocation: a token minted before the last
+				// "sign out everywhere" is dead on the very next request,
+				// rather than lingering for the access token's full hour.
+				if tokenGen(claims) != adminTokenGen {
 					Unauthorized(w)
 					return
 				}
@@ -118,6 +140,12 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 
 			if u.Status == "suspended" {
 				Error(w, http.StatusForbidden, "ACCOUNT_SUSPENDED", "account is suspended")
+				return
+			}
+
+			// Session revocation — see the admin branch above.
+			if tokenGen(claims) != u.TokenGen {
+				Unauthorized(w)
 				return
 			}
 

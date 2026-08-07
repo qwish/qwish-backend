@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -39,6 +40,20 @@ func NewService(db *pgxpool.Pool, cfg *config.Config) *Service {
 		RPID:          cfg.WebAuthnRPID,
 		RPDisplayName: cfg.WebAuthnRPDisplayName,
 		RPOrigins:     origins,
+		// Without this block go-webauthn falls back to its zero value, where
+		// ResidentKey is "discouraged". Discoverable (usernameless / autofill)
+		// login then only works when an authenticator happens to create a
+		// resident key anyway — true for iCloud Keychain and Google Password
+		// Manager, false for roaming security keys — so the feature appeared to
+		// work while silently failing for a slice of users.
+		//
+		// Preferred, not Required: a Required resident key makes enrolment fail
+		// outright on authenticators with no free credential slots, and an
+		// email+passkey login does not need discoverability.
+		AuthenticatorSelection: protocol.AuthenticatorSelection{
+			ResidentKey:      protocol.ResidentKeyRequirementPreferred,
+			UserVerification: protocol.VerificationPreferred,
+		},
 	})
 	if err != nil {
 		log.Printf("auth: passkey/WebAuthn disabled — invalid config: %v", err)
@@ -227,10 +242,11 @@ func (s *Service) GetAdminForLogin(ctx context.Context, uid, email string) (*Adm
 		// the address Supabase hands back is whatever the admin typed. A
 		// case-sensitive match here would lock out an invited admin whose
 		// stored row was lowercased.
-		`SELECT id, supabase_uid, name, email, role, status FROM admin_accounts
+		`SELECT id, supabase_uid, name, email, role, status, token_generation
+		   FROM admin_accounts
 		 WHERE (supabase_uid = $1 OR lower(btrim(email)) = $2) AND deleted_at IS NULL`,
 		uid, NormalizeEmail(email),
-	).Scan(&a.ID, &a.SupabaseUID, &a.Name, &a.Email, &a.Role, &a.Status)
+	).Scan(&a.ID, &a.SupabaseUID, &a.Name, &a.Email, &a.Role, &a.Status, &a.TokenGeneration)
 	if err != nil {
 		return nil, err
 	}
@@ -449,6 +465,9 @@ type AdminAccount struct {
 	Email       string
 	Role        string
 	Status      string
+	// TokenGeneration backs passkey session revocation; see
+	// migrations/040_passkey_token_generation.sql.
+	TokenGeneration int
 }
 
 type UserProfile struct {

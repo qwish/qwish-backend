@@ -305,7 +305,7 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	// Passkey sessions are minted by us, not Supabase — renew them locally.
 	// Try the admin passkey path, then the user (teacher) passkey path.
 	// Non-passkey tokens fall through to the Supabase refresh path below.
-	if sub, ok := h.svc.PasskeyRefreshSubject(req.RefreshToken); ok {
+	if sub, gen, ok := h.svc.PasskeyRefreshSubject(req.RefreshToken); ok {
 		if access, refresh, ok := h.svc.TryPasskeyRefresh(r.Context(), req.RefreshToken); ok {
 			middleware.JSON(w, http.StatusOK, map[string]interface{}{
 				"access_token":  access,
@@ -313,7 +313,7 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if access, refresh, ok := h.svc.TryUserPasskeyRefresh(r.Context(), sub); ok {
+		if access, refresh, ok := h.svc.TryUserPasskeyRefresh(r.Context(), sub, gen); ok {
 			middleware.JSON(w, http.StatusOK, map[string]interface{}{
 				"access_token":  access,
 				"refresh_token": refresh,
@@ -342,6 +342,38 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	}
 	h.svc.SupabaseLogout(r.Context(), token)
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "logged out"})
+}
+
+// POST /api/v1/auth/sessions/revoke-all
+//
+// Ends every session for the caller on every device, including passkey sessions,
+// by bumping their token generation. Needed because /auth/logout cannot do this:
+// it forwards to Supabase, which never issued a passkey session, so a passkey
+// refresh token would otherwise stay valid for its full 30 days.
+func (h *Handler) RevokeAllSessions(w http.ResponseWriter, r *http.Request) {
+	// GetAdminID is set only for admin_accounts identities; GetUserID is set for
+	// both, so the admin case has to be tested first.
+	if adminID := middleware.GetAdminID(r); adminID != "" {
+		if err := h.svc.RevokeAdminSessions(r.Context(), adminID); err != nil {
+			log.Printf("auth: revoke-all for admin %s: %v", adminID, err)
+			middleware.InternalError(w)
+			return
+		}
+		middleware.JSON(w, http.StatusOK, map[string]string{"message": "all sessions revoked"})
+		return
+	}
+
+	userID := middleware.GetUserID(r)
+	if userID == "" {
+		middleware.Unauthorized(w)
+		return
+	}
+	if err := h.svc.RevokeUserSessions(r.Context(), userID); err != nil {
+		log.Printf("auth: revoke-all for user %s: %v", userID, err)
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "all sessions revoked"})
 }
 
 // PATCH /api/v1/auth/referral-code

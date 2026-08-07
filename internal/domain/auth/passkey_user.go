@@ -9,9 +9,12 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-webauthn/webauthn/protocol"
@@ -27,18 +30,93 @@ type userAccount struct {
 	Email       string
 	Status      string
 	Role        string
+	// TokenGeneration backs passkey session revocation; see
+	// migrations/040_passkey_token_generation.sql.
+	TokenGeneration int
 }
 
 const userSubject = "u:" // challenge subject namespace for user ceremonies
+
+// decoyChallengeBytes / decoyCredentialIDBytes size the fake assertion returned
+// for an unknown email. 32 bytes matches what go-webauthn generates, so a decoy
+// is not distinguishable from a real challenge by length.
+const (
+	decoyChallengeBytes    = 32
+	decoyCredentialIDBytes = 32
+)
+
+// buildDecoyAssertion returns a syntactically valid PublicKeyCredentialRequestOptions
+// for an account that does not exist, or exists without a passkey.
+//
+// Everything a browser needs to run the ceremony is present, so the caller cannot
+// tell this apart from a real challenge. The user pays one authenticator prompt
+// that goes nowhere; the alternative is telling every anonymous caller which
+// email addresses are registered.
+func (s *Service) buildDecoyAssertion() (*protocol.CredentialAssertion, error) {
+	challenge := make([]byte, decoyChallengeBytes)
+	if _, err := rand.Read(challenge); err != nil {
+		return nil, err
+	}
+	credID := make([]byte, decoyCredentialIDBytes)
+	if _, err := rand.Read(credID); err != nil {
+		return nil, err
+	}
+	return &protocol.CredentialAssertion{
+		Response: protocol.PublicKeyCredentialRequestOptions{
+			Challenge:        challenge,
+			RelyingPartyID:   s.cfg.WebAuthnRPID,
+			Timeout:          int(challengeTTL.Milliseconds()),
+			UserVerification: protocol.VerificationPreferred,
+			AllowedCredentials: []protocol.CredentialDescriptor{{
+				Type:         protocol.PublicKeyCredentialType,
+				CredentialID: credID,
+			}},
+		},
+	}, nil
+}
+
+// respondDecoyAssertion answers with a decoy and stores nothing. Used when no
+// account exists: finish rejects an unknown email before it ever looks for a
+// challenge, so the two paths already converge on PASSKEY_VERIFY_FAILED.
+func (s *Service) respondDecoyAssertion(w http.ResponseWriter) {
+	options, err := s.buildDecoyAssertion()
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, options)
+}
+
+// respondDecoyAssertionFor answers with a decoy AND persists its session under
+// `subject`, so a finish for this address gets as far as signature validation
+// and fails there. Used when the account is real but has no passkey.
+func (s *Service) respondDecoyAssertionFor(ctx context.Context, w http.ResponseWriter, subject string) {
+	options, err := s.buildDecoyAssertion()
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	session := &webauthn.SessionData{
+		Challenge:        base64.RawURLEncoding.EncodeToString(options.Response.Challenge),
+		Expires:          time.Now().Add(challengeTTL),
+		UserVerification: protocol.VerificationPreferred,
+	}
+	if err := s.saveChallenge(ctx, subject, "login", session); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, options)
+}
 
 // ─── Store: user lookup ────────────────────────────────────────────────────────
 
 func (s *Service) getUserByID(ctx context.Context, id string) (*userAccount, error) {
 	var u userAccount
 	err := s.db.QueryRow(ctx,
-		`SELECT id, supabase_uid, display_name, email, status, role FROM users
+		`SELECT id, supabase_uid, display_name, email, status, role, token_generation
+		   FROM users
 		 WHERE id = $1 AND deleted_at IS NULL`, id,
-	).Scan(&u.ID, &u.SupabaseUID, &u.Name, &u.Email, &u.Status, &u.Role)
+	).Scan(&u.ID, &u.SupabaseUID, &u.Name, &u.Email, &u.Status, &u.Role, &u.TokenGeneration)
 	if err != nil {
 		return nil, err
 	}
@@ -49,9 +127,10 @@ func (s *Service) getUserByEmail(ctx context.Context, email string) (*userAccoun
 	var u userAccount
 	err := s.db.QueryRow(ctx,
 		// Case-insensitive: see getActiveAdminByEmail.
-		`SELECT id, supabase_uid, display_name, email, status, role FROM users
+		`SELECT id, supabase_uid, display_name, email, status, role, token_generation
+		   FROM users
 		 WHERE lower(btrim(email)) = $1 AND deleted_at IS NULL`, NormalizeEmail(email),
-	).Scan(&u.ID, &u.SupabaseUID, &u.Name, &u.Email, &u.Status, &u.Role)
+	).Scan(&u.ID, &u.SupabaseUID, &u.Name, &u.Email, &u.Status, &u.Role, &u.TokenGeneration)
 	if err != nil {
 		return nil, err
 	}
@@ -61,9 +140,10 @@ func (s *Service) getUserByEmail(ctx context.Context, email string) (*userAccoun
 func (s *Service) getUserBySupabaseUID(ctx context.Context, uid string) (*userAccount, error) {
 	var u userAccount
 	err := s.db.QueryRow(ctx,
-		`SELECT id, supabase_uid, display_name, email, status, role FROM users
+		`SELECT id, supabase_uid, display_name, email, status, role, token_generation
+		   FROM users
 		 WHERE supabase_uid = $1 AND deleted_at IS NULL`, uid,
-	).Scan(&u.ID, &u.SupabaseUID, &u.Name, &u.Email, &u.Status, &u.Role)
+	).Scan(&u.ID, &u.SupabaseUID, &u.Name, &u.Email, &u.Status, &u.Role, &u.TokenGeneration)
 	if err != nil {
 		return nil, err
 	}
@@ -186,15 +266,20 @@ func (s *Service) deleteUserCredential(ctx context.Context, userID, id string) (
 
 // TryUserPasskeyRefresh mirrors TryPasskeyRefresh for user (teacher) passkey
 // sessions. The refresh handler tries the admin path first, then this.
-func (s *Service) TryUserPasskeyRefresh(ctx context.Context, sub string) (access, refresh string, ok bool) {
+func (s *Service) TryUserPasskeyRefresh(ctx context.Context, sub string, gen int) (access, refresh string, ok bool) {
 	u, err := s.getUserBySupabaseUID(ctx, sub)
 	if err != nil || u.Status == "suspended" {
+		return "", "", false
+	}
+	// Session generation: a token minted before the last "sign out everywhere"
+	// is refused here, so revocation survives the full 30-day refresh window.
+	if gen != u.TokenGeneration {
 		return "", "", false
 	}
 	if n, err := s.countUserCredentials(ctx, u.ID); err != nil || n == 0 {
 		return "", "", false
 	}
-	a, r, err := s.mintSession(u.SupabaseUID, u.Email)
+	a, r, err := s.mintSession(u.SupabaseUID, u.Email, u.TokenGeneration)
 	if err != nil {
 		return "", "", false
 	}
@@ -314,9 +399,23 @@ func (h *Handler) UserPasskeyLoginBegin(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	u, err := h.svc.getUserByEmail(r.Context(), req.Email)
+	// Normalized once, and used for BOTH the lookup and the challenge subject.
+	// These used to disagree: the lookup normalized while saveChallenge keyed on
+	// the raw string, so "Ann@x.com" at begin and "ann@x.com" at finish produced
+	// PASSKEY_NO_CHALLENGE with nothing obviously wrong.
+	email := NormalizeEmail(req.Email)
+
+	// This endpoint must not reveal whether an address has an account.
+	//
+	// It used to answer 404 PASSKEY_NOT_FOUND for an unknown or passkey-less
+	// email and 200 for a registered one — an unauthenticated oracle for "is this
+	// person a Qwish user", which is worth more to an attacker than it is to the
+	// login form. Both cases now return a syntactically valid decoy challenge, so
+	// the two are indistinguishable, and the ceremony fails at finish with the
+	// same PASSKEY_VERIFY_FAILED any wrong credential earns.
+	u, err := h.svc.getUserByEmail(r.Context(), email)
 	if err != nil {
-		middleware.Error(w, http.StatusNotFound, "PASSKEY_NOT_FOUND", "no passkey is registered for this email")
+		h.svc.respondDecoyAssertion(w)
 		return
 	}
 	creds, err := h.svc.listUserCredentials(r.Context(), u.ID)
@@ -325,7 +424,12 @@ func (h *Handler) UserPasskeyLoginBegin(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if len(creds) == 0 {
-		middleware.Error(w, http.StatusNotFound, "PASSKEY_NOT_FOUND", "no passkey is registered for this email")
+		// A real account with no passkey. The decoy alone is not enough here:
+		// without a stored challenge, finish would answer PASSKEY_NO_CHALLENGE
+		// instead of PASSKEY_VERIFY_FAILED and reopen the oracle one step later.
+		// So persist the decoy's session too, letting finish reach ValidateLogin
+		// and fail there like every other bad assertion.
+		h.svc.respondDecoyAssertionFor(r.Context(), w, userSubject+email)
 		return
 	}
 	user := h.svc.buildPasskeyUserForUser(u, creds)
@@ -335,7 +439,7 @@ func (h *Handler) UserPasskeyLoginBegin(w http.ResponseWriter, r *http.Request) 
 		middleware.Error(w, http.StatusBadRequest, "PASSKEY_BEGIN_FAILED", err.Error())
 		return
 	}
-	if err := h.svc.saveChallenge(r.Context(), userSubject+req.Email, "login", session); err != nil {
+	if err := h.svc.saveChallenge(r.Context(), userSubject+email, "login", session); err != nil {
 		middleware.InternalError(w)
 		return
 	}
@@ -374,7 +478,7 @@ func (h *Handler) UserPasskeyLoginFinish(w http.ResponseWriter, r *http.Request)
 	}
 	user := h.svc.buildPasskeyUserForUser(u, creds)
 
-	session, err := h.svc.consumeChallenge(r.Context(), userSubject+body.Email, "login")
+	session, err := h.svc.consumeChallenge(r.Context(), userSubject+NormalizeEmail(body.Email), "login")
 	if err != nil {
 		middleware.Error(w, http.StatusBadRequest, "PASSKEY_NO_CHALLENGE", "no active login challenge")
 		return
@@ -469,7 +573,7 @@ func (h *Handler) UserPasskeyLoginFinishDiscoverable(w http.ResponseWriter, r *h
 
 // writeUserPasskeySession mints a session for the verified user.
 func (h *Handler) writeUserPasskeySession(w http.ResponseWriter, u *userAccount) {
-	access, refresh, err := h.svc.mintSession(u.SupabaseUID, u.Email)
+	access, refresh, err := h.svc.mintSession(u.SupabaseUID, u.Email, u.TokenGeneration)
 	if err != nil {
 		middleware.InternalError(w)
 		return

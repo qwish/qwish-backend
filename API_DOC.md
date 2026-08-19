@@ -968,10 +968,17 @@ Generates and downloads a verified PDF report card for the user.
     "question_count": 10,
     "is_saved":       false,
     "created_by":     "uuid",
-    "published_at":   "2024-02-01T00:00:00Z"
+    "published_at":   "2024-02-01T00:00:00Z",
+    "taker_count":    128,
+    "avg_score_pct":  67.4,
+    "avg_seconds":    252.0
   }
 ]
 ```
+
+`taker_count` is the number of **distinct users** with a completed attempt (a
+retake does not count twice). `avg_score_pct` and `avg_seconds` are averages over
+all completed attempts; both are omitted when no one has completed the quiz.
 
 ---
 
@@ -979,6 +986,11 @@ Generates and downloads a verified PDF report card for the user.
 **Auth required:** Yes
 
 Returns quiz details including all questions (with options, correct answers hidden for students during attempts).
+
+Also carries the same peer stats as the list: `taker_count` (distinct users with a
+completed attempt), `avg_score_pct` and `avg_seconds` (averages over completed
+attempts; omitted when there are none). Use this endpoint — not the paginated
+list — to render a quiz detail view.
 
 ---
 

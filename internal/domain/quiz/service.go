@@ -38,6 +38,9 @@ type Quiz struct {
 	Subdomain       *string    `json:"subdomain,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	QuestionTypes   []string   `json:"question_types,omitempty"`
+	// Peer stats over completed attempts; nil when nobody has finished the quiz.
+	AvgScorePct *float64 `json:"avg_score_pct,omitempty"`
+	AvgSeconds  *float64 `json:"avg_seconds,omitempty"`
 }
 
 type Question struct {
@@ -75,15 +78,25 @@ type AddQuestionReq struct {
 	Clues            json.RawMessage `json:"clues,omitempty"`
 }
 
+// attemptStatsSelect aggregates a quiz's completed attempts: how many distinct
+// people took it, and the peer averages shown on the quiz detail screen.
+// Correlated on q.id — only valid inside a LATERAL join over `quizzes q`.
+const attemptStatsSelect = `SELECT COUNT(DISTINCT qa.user_id) AS taker_count,
+		               AVG(qa.score_pct)::float8 AS avg_score_pct,
+		               AVG(EXTRACT(EPOCH FROM (qa.completed_at - qa.started_at)))::float8 AS avg_seconds
+		        FROM quiz_attempts qa
+		        WHERE qa.quiz_id = q.id AND qa.status = 'completed'`
+
 // studentListSelect is the SELECT/FROM prefix of the student quiz list query.
 // Shared with the profiling endpoint so profiled plans match production SQL.
 const studentListSelect = `SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
-		        (SELECT COUNT(*) FROM quiz_attempts qa WHERE qa.quiz_id = q.id AND qa.status = 'completed') AS taker_count,
-		        q.ends_at, q.published_at, q.group_id, q.created_at
+		        st.taker_count, q.ends_at, q.published_at, q.group_id, q.created_at,
+		        st.avg_score_pct, st.avg_seconds
 		 FROM quizzes q
 		 JOIN users u ON u.id = q.created_by
 		 LEFT JOIN institutions i ON i.id = u.institution_id
+		 LEFT JOIN LATERAL (` + attemptStatsSelect + `) st ON TRUE
 		 WHERE `
 
 // studentListWhere builds the WHERE clause and its args for the student quiz
@@ -147,15 +160,17 @@ func (s *Service) GetByID(ctx context.Context, quizID string) (*Quiz, error) {
 	err := s.db.QueryRow(ctx,
 		`SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
-		        (SELECT COUNT(*) FROM quiz_attempts qa WHERE qa.quiz_id = q.id AND qa.status = 'completed') AS taker_count,
-		        q.ends_at, q.published_at, q.rejection_reason, q.group_id, q.domain, q.subdomain, q.created_at
+		        st.taker_count, q.ends_at, q.published_at, q.rejection_reason, q.group_id, q.domain, q.subdomain, q.created_at,
+		        st.avg_score_pct, st.avg_seconds
 		 FROM quizzes q
 		 JOIN users u ON u.id = q.created_by
 		 LEFT JOIN institutions i ON i.id = u.institution_id
+		 LEFT JOIN LATERAL (`+attemptStatsSelect+`) st ON TRUE
 		 WHERE q.id = $1 AND q.deleted_at IS NULL`, quizID,
 	).Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName, &q.Title, &q.Description,
 		&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt,
-		&q.RejectionReason, &q.GroupID, &q.Domain, &q.Subdomain, &q.CreatedAt)
+		&q.RejectionReason, &q.GroupID, &q.Domain, &q.Subdomain, &q.CreatedAt,
+		&q.AvgScorePct, &q.AvgSeconds)
 	if err != nil {
 		return nil, err
 	}
@@ -510,7 +525,8 @@ func (s *Service) ListForTeacher(ctx context.Context, teacherID, statusFilter st
 	rows, err := s.db.Query(ctx,
 		`SELECT q.id, q.institution_id, q.created_by, '' as teacher, '' as institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
-		        0 AS taker_count, q.ends_at, q.published_at, q.group_id, q.created_at
+		        0 AS taker_count, q.ends_at, q.published_at, q.group_id, q.created_at,
+		        NULL::float8, NULL::float8
 		 FROM quizzes q WHERE `+where+fmt.Sprintf(` ORDER BY q.created_at DESC LIMIT $%d OFFSET $%d`, n-1, n),
 		args...)
 	if err != nil {
@@ -680,7 +696,8 @@ func (s *Service) scanQuizRows(rows interface{ Next() bool; Scan(...interface{})
 	for rows.Next() {
 		var q Quiz
 		rows.Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName, &q.Title, &q.Description,
-			&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.CreatedAt)
+			&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.CreatedAt,
+			&q.AvgScorePct, &q.AvgSeconds)
 		quizzes = append(quizzes, q)
 	}
 	if quizzes == nil {

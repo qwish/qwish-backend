@@ -8,12 +8,14 @@ package onboardingsession
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/qwish/backend/internal/domain/quiz"
+	"github.com/qwish/backend/internal/domain/scoring"
 )
 
 var (
@@ -190,4 +192,126 @@ func (s *Service) Recommendations(ctx context.Context, sessionID string) ([]Quiz
 		out = append(out, q)
 	}
 	return out, rows.Err()
+}
+
+var (
+	// ErrQuizNotEligible means the quiz is not something an anonymous user may
+	// play: private, unpublished, deleted, or carrying a question type the
+	// pre-signup player cannot render.
+	ErrQuizNotEligible  = errors.New("quiz not available before signup")
+	ErrAlreadySubmitted = errors.New("calibration already submitted")
+)
+
+// Answer is one submitted answer. ElapsedMs is measured by the client — there
+// is no server-side clock to measure against before an attempt exists — and is
+// clamped when it is replayed into a real attempt at claim time.
+type Answer struct {
+	QuestionID string          `json:"question_id"`
+	Answer     json.RawMessage `json:"answer"`
+	ElapsedMs  int             `json:"elapsed_ms"`
+}
+
+// ReviewItem is one row of the post-quiz review. The score itself is
+// deliberately absent from the response: it is the signup unlock.
+type ReviewItem struct {
+	QuestionID    string          `json:"question_id"`
+	Correct       bool            `json:"correct"`
+	CorrectAnswer json.RawMessage `json:"correct_answer"`
+}
+
+type SubmitResult struct {
+	TotalCorrect   int          `json:"total_correct"`
+	TotalQuestions int          `json:"total_questions"`
+	Review         []ReviewItem `json:"review"`
+}
+
+// assertEligible rejects any quiz an anonymous user must not be handed. Same
+// predicate as Recommendations, applied per quiz so a guessed id gets nothing.
+func (s *Service) assertEligible(ctx context.Context, quizID string) error {
+	var ok bool
+	err := s.db.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM quizzes q
+		    WHERE q.id = $1
+		      AND q.visibility = 'public'
+		      AND q.status = 'published'
+		      AND q.deleted_at IS NULL
+		      AND NOT EXISTS (
+		            SELECT 1 FROM questions qn
+		             WHERE qn.quiz_id = q.id AND qn.type <> 'multiple_choice'))`,
+		quizID).Scan(&ok)
+	if err != nil || !ok {
+		return ErrQuizNotEligible
+	}
+	return nil
+}
+
+// Questions returns the quiz's questions WITHOUT correct answers.
+func (s *Service) Questions(ctx context.Context, sessionID, quizID string) ([]quiz.QuestionForStudent, error) {
+	if _, _, err := s.Prefs(ctx, sessionID); err != nil {
+		return nil, err
+	}
+	if err := s.assertEligible(ctx, quizID); err != nil {
+		return nil, err
+	}
+	return s.quizSvc.GetQuestionsForStudent(ctx, quizID)
+}
+
+// Submit grades the calibration run server-side and stores the raw answers on
+// the session, where claim-time replay will find them. It returns correctness
+// only — no score_pct. Skipped questions count as wrong.
+func (s *Service) Submit(ctx context.Context, sessionID, quizID string, answers []Answer) (*SubmitResult, error) {
+	if _, _, err := s.Prefs(ctx, sessionID); err != nil {
+		return nil, err
+	}
+	if err := s.assertEligible(ctx, quizID); err != nil {
+		return nil, err
+	}
+
+	questions, err := s.quizSvc.GetQuestions(ctx, quizID) // includes correct_answer
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := scoring.LoadConfig(ctx, s.db)
+	if err != nil {
+		return nil, err
+	}
+
+	given := make(map[string]json.RawMessage, len(answers))
+	for _, a := range answers {
+		given[a.QuestionID] = a.Answer
+	}
+
+	result := &SubmitResult{TotalQuestions: len(questions), Review: make([]ReviewItem, 0, len(questions))}
+	for _, q := range questions {
+		ok, _ := scoring.ScoreQuestion(scoring.QuestionResponse{
+			QuestionType:  q.Type,
+			CorrectAnswer: q.CorrectAnswer,
+			StudentAnswer: given[q.ID],
+		}, cfg)
+		if ok {
+			result.TotalCorrect++
+		}
+		result.Review = append(result.Review, ReviewItem{
+			QuestionID: q.ID, Correct: ok, CorrectAnswer: q.CorrectAnswer,
+		})
+	}
+
+	stored, err := json.Marshal(answers)
+	if err != nil {
+		return nil, err
+	}
+	// submitted_at IS NULL in the predicate is what makes this single-use.
+	ct, err := s.db.Exec(ctx,
+		`UPDATE onboarding_sessions
+		    SET quiz_id=$2, responses=$3, submitted_at=now()
+		  WHERE id=$1 AND claimed_by IS NULL AND submitted_at IS NULL AND expires_at > now()`,
+		sessionID, quizID, stored)
+	if err != nil {
+		return nil, err
+	}
+	if ct.RowsAffected() == 0 {
+		return nil, ErrAlreadySubmitted
+	}
+	return result, nil
 }

@@ -127,6 +127,7 @@ services:
       post reset-streaks;
       post rank-change-alerts;
       post recompute-question-difficulty;
+      post purge-onboarding-sessions;
       '
     envVars: *cronEnv
 

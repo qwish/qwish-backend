@@ -214,6 +214,13 @@ func main() {
 					}
 					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
 				})
+				r.Post("/purge-onboarding-sessions", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.PurgeOnboardingSessions(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
 				r.Post("/streak-nudges", func(w http.ResponseWriter, r *http.Request) {
 					if err := sched.SendStreakNudges(r.Context()); err != nil {
 						mw.InternalError(w)

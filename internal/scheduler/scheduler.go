@@ -552,3 +552,16 @@ func clampRange(v, lo, hi float64) float64 {
 	}
 	return v
 }
+
+// PurgeOnboardingSessions deletes unclaimed pre-signup sessions past their
+// expiry. Claimed ones are kept: they are the only record of where a user's
+// first attempt came from.
+func (s *Scheduler) PurgeOnboardingSessions(ctx context.Context) error {
+	ct, err := s.db.Exec(ctx,
+		`DELETE FROM onboarding_sessions WHERE claimed_by IS NULL AND expires_at < now()`)
+	if err != nil {
+		return err
+	}
+	log.Printf("[scheduler] purged %d expired onboarding sessions", ct.RowsAffected())
+	return nil
+}

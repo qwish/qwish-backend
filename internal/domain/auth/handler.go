@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -11,8 +12,19 @@ import (
 	"github.com/qwish/backend/internal/middleware"
 )
 
+// OnboardingClaimer applies a pre-signup calibration session to a new account.
+// An interface so auth does not import the onboarding session package.
+type OnboardingClaimer interface {
+	Claim(ctx context.Context, sessionID, userID string) error
+}
+
+// SetOnboardingClaimer wires the claim path. Optional — unset means signup
+// ignores any session id it is handed.
+func (h *Handler) SetOnboardingClaimer(c OnboardingClaimer) { h.onboardingClaimer = c }
+
 type Handler struct {
-	svc *Service
+	svc               *Service
+	onboardingClaimer OnboardingClaimer
 }
 
 func NewHandler(svc *Service) *Handler {
@@ -158,9 +170,10 @@ func (h *Handler) EmailAvailability(w http.ResponseWriter, r *http.Request) {
 // Body: { full_name, referral_code? }
 func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		FullName     string `json:"full_name"`
-		ReferralCode string `json:"referral_code"`
-		InviteToken  string `json:"invite_token"` // teacher email-invite token
+		FullName          string `json:"full_name"`
+		ReferralCode      string `json:"referral_code"`
+		InviteToken       string `json:"invite_token"`       // teacher email-invite token
+		OnboardingSession string `json:"onboarding_session"` // pre-signup calibration
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
@@ -254,6 +267,15 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 	if instID != nil && role == "student" {
 		if _, err := h.svc.CreateStudentEnrollment(r.Context(), *instID, newUser.ID, req.FullName); err != nil {
 			log.Printf("CreateProfile: enrollment for %s: %v", newUser.ID, err)
+		}
+	}
+
+	// Apply the pre-signup calibration: language, topics, and the quiz played
+	// before the account existed. Best-effort, like the enrollment above — a
+	// stale or expired session must not cost the user their account.
+	if req.OnboardingSession != "" && h.onboardingClaimer != nil {
+		if err := h.onboardingClaimer.Claim(r.Context(), req.OnboardingSession, newUser.ID); err != nil {
+			log.Printf("CreateProfile: onboarding claim for %s: %v", newUser.ID, err)
 		}
 	}
 

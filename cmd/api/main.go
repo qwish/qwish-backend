@@ -26,6 +26,7 @@ import (
 	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/domain/offline"
 	"github.com/qwish/backend/internal/domain/onboarding"
+	"github.com/qwish/backend/internal/domain/onboardingsession"
 	"github.com/qwish/backend/internal/domain/parent"
 	"github.com/qwish/backend/internal/domain/points"
 	"github.com/qwish/backend/internal/domain/push"
@@ -55,6 +56,7 @@ func main() {
 	quizSvc := quiz.NewService(pool)
 	streakSvc := streak.NewService(pool)
 	demoSvc := demo.NewService(pool, quizSvc)
+	obSessionSvc := onboardingsession.NewService(pool, quizSvc)
 	attemptSvc := attempt.NewService(pool, quizSvc, streakSvc)
 	pushSvc := push.NewService(pool, cfg.FCMProjectID, cfg.FCMCredentialsJSON)
 	notifSvc := notification.NewService(pool, cfg.ResendAPIKey, cfg.InstituteURL, cfg.SuperAdminURL)
@@ -62,6 +64,7 @@ func main() {
 		pushSvc.SendToUser(ctx, userID, push.Payload{Title: title, Body: body, Data: data})
 	})
 	attemptSvc.SetNotifier(notifSvc)
+	obSessionSvc.SetAttempts(attemptSvc)
 	r2Client := storage.NewR2Client(cfg)
 	offlineSvc := offline.NewService(pool)
 	studyGroupSvc := studygroup.NewService(pool)
@@ -73,6 +76,8 @@ func main() {
 	userH := user.NewHandler(userSvc)
 	quizH := quiz.NewHandler(quizSvc)
 	demoH := demo.NewHandler(demoSvc)
+	obSessionH := onboardingsession.NewHandler(obSessionSvc)
+	authH.SetOnboardingClaimer(obSessionSvc)
 	attemptH := attempt.NewHandler(attemptSvc)
 	pointsH := points.NewHandler(pool)
 	streakH := streak.NewHandler(streakSvc)
@@ -209,6 +214,13 @@ func main() {
 					}
 					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
 				})
+				r.Post("/purge-onboarding-sessions", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.PurgeOnboardingSessions(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
 				r.Post("/streak-nudges", func(w http.ResponseWriter, r *http.Request) {
 					if err := sched.SendStreakNudges(r.Context()); err != nil {
 						mw.InternalError(w)
@@ -256,6 +268,16 @@ func main() {
 				// Public + unauthenticated registration — rate-limit per IP.
 				r.With(mw.RateLimit(5, 10*time.Minute)).Post("/institution", onboardingH.RegisterInstitution)
 				r.Get("/institution/status", onboardingH.CheckStatus)
+
+				// Pre-signup calibration. Public and unauthenticated: the
+				// session id is the only credential, so rate-limit per IP.
+				r.Route("/session", func(r chi.Router) {
+					r.With(mw.RateLimit(10, 10*time.Minute)).Post("/", obSessionH.Create)
+					r.Patch("/{sessionId}", obSessionH.UpdatePrefs)
+					r.Get("/{sessionId}/recommendations", obSessionH.Recommendations)
+					r.Get("/{sessionId}/quizzes/{quizId}", obSessionH.Questions)
+					r.With(mw.RateLimit(30, 10*time.Minute)).Post("/{sessionId}/submit", obSessionH.Submit)
+				})
 			})
 
 			// ------ Public Avatars (deterministic SVG, no auth) ------

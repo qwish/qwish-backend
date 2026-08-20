@@ -28,9 +28,9 @@ func NewService(db *pgxpool.Pool, quizSvc *quiz.Service, streakSvc *streak.Servi
 func (s *Service) SetNotifier(n *notification.Service) { s.notifSvc = n }
 
 type StartAttemptResp struct {
-	AttemptID string                      `json:"attempt_id"`
-	QuizID    string                      `json:"quiz_id"`
-	Questions []quiz.QuestionForStudent   `json:"questions"`
+	AttemptID string                    `json:"attempt_id"`
+	QuizID    string                    `json:"quiz_id"`
+	Questions []quiz.QuestionForStudent `json:"questions"`
 }
 
 type AnswerReq struct {
@@ -77,18 +77,18 @@ func applyServerGates(isCorrect bool, pts int64, timeTakenMs, timeLimitSeconds, 
 }
 
 type CompleteResp struct {
-	AttemptID          string                   `json:"attempt_id"`
-	ScorePct           float64                  `json:"score_pct"`
-	PerformanceBadge   string                   `json:"performance_badge"`
-	PointsDelta        int64                    `json:"points_delta"`
-	TotalCorrect       int                      `json:"total_correct"`
-	TotalQuestions     int                      `json:"total_questions"`
-	StreakBonusAwarded int64                    `json:"streak_bonus_awarded"`
-	BadgesAwarded      []string                 `json:"badges_awarded"`
-	QuestionBreakdown  []QuestionBreakdownItem  `json:"question_breakdown"`
+	AttemptID          string                  `json:"attempt_id"`
+	ScorePct           float64                 `json:"score_pct"`
+	PerformanceBadge   string                  `json:"performance_badge"`
+	PointsDelta        int64                   `json:"points_delta"`
+	TotalCorrect       int                     `json:"total_correct"`
+	TotalQuestions     int                     `json:"total_questions"`
+	StreakBonusAwarded int64                   `json:"streak_bonus_awarded"`
+	BadgesAwarded      []string                `json:"badges_awarded"`
+	QuestionBreakdown  []QuestionBreakdownItem `json:"question_breakdown"`
 	// IsRepeatAttempt is true when the quiz is knowledge_check and the user
 	// has already completed it before. Points are 0 in this case.
-	IsRepeatAttempt    bool                     `json:"is_repeat_attempt"`
+	IsRepeatAttempt bool `json:"is_repeat_attempt"`
 }
 
 type QuestionBreakdownItem struct {
@@ -149,7 +149,35 @@ func (s *Service) Start(ctx context.Context, userID, quizID string) (*StartAttem
 	return &StartAttemptResp{AttemptID: attemptID, QuizID: quizID, Questions: questions}, nil
 }
 
+// SubmitAnswer records an answer during live play. Elapsed time is measured
+// from the DB clock, so a client cannot understate how long it took.
 func (s *Service) SubmitAnswer(ctx context.Context, userID, attemptID string, req AnswerReq) (*AnswerResp, error) {
+	return s.submitAnswer(ctx, userID, attemptID, req, nil)
+}
+
+// ReplayAnswer records an answer that was given before the account existed —
+// the pre-signup calibration quiz. The elapsed time is client-measured and
+// therefore clamped; everything else, correctness included, is graded here.
+func (s *Service) ReplayAnswer(ctx context.Context, userID, attemptID string, req AnswerReq, elapsedMs int) (*AnswerResp, error) {
+	ms := clampReplayMs(elapsedMs)
+	return s.submitAnswer(ctx, userID, attemptID, req, &ms)
+}
+
+// replayMsCap is ten minutes: past it the value is not a measurement, and the
+// per-question time limit gate in applyServerGates will reject it anyway.
+const replayMsCap = 600000
+
+func clampReplayMs(ms int) int {
+	if ms < 0 {
+		return 0
+	}
+	if ms > replayMsCap {
+		return replayMsCap
+	}
+	return ms
+}
+
+func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, req AnswerReq, elapsedOverride *int) (*AnswerResp, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -172,6 +200,12 @@ func (s *Service) SubmitAnswer(ctx context.Context, userID, attemptID string, re
 	).Scan(&quizID, &cfgSnapshot, &comboLevel, &timeTakenMs)
 	if err != nil {
 		return nil, fmt.Errorf("attempt not found or not in progress")
+	}
+
+	// A replayed answer carries the time the client measured before any attempt
+	// row existed; there is no DB clock to derive it from.
+	if elapsedOverride != nil {
+		timeTakenMs = *elapsedOverride
 	}
 
 	// Load config from snapshot
@@ -630,14 +664,14 @@ func (s *Service) GetResult(ctx context.Context, userID, attemptID string) (map[
 	}
 
 	result = map[string]interface{}{
-		"attempt_id":       attemptID,
-		"quiz_id":          quizID,
-		"status":           status,
-		"score_pct":        scorePct,
-		"points_delta":     pointsDelta,
-		"total_correct":    totalCorrect,
-		"total_questions":  totalQuestions,
-		"completed_at":     completedAt,
+		"attempt_id":      attemptID,
+		"quiz_id":         quizID,
+		"status":          status,
+		"score_pct":       scorePct,
+		"points_delta":    pointsDelta,
+		"total_correct":   totalCorrect,
+		"total_questions": totalQuestions,
+		"completed_at":    completedAt,
 	}
 	return result, nil
 }

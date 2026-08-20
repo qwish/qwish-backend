@@ -58,6 +58,16 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusCreated, map[string]string{"session_id": id})
 }
 
+// GET /api/v1/onboarding/taxonomy
+func (h *Handler) Taxonomy(w http.ResponseWriter, r *http.Request) {
+	taxonomy, err := h.svc.Taxonomy(r.Context())
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, taxonomy)
+}
+
 // PATCH /api/v1/onboarding/session/{sessionId}
 func (h *Handler) UpdatePrefs(w http.ResponseWriter, r *http.Request) {
 	var req prefsReq

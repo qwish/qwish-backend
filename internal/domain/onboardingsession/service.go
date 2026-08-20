@@ -31,14 +31,6 @@ var (
 // today; the other two are stored preferences that take effect when theirs land.
 var supportedLanguages = map[string]bool{"en": true, "hi": true, "mr": true}
 
-// knownTopics mirrors the domains table seeded in migration 020. Kept in code
-// rather than queried per request: the taxonomy is a fixed six rows that only
-// a migration changes.
-var knownTopics = map[string]bool{
-	"aptitude": true, "quantitative": true, "logical": true,
-	"verbal": true, "computer_science": true, "general": true,
-}
-
 type Service struct {
 	db       *pgxpool.Pool
 	quizSvc  *quiz.Service
@@ -59,15 +51,13 @@ func normalizeLanguage(code string) (string, error) {
 	return code, nil
 }
 
-// normalizeTopics deduplicates and sorts, so an empty pick and a full pick are
-// both representable and two identical picks store identically.
+// normalizeTopics deduplicates and sorts. The caller validates the slugs
+// against the shared database taxonomy, so onboarding automatically accepts
+// every subdomain available in the teacher panel.
 func normalizeTopics(topics []string) ([]string, error) {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(topics))
 	for _, t := range topics {
-		if !knownTopics[t] {
-			return nil, ErrBadTopic
-		}
 		if seen[t] {
 			continue
 		}
@@ -76,6 +66,19 @@ func normalizeTopics(topics []string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func (s *Service) validateTopics(ctx context.Context, topics []string) error {
+	if len(topics) == 0 {
+		return nil
+	}
+	var count int
+	if err := s.db.QueryRow(ctx,
+		`SELECT count(*) FROM subdomains WHERE slug = ANY($1::text[])`, topics,
+	).Scan(&count); err != nil || count != len(topics) {
+		return ErrBadTopic
+	}
+	return nil
 }
 
 // Create opens a session. The returned id is the only credential the client
@@ -87,6 +90,9 @@ func (s *Service) Create(ctx context.Context, language string, topics []string) 
 	}
 	tops, err := normalizeTopics(topics)
 	if err != nil {
+		return "", err
+	}
+	if err := s.validateTopics(ctx, tops); err != nil {
 		return "", err
 	}
 	var id string
@@ -105,6 +111,9 @@ func (s *Service) UpdatePrefs(ctx context.Context, sessionID, language string, t
 	}
 	tops, err := normalizeTopics(topics)
 	if err != nil {
+		return err
+	}
+	if err := s.validateTopics(ctx, tops); err != nil {
 		return err
 	}
 	ct, err := s.db.Exec(ctx,
@@ -155,7 +164,7 @@ const recommendLimit = 12
 //     list uses for out-of-institution content, so nothing private leaks.
 //   - every question is multiple_choice: the pre-signup player renders that
 //     type only. A quiz with one puzzle question would strand the user.
-//   - domain in the picked topics, when any were picked.
+//   - subdomain in the picked topics, when any were picked.
 //
 // ponytail: MCQ-only is a player limitation, not a product one. Lift the
 // NOT EXISTS clause once the question-type renderers are extracted out of
@@ -173,7 +182,9 @@ func (s *Service) Recommendations(ctx context.Context, sessionID string) ([]Quiz
 		    AND q.status = 'published'
 		    AND q.deleted_at IS NULL
 		    AND q.question_count > 0
-		    AND (cardinality($1::text[]) = 0 OR q.domain = ANY($1::text[]))
+		    AND (cardinality($1::text[]) = 0
+		         OR q.subdomain = ANY($1::text[])
+		         OR q.domain = ANY($1::text[]))
 		    AND NOT EXISTS (
 		          SELECT 1 FROM questions qn
 		           WHERE qn.quiz_id = q.id AND qn.type <> 'multiple_choice')
@@ -193,6 +204,12 @@ func (s *Service) Recommendations(ctx context.Context, sessionID string) ([]Quiz
 		out = append(out, q)
 	}
 	return out, rows.Err()
+}
+
+// Taxonomy returns the same domain → subdomain tree used by teacher authoring.
+// It is public because its content is only reference metadata.
+func (s *Service) Taxonomy(ctx context.Context) ([]quiz.DomainOption, error) {
+	return s.quizSvc.GetTaxonomy(ctx)
 }
 
 var (

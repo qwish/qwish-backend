@@ -74,12 +74,12 @@ func TestRecommendationsExcludeNonMCQAndRespectTopics(t *testing.T) {
 		t.Skipf("system author missing: %v", err)
 	}
 
-	mk := func(title, domain, qType string) string {
+	mk := func(title, domain, subdomain, qType string) string {
 		var qid string
 		if err := pool.QueryRow(ctx,
-			`INSERT INTO quizzes (created_by, title, type, visibility, status, question_count, domain, published_at)
-			 VALUES ($1,$2,'knowledge_check','public','published',1,$3, now()) RETURNING id`,
-			author, title, domain).Scan(&qid); err != nil {
+			`INSERT INTO quizzes (created_by, title, type, visibility, status, question_count, domain, subdomain, published_at)
+			 VALUES ($1,$2,'knowledge_check','public','published',1,$3,$4, now()) RETURNING id`,
+			author, title, domain, subdomain).Scan(&qid); err != nil {
 			t.Fatalf("insert quiz: %v", err)
 		}
 		if _, err := pool.Exec(ctx,
@@ -94,11 +94,11 @@ func TestRecommendationsExcludeNonMCQAndRespectTopics(t *testing.T) {
 		return qid
 	}
 
-	wanted := mk("calib-mcq-verbal", "verbal", "multiple_choice")
-	puzzle := mk("calib-puzzle-verbal", "verbal", "puzzle")
-	offTopic := mk("calib-mcq-logical", "logical", "multiple_choice")
+	wanted := mk("calib-mcq-verbal", "verbal", "verbal_grammar", "multiple_choice")
+	puzzle := mk("calib-puzzle-verbal", "verbal", "verbal_grammar", "puzzle")
+	offTopic := mk("calib-mcq-logical", "logical", "logical_series", "multiple_choice")
 
-	id, err := svc.Create(ctx, "en", []string{"verbal"})
+	id, err := svc.Create(ctx, "en", []string{"verbal_grammar"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

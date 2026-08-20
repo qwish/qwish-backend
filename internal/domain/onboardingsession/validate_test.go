@@ -37,7 +37,6 @@ func TestNormalizeTopics(t *testing.T) {
 		t.Fatalf("normalizeTopics(nil) = %v, %v; want empty, nil", empty, err)
 	}
 
-	if _, err := normalizeTopics([]string{"astrology"}); err == nil {
-		t.Fatal("normalizeTopics([astrology]) returned nil error; want ErrBadTopic")
-	}
+	// Validity is checked against the database's subdomains table by Service,
+	// keeping this pure helper independent of a duplicated taxonomy.
 }

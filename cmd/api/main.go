@@ -268,6 +268,7 @@ func main() {
 				// Public + unauthenticated registration — rate-limit per IP.
 				r.With(mw.RateLimit(5, 10*time.Minute)).Post("/institution", onboardingH.RegisterInstitution)
 				r.Get("/institution/status", onboardingH.CheckStatus)
+				r.Get("/taxonomy", obSessionH.Taxonomy)
 
 				// Pre-signup calibration. Public and unauthenticated: the
 				// session id is the only credential, so rate-limit per IP.

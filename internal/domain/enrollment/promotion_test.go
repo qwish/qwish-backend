@@ -25,10 +25,13 @@ func seedPromoFixture(t *testing.T, pool *pgxpool.Pool) promoFixture {
 	ctx := context.Background()
 	var f promoFixture
 
+	// contact_email is NOT NULL, and type is constrained to the lowercase
+	// enum — both since migration 001. Mirrors the insert in fixtures_test.go.
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO institutions (name, type, timezone, student_referral_code, teacher_referral_code, status)
-		 VALUES ('Promo Test','School','Asia/Kolkata',$1,$2,'verified') RETURNING id`,
+		`INSERT INTO institutions (name, type, contact_email, timezone, student_referral_code, teacher_referral_code, status)
+		 VALUES ('Promo Test','school',$3,'Asia/Kolkata',$1,$2,'verified') RETURNING id`,
 		"S"+uuid.NewString()[:9], "T"+uuid.NewString()[:9],
+		"promo+"+uuid.NewString()[:8]+"@example.test",
 	).Scan(&f.InstitutionID); err != nil {
 		t.Fatalf("seed institution: %v", err)
 	}

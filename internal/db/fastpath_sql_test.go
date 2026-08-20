@@ -2,9 +2,11 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -281,20 +283,23 @@ func TestFastPathStatementsPrepareOnServer(t *testing.T) {
 	}
 	defer pool.Close()
 
+	// PREPARE is session-scoped, not transaction-scoped: rolling back does NOT
+	// drop the statement. Against a pooled connection the next subtest can be
+	// handed the same session, so a fixed name fails with 42P05 rather than
+	// reporting anything about the SQL. Unique name per statement, and
+	// DEALLOCATE so nothing outlives the test.
+	run := time.Now().UnixNano()
+	i := 0
 	for name, sql := range fastPathStatements {
+		i++
+		stmt := fmt.Sprintf("check_stmt_%d_%d", run, i)
 		t.Run(name, func(t *testing.T) {
-			// A rolled-back transaction so PREPARE leaves nothing behind and the
-			// statement name cannot collide across subtests.
-			tx, err := pool.Begin(ctx)
-			if err != nil {
-				t.Fatalf("begin: %v", err)
-			}
-			defer tx.Rollback(ctx)
-
-			if _, err := tx.Exec(ctx, "PREPARE check_stmt AS "+sql); err != nil {
+			if _, err := pool.Exec(ctx, "PREPARE "+stmt+" AS "+sql); err != nil {
 				t.Fatalf("statement does not parse/plan against the live schema:\n%v\n\n%s",
 					err, strings.TrimSpace(sql))
 			}
+			// Best effort: a dropped session takes its statements with it.
+			pool.Exec(ctx, "DEALLOCATE "+stmt)
 		})
 	}
 }

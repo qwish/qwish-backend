@@ -40,6 +40,52 @@ func TestSeriesFillsEmptyBuckets(t *testing.T) {
 	}
 }
 
+// A window that ends mid-bucket must still include the bucket it ends in, and
+// no bucket past it. The series' upper bound is derived from w.To + 1 day (the
+// exclusive bound the data filter uses), so getting this wrong either drops the
+// final partial period or invents one beyond the window.
+func TestSeriesEndsOnTheBucketContainingTo(t *testing.T) {
+	pool := openTestDB(t)
+	svc := NewMetricsService(pool)
+
+	sel, _, err := SelectMetrics([]string{"signups"}, ScopeNone)
+	if err != nil {
+		t.Fatalf("SelectMetrics: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		from time.Time
+		to   time.Time
+		gran Granularity
+		want int
+	}{
+		// Jan 1 - Mar 10, monthly: January, February, and the partial March.
+		{"month ending mid-month", date(2001, 1, 1), date(2001, 3, 10), GranMonth, 3},
+		// Jan 1 - Mar 31, monthly: three whole months, nothing past March.
+		{"month ending on the boundary", date(2001, 1, 1), date(2001, 3, 31), GranMonth, 3},
+		// A single day is one bucket, not two.
+		{"one day", date(2001, 1, 1), date(2001, 1, 1), GranDay, 1},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			series, err := svc.Series(context.Background(), sel,
+				Window{From: c.from, To: c.to, Gran: c.gran}, Scope{})
+			if err != nil {
+				t.Fatalf("Series: %v", err)
+			}
+			if len(series) != c.want {
+				t.Fatalf("len(series) = %d, want %d", len(series), c.want)
+			}
+		})
+	}
+}
+
+func date(y int, m time.Month, d int) time.Time {
+	return time.Date(y, m, d, 0, 0, 0, 0, IST)
+}
+
 // Every metric's SQL must actually execute. This is the test that catches a
 // typo'd column or a bad aggregate in the catalog — it runs the whole registry,
 // one subtest per metric, so a failure names the offending entry.

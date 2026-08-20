@@ -88,10 +88,16 @@ func BuildSeriesQuery(sel []MetricDef, w Window, sc Scope) (string, []any) {
 	groups, keys := sourceGroups(sel)
 
 	var b strings.Builder
+	// $2 is w.To + 1 day: an EXCLUSIVE bound, because the per-source predicates
+	// below filter with `< $2`. generate_series' endpoint is inclusive, so the
+	// day is subtracted back off here before truncating — otherwise every series
+	// carries one extra bucket past the end of the window. Subtracting before
+	// the truncation keeps it right at week, month and quarter granularity too,
+	// where the window need not end on a bucket boundary.
 	b.WriteString("WITH buckets AS (\n")
 	b.WriteString("  SELECT generate_series(\n")
 	b.WriteString("    date_trunc($3, $1::timestamptz AT TIME ZONE 'Asia/Kolkata'),\n")
-	b.WriteString("    date_trunc($3, $2::timestamptz AT TIME ZONE 'Asia/Kolkata'),\n")
+	b.WriteString("    date_trunc($3, ($2::timestamptz AT TIME ZONE 'Asia/Kolkata') - '1 day'::interval),\n")
 	b.WriteString(fmt.Sprintf("    '%s'::interval\n", w.Gran.PGInterval()))
 	b.WriteString("  ) AS bucket\n)\n")
 

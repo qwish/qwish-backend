@@ -8,9 +8,35 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/middleware"
 )
+
+// logAuditTx writes an audit entry on the caller's transaction, so the entry
+// lands only if the action it describes commits.
+//
+// The pool-based logAudit above cannot do that: an audit row written outside
+// the transaction survives a rollback and claims something happened that did
+// not. Column set matches the audit_log table as migration 001 created it —
+// admin_id is NOT NULL, and admin_name/admin_role record who the actor was at
+// the time, since admin_accounts rows can be renamed or deleted later.
+func logAuditTx(ctx context.Context, tx pgx.Tx, adminID, action, targetType, targetID, reason string) error {
+	// No admin_accounts row means no id to attribute the entry to (e.g. a
+	// super_admin acting from the users table). Skip rather than fail the
+	// action the entry describes.
+	if adminID == "" {
+		return nil
+	}
+	var adminName, adminRole string
+	tx.QueryRow(ctx, `SELECT name, role FROM admin_accounts WHERE id=$1`, adminID).
+		Scan(&adminName, &adminRole)
+	_, err := tx.Exec(ctx,
+		`INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, reason)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		adminID, adminName, adminRole, action, targetType, targetID, reason)
+	return err
+}
 
 // MergeStudents folds mergeID into keepID: one human, two records, usually a
 // self-signup plus a roster row that was later claimed under a second account.
@@ -61,10 +87,8 @@ func MergeStudents(ctx context.Context, db *pgxpool.Pool, keepID, mergeID, actor
 		return err
 	}
 
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO audit_log (actor_id, action, entity_type, entity_id, detail)
-		 VALUES ($1, 'merge_students', 'user', $2, 'merged '||$3)`,
-		actorID, keepID, mergeID); err != nil {
+	if err := logAuditTx(ctx, tx, actorID, "merge_students", "user", keepID,
+		"merged "+mergeID); err != nil {
 		return err
 	}
 
@@ -170,10 +194,9 @@ func (h *StudentAdminHandler) Purge(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if _, err := tx.Exec(r.Context(),
-		`INSERT INTO audit_log (actor_id, action, entity_type, entity_id, detail)
-		 VALUES ($1, 'purge_student', 'user', $2, 'permanent erasure')`,
-		middleware.GetAdminID(r), userID); err != nil {
+	if err := logAuditTx(r.Context(), tx, middleware.GetAdminID(r), "purge_student",
+		"user", userID, "permanent erasure"); err != nil {
+		log.Printf("Purge audit: %v", err)
 		middleware.InternalError(w)
 		return
 	}

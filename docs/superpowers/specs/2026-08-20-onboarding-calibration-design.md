@@ -71,7 +71,8 @@ All public, no auth. Rate limited to 30 requests per 10 minutes, matching
 Recommendations reuse the public-quiz predicate already in
 `internal/domain/quiz/service.go:113`
 (`visibility = 'public' AND status = 'published' AND deleted_at IS NULL`) plus
-`domain = ANY($topics)`. Empty topics means no domain filter.
+`domain = ANY($topics)` and a `NOT EXISTS` clause excluding quizzes with any
+non-`multiple_choice` question. Empty topics means no domain filter.
 
 The questions endpoint strips correct answers, mirroring the response shape of
 `/demo/quizzes/{quizId}` so the Flutter model is shared.
@@ -120,18 +121,27 @@ role.
 ## Claim at signup
 
 `POST /api/v1/auth/create-profile` accepts an optional `onboarding_session`
-field. Inside the transaction that already creates the user
-(`internal/domain/auth/handler.go:159`):
+field. `CreateProfile` (`internal/domain/auth/handler.go:159`) runs no
+transaction of its own — its follow-up steps (teacher invites, student
+enrollment) are best-effort and log on failure. The claim follows that
+pattern: it runs after `CreateUser` returns, and a failure is logged rather
+than surfaced.
 
-1. Load the session `FOR UPDATE`. Missing, expired, or already claimed means
-   skip to step 4 — never an error surfaced to the user, who has just created
-   an account and must land on `/home` regardless.
+The claim itself opens its own transaction:
+
+1. Load the session `FOR UPDATE`. Missing, expired, or already claimed ends
+   the claim — never an error surfaced to the user, who has just created an
+   account and must land on `/home` regardless.
 2. Copy `language` -> `users.preferred_language`, `topics` ->
    `users.interest_domains`.
-3. If `responses` is present, replay them through the normal attempt path
+3. Mark the session `claimed_by` / `claimed_at`, and commit. Preferences and
+   the claim marker move together, so a session is never half-applied.
+4. If `responses` is present, replay them through the normal attempt path
    (start -> record responses -> finish) so `score_pct`, points, streak, and
    the ledger row are all produced by `internal/domain/attempt` unchanged.
-4. Mark the session `claimed_by` / `claimed_at`.
+   This runs outside the transaction above: the attempt engine manages its own
+   per-answer transactions, and a failure there must not cost the user their
+   preferences.
 
 Replaying through the existing engine rather than writing a `quiz_attempts`
 row directly is the point of this design: the scoring formula, the point
@@ -142,9 +152,19 @@ economy, and the streak rules stay in one place.
 - The calibration quiz counts as the user's first real attempt at that quiz.
   A later replay of the same quiz earns no points, via the existing
   `isRepeatAttempt` rule in `attempt/service.go`.
-- Anti-cheat fields on the replayed attempt row are empty. The attempt did not
-  happen under an authenticated session and there is nothing truthful to put
-  there.
+- Elapsed time per question is measured by the calibration client and replayed
+  with the answers. `SubmitAnswer` derives elapsed time from the DB clock,
+  which during a replay would read as near-zero and score every answer at the
+  sub-second guess penalty (`qSpeed = 0.1`). `attempt.Service` therefore grows
+  a `ReplayAnswer` variant taking an explicit, clamped elapsed time; live play
+  is untouched. The value is client-reported and so capped at ten minutes;
+  the per-question time limit gate still applies.
+- Clue reveals and combo history on the replayed attempt are empty. Neither
+  existed during a pre-signup run, and there is nothing truthful to put there.
+- The pre-signup player renders `multiple_choice` questions only, so
+  recommendations exclude any quiz carrying another question type. Lifting this
+  means extracting the question-type renderers out of numpie's 2100-line
+  `quiz_attempt_screen.dart` and reusing them, which is separate work.
 
 ## Cleanup
 

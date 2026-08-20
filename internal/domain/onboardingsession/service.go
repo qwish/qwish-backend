@@ -131,3 +131,63 @@ func (s *Service) Prefs(ctx context.Context, sessionID string) (string, []string
 	}
 	return lang, topics, nil
 }
+
+// QuizSummary is the card shape for the pre-signup recommendation list.
+type QuizSummary struct {
+	ID            string  `json:"id"`
+	Title         string  `json:"title"`
+	Description   *string `json:"description,omitempty"`
+	Domain        *string `json:"domain,omitempty"`
+	QuestionCount int     `json:"question_count"`
+}
+
+// recommendLimit caps the list. A first-run user choosing from more than this
+// is being asked to browse, not to start.
+const recommendLimit = 12
+
+// Recommendations lists quizzes an anonymous user may play right now.
+//
+// Three filters, each load-bearing:
+//   - public + published + not deleted: the same predicate the logged-in quiz
+//     list uses for out-of-institution content, so nothing private leaks.
+//   - every question is multiple_choice: the pre-signup player renders that
+//     type only. A quiz with one puzzle question would strand the user.
+//   - domain in the picked topics, when any were picked.
+//
+// ponytail: MCQ-only is a player limitation, not a product one. Lift the
+// NOT EXISTS clause once the question-type renderers are extracted out of
+// numpie's quiz_attempt_screen.dart and reused here.
+func (s *Service) Recommendations(ctx context.Context, sessionID string) ([]QuizSummary, error) {
+	_, topics, err := s.Prefs(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.Query(ctx,
+		`SELECT q.id, q.title, q.description, q.domain, q.question_count
+		   FROM quizzes q
+		  WHERE q.visibility = 'public'
+		    AND q.status = 'published'
+		    AND q.deleted_at IS NULL
+		    AND q.question_count > 0
+		    AND (cardinality($1::text[]) = 0 OR q.domain = ANY($1::text[]))
+		    AND NOT EXISTS (
+		          SELECT 1 FROM questions qn
+		           WHERE qn.quiz_id = q.id AND qn.type <> 'multiple_choice')
+		  ORDER BY q.published_at DESC NULLS LAST
+		  LIMIT $2`, topics, recommendLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []QuizSummary{}
+	for rows.Next() {
+		var q QuizSummary
+		if err := rows.Scan(&q.ID, &q.Title, &q.Description, &q.Domain, &q.QuestionCount); err != nil {
+			return nil, err
+		}
+		out = append(out, q)
+	}
+	return out, rows.Err()
+}

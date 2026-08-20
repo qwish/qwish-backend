@@ -40,8 +40,9 @@ var knownTopics = map[string]bool{
 }
 
 type Service struct {
-	db      *pgxpool.Pool
-	quizSvc *quiz.Service
+	db       *pgxpool.Pool
+	quizSvc  *quiz.Service
+	attempts Attempts
 }
 
 func NewService(db *pgxpool.Pool, quizSvc *quiz.Service) *Service {

@@ -182,6 +182,29 @@ func (h *Handler) TeacherCreate(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusCreated, quiz)
 }
 
+// AdminCreate creates a platform-owned, immediately published quiz. Route
+// registration limits this to super_admin; the service fixes the author to the
+// Qwish system account and validates all delivery controls server-side.
+func (h *Handler) AdminCreate(w http.ResponseWriter, r *http.Request) {
+	var req AdminCreateQuizReq
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid quiz payload")
+		return
+	}
+	quiz, err := h.svc.CreateForAdmin(r.Context(), req, middleware.GetAdminID(r))
+	if err != nil {
+		if err == ErrInvalidTaxonomy {
+			middleware.BadRequest(w, "invalid domain or subdomain")
+			return
+		}
+		middleware.BadRequest(w, err.Error())
+		return
+	}
+	middleware.JSON(w, http.StatusCreated, quiz)
+}
+
 // GET /api/v1/teacher/quizzes/taxonomy
 func (h *Handler) GetTaxonomy(w http.ResponseWriter, r *http.Request) {
 	tax, err := h.svc.GetTaxonomy(r.Context())

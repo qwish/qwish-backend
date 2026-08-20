@@ -101,14 +101,23 @@ type QuestionBreakdownItem struct {
 }
 
 func (s *Service) Start(ctx context.Context, userID, quizID string) (*StartAttemptResp, error) {
-	// Validate quiz exists and is published
-	q, err := s.quizSvc.GetByID(ctx, quizID)
-	if err != nil || q.Status != "published" {
+	// Load delivery settings at the trust boundary. Date gates, randomisation
+	// and question limits are all server-owned; a caller can never opt out by
+	// modifying an app request.
+	var qType string
+	var questionLimit *int
+	var shuffle bool
+	var startsAt, endsAt *time.Time
+	err := s.db.QueryRow(ctx,
+		`SELECT type, question_limit, shuffle_questions, starts_at, ends_at
+		 FROM quizzes WHERE id=$1 AND status='published' AND deleted_at IS NULL`, quizID,
+	).Scan(&qType, &questionLimit, &shuffle, &startsAt, &endsAt)
+	if err != nil || (startsAt != nil && time.Now().Before(*startsAt)) || (endsAt != nil && !time.Now().Before(*endsAt)) {
 		return nil, fmt.Errorf("quiz not available")
 	}
 
 	// P&W: one attempt only
-	if q.Type == "play_and_win" {
+	if qType == "play_and_win" {
 		var existing int
 		s.db.QueryRow(ctx,
 			`SELECT COUNT(*) FROM quiz_attempts WHERE quiz_id=$1 AND user_id=$2 AND status='completed'`,
@@ -117,6 +126,51 @@ func (s *Service) Start(ctx context.Context, userID, quizID string) (*StartAttem
 		if existing > 0 {
 			return nil, fmt.Errorf("you have already attempted this quiz")
 		}
+	}
+
+	// Select the delivered set before creating the attempt, then snapshot it in
+	// the same transaction. That set is subsequently enforced for answers and
+	// clues, so random selection cannot be bypassed by guessing another ID.
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	limit := 0
+	if questionLimit != nil {
+		limit = *questionLimit
+	}
+	order := "position"
+	// A delivery limit always samples a random subset. The shuffle toggle also
+	// randomises the full bank when no limit is set.
+	if shuffle || questionLimit != nil {
+		order = "random()"
+	}
+	query := `SELECT id, quiz_id, position, type, prompt, media_url, options, time_limit_seconds,
+		        jsonb_array_length(COALESCE(clues, '[]'::jsonb))
+		 FROM questions WHERE quiz_id=$1 ORDER BY ` + order
+	args := []interface{}{quizID}
+	if limit > 0 {
+		query += " LIMIT $2"
+		args = append(args, limit)
+	}
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	questions := []quiz.QuestionForStudent{}
+	for rows.Next() {
+		var question quiz.QuestionForStudent
+		if err := rows.Scan(&question.ID, &question.QuizID, &question.Position, &question.Type, &question.Prompt, &question.MediaURL,
+			&question.Options, &question.TimeLimitSeconds, &question.ClueCount); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		questions = append(questions, question)
+	}
+	rows.Close()
+	if len(questions) == 0 {
+		return nil, fmt.Errorf("quiz has no questions")
 	}
 
 	// Load and snapshot point economy config
@@ -128,23 +182,29 @@ func (s *Service) Start(ctx context.Context, userID, quizID string) (*StartAttem
 
 	// Create attempt
 	var attemptID string
-	err = s.db.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO quiz_attempts (quiz_id, user_id, status, total_questions, point_config_snapshot, last_answer_at)
 		 VALUES ($1,$2,'in_progress',$3,$4, now())
 		 RETURNING id`,
-		quizID, userID, q.QuestionCount, cfgJSON,
+		quizID, userID, len(questions), cfgJSON,
 	).Scan(&attemptID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Update last_active_at
-	s.db.Exec(ctx, `UPDATE users SET last_active_at=now() WHERE id=$1`, userID)
-
-	questions, err := s.quizSvc.GetQuestionsForStudent(ctx, quizID)
-	if err != nil {
+	for i, question := range questions {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO quiz_attempt_questions (attempt_id, question_id, position) VALUES ($1,$2,$3)`,
+			attemptID, question.ID, i+1); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+
+	// Update last_active_at after the attempt transaction has committed.
+	s.db.Exec(ctx, `UPDATE users SET last_active_at=now() WHERE id=$1`, userID)
 
 	return &StartAttemptResp{AttemptID: attemptID, QuizID: quizID, Questions: questions}, nil
 }
@@ -218,8 +278,12 @@ func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, re
 	var correctAnswer json.RawMessage
 	var timeLimitSeconds int
 	err = tx.QueryRow(ctx,
-		`SELECT type, correct_answer, time_limit_seconds FROM questions WHERE id=$1 AND quiz_id=$2`,
-		req.QuestionID, quizID,
+		`SELECT q.type, q.correct_answer, q.time_limit_seconds
+		 FROM questions q
+		 WHERE q.id=$1 AND q.quiz_id=$2
+		   AND (NOT EXISTS (SELECT 1 FROM quiz_attempt_questions WHERE attempt_id=$3)
+		        OR EXISTS (SELECT 1 FROM quiz_attempt_questions WHERE attempt_id=$3 AND question_id=q.id))`,
+		req.QuestionID, quizID, attemptID,
 	).Scan(&qType, &correctAnswer, &timeLimitSeconds)
 	if err != nil {
 		return nil, fmt.Errorf("question not found")
@@ -308,8 +372,11 @@ func (s *Service) RevealClue(ctx context.Context, userID, attemptID, questionID 
 
 	var rawClues json.RawMessage
 	err = tx.QueryRow(ctx,
-		`SELECT clues FROM questions WHERE id=$1 AND quiz_id=$2`,
-		questionID, quizID,
+		`SELECT q.clues FROM questions q
+		 WHERE q.id=$1 AND q.quiz_id=$2
+		   AND (NOT EXISTS (SELECT 1 FROM quiz_attempt_questions WHERE attempt_id=$3)
+		        OR EXISTS (SELECT 1 FROM quiz_attempt_questions WHERE attempt_id=$3 AND question_id=q.id))`,
+		questionID, quizID, attemptID,
 	).Scan(&rawClues)
 	if err != nil {
 		return nil, fmt.Errorf("question not found")

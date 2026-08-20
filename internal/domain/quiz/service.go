@@ -57,14 +57,14 @@ type Question struct {
 }
 
 type CreateQuizReq struct {
-	Title       string  `json:"title"`
-	Description *string `json:"description"`
-	Type        string  `json:"type"`
-	Visibility  string  `json:"visibility"`
-	GroupID     *string `json:"group_id"`
+	Title       string     `json:"title"`
+	Description *string    `json:"description"`
+	Type        string     `json:"type"`
+	Visibility  string     `json:"visibility"`
+	GroupID     *string    `json:"group_id"`
 	EndsAt      *time.Time `json:"ends_at"`
-	Domain      *string `json:"domain"`
-	Subdomain   *string `json:"subdomain"`
+	Domain      *string    `json:"domain"`
+	Subdomain   *string    `json:"subdomain"`
 }
 
 type AddQuestionReq struct {
@@ -76,6 +76,27 @@ type AddQuestionReq struct {
 	CorrectAnswer    json.RawMessage `json:"correct_answer"`
 	TimeLimitSeconds int             `json:"time_limit_seconds"`
 	Clues            json.RawMessage `json:"clues,omitempty"`
+}
+
+// SystemUserID is the fixed user seeded for platform-authored content. It
+// keeps quizzes.created_by valid while presenting "Qwish" as the author,
+// rather than attributing a platform quiz to the individual administrator.
+const SystemUserID = "00000000-0000-0000-0000-000000000001"
+
+// AdminCreateQuizReq is intentionally separate from the teacher request:
+// platform quizzes are public, published content with an optional delivery
+// window and optional random subset of their authoring question bank.
+type AdminCreateQuizReq struct {
+	Title            string           `json:"title"`
+	Description      *string          `json:"description"`
+	Type             string           `json:"type"`
+	QuestionLimit    *int             `json:"question_limit"`
+	ShuffleQuestions bool             `json:"shuffle_questions"`
+	StartsAt         *time.Time       `json:"starts_at"`
+	EndsAt           *time.Time       `json:"ends_at"`
+	Domain           *string          `json:"domain"`
+	Subdomain        *string          `json:"subdomain"`
+	Questions        []AddQuestionReq `json:"questions"`
 }
 
 // attemptStatsSelect aggregates a quiz's completed attempts: how many distinct
@@ -107,10 +128,10 @@ func studentListWhere(institutionID, quizType, saved, search, userID string) (st
 	var baseWhere string
 	var args []interface{}
 	if institutionID != "" {
-		baseWhere = `(q.institution_id = $1 OR q.visibility = 'public') AND q.status = 'published' AND q.deleted_at IS NULL`
+		baseWhere = `(q.institution_id = $1 OR q.visibility = 'public') AND q.status = 'published' AND q.deleted_at IS NULL AND (q.starts_at IS NULL OR q.starts_at <= now()) AND (q.ends_at IS NULL OR q.ends_at > now())`
 		args = []interface{}{institutionID}
 	} else {
-		baseWhere = `q.visibility = 'public' AND q.status = 'published' AND q.deleted_at IS NULL`
+		baseWhere = `q.visibility = 'public' AND q.status = 'published' AND q.deleted_at IS NULL AND (q.starts_at IS NULL OR q.starts_at <= now()) AND (q.ends_at IS NULL OR q.ends_at > now())`
 		args = []interface{}{}
 	}
 	argN := len(args) + 1
@@ -230,6 +251,96 @@ func (s *Service) Create(ctx context.Context, req CreateQuizReq, userID, institu
 	).Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.Title, &q.Description, &q.Type,
 		&q.Visibility, &q.Status, &q.QuestionCount, &q.EndsAt, &q.GroupID, &q.Domain, &q.Subdomain, &q.CreatedAt)
 	return q, err
+}
+
+// CreateForAdmin creates and publishes a Qwish-authored quiz in a single
+// transaction. The author and visibility are server-owned so a request cannot
+// impersonate a person or create unexpected private platform content.
+func (s *Service) CreateForAdmin(ctx context.Context, req AdminCreateQuizReq, adminID string) (*Quiz, error) {
+	if len(req.Title) == 0 || len(req.Title) > 160 {
+		return nil, fmt.Errorf("title must be between 1 and 160 characters")
+	}
+	if len(req.Questions) == 0 || len(req.Questions) > 200 {
+		return nil, fmt.Errorf("a quiz must contain between 1 and 200 questions")
+	}
+	if req.Type == "" {
+		req.Type = "knowledge_check"
+	}
+	if req.Type != "knowledge_check" && req.Type != "play_and_win" {
+		return nil, fmt.Errorf("invalid quiz type")
+	}
+	if req.StartsAt != nil && req.EndsAt != nil && !req.EndsAt.After(*req.StartsAt) {
+		return nil, fmt.Errorf("end date must be after start date")
+	}
+	if req.QuestionLimit != nil && (*req.QuestionLimit < 1 || *req.QuestionLimit > len(req.Questions)) {
+		return nil, fmt.Errorf("question limit must be between 1 and the number of questions")
+	}
+	if err := s.validateTaxonomy(ctx, req.Domain, req.Subdomain); err != nil {
+		return nil, err
+	}
+	for i, question := range req.Questions {
+		if len(question.Prompt) == 0 || len(question.Prompt) > 4000 {
+			return nil, fmt.Errorf("question %d needs a prompt", i+1)
+		}
+		if question.Type == "" || len(question.CorrectAnswer) == 0 {
+			return nil, fmt.Errorf("question %d needs a type and correct answer", i+1)
+		}
+		if question.TimeLimitSeconds < 0 || question.TimeLimitSeconds > 600 {
+			return nil, fmt.Errorf("question %d has an invalid time limit", i+1)
+		}
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	q := &Quiz{}
+	err = tx.QueryRow(ctx,
+		`INSERT INTO quizzes (created_by, title, description, type, visibility, status, question_count, starts_at, ends_at, question_limit, shuffle_questions, published_at, domain, subdomain)
+		 VALUES ($1, $2, $3, $4, 'public', 'published', $5, $6, $7, $8, $9, now(), $10, $11)
+		 RETURNING id, created_by, title, description, type, visibility, status, question_count, ends_at, published_at, domain, subdomain, created_at`,
+		SystemUserID, req.Title, req.Description, req.Type, len(req.Questions), req.StartsAt, req.EndsAt, req.QuestionLimit, req.ShuffleQuestions, req.Domain, req.Subdomain,
+	).Scan(&q.ID, &q.CreatedBy, &q.Title, &q.Description, &q.Type, &q.Visibility, &q.Status,
+		&q.QuestionCount, &q.EndsAt, &q.PublishedAt, &q.Domain, &q.Subdomain, &q.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, question := range req.Questions {
+		timeLimit := question.TimeLimitSeconds
+		if timeLimit == 0 {
+			timeLimit = 15
+		}
+		options := question.Options
+		if len(options) == 0 {
+			options = json.RawMessage("[]")
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO questions (quiz_id, position, type, prompt, media_url, options, correct_answer, time_limit_seconds, clues)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			q.ID, i+1, question.Type, question.Prompt, question.MediaURL, options, question.CorrectAnswer, timeLimit, question.Clues); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	// Creation is privileged; retain an audit trail when the authenticated
+	// principal is an admin_accounts identity. A user-table super-admin has no
+	// compatible audit FK, so it is deliberately not coerced into one.
+	if adminID != "" {
+		var name, role string
+		if err := s.db.QueryRow(ctx, `SELECT name, role FROM admin_accounts WHERE id=$1`, adminID).Scan(&name, &role); err == nil {
+			s.db.Exec(ctx,
+				`INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, new_value)
+				 VALUES ($1,$2,$3,'create_qwish_quiz','quiz',$4,jsonb_build_object('title',$5,'question_count',$6))`,
+				adminID, name, role, q.ID, q.Title, len(req.Questions))
+		}
+	}
+	q.TeacherName = "Qwish"
+	return q, nil
 }
 
 func (s *Service) Update(ctx context.Context, quizID, ownerID string, req CreateQuizReq) error {
@@ -691,7 +802,11 @@ func (s *Service) getResults(ctx context.Context, quizID string) (map[string]int
 	}, nil
 }
 
-func (s *Service) scanQuizRows(rows interface{ Next() bool; Scan(...interface{}) error; Close() }) []Quiz {
+func (s *Service) scanQuizRows(rows interface {
+	Next() bool
+	Scan(...interface{}) error
+	Close()
+}) []Quiz {
 	var quizzes []Quiz
 	for rows.Next() {
 		var q Quiz

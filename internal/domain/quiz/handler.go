@@ -205,6 +205,35 @@ func (h *Handler) AdminCreate(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusCreated, quiz)
 }
 
+func (h *Handler) AdminGet(w http.ResponseWriter, r *http.Request) {
+	quiz, err := h.svc.GetForAdmin(r.Context(), chi.URLParam(r, "quizId"))
+	if err != nil {
+		middleware.NotFound(w, "published Qwish quiz")
+		return
+	}
+	middleware.JSON(w, http.StatusOK, quiz)
+}
+
+func (h *Handler) AdminUpdate(w http.ResponseWriter, r *http.Request) {
+	var req AdminCreateQuizReq
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid quiz payload")
+		return
+	}
+	quiz, err := h.svc.UpdateForAdmin(r.Context(), chi.URLParam(r, "quizId"), req, middleware.GetAdminID(r))
+	if err != nil {
+		if err == ErrInvalidTaxonomy {
+			middleware.BadRequest(w, "invalid domain or subdomain")
+			return
+		}
+		middleware.BadRequest(w, err.Error())
+		return
+	}
+	middleware.JSON(w, http.StatusOK, quiz)
+}
+
 // GET /api/v1/teacher/quizzes/taxonomy
 func (h *Handler) GetTaxonomy(w http.ResponseWriter, r *http.Request) {
 	tax, err := h.svc.GetTaxonomy(r.Context())

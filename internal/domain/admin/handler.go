@@ -676,7 +676,8 @@ func (h *Handler) ListQuizzes(w http.ResponseWriter, r *http.Request) {
 		`SELECT qz.id, qz.title, u.display_name, COALESCE(i.name,''), qz.status, qz.visibility,
 		        qz.question_count,
 		        (SELECT COUNT(*) FROM quiz_attempts a WHERE a.quiz_id=qz.id),
-		        qz.published_at, qz.created_at
+		        qz.published_at, qz.created_at,
+		        qz.created_by='00000000-0000-0000-0000-000000000001'
 		   FROM quizzes qz
 		   JOIN users u ON u.id=qz.created_by
 		   LEFT JOIN institutions i ON i.id=qz.institution_id
@@ -690,22 +691,23 @@ func (h *Handler) ListQuizzes(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type quizRow struct {
-		ID            string     `json:"id"`
-		Title         string     `json:"title"`
-		Author        string     `json:"author"`
-		Institution   string     `json:"institution"`
-		Status        string     `json:"status"`
-		Visibility    string     `json:"visibility"`
-		QuestionCount int        `json:"question_count"`
-		AttemptCount  int64      `json:"attempt_count"`
-		PublishedAt   *time.Time `json:"published_at,omitempty"`
-		CreatedAt     time.Time  `json:"created_at"`
+		ID               string     `json:"id"`
+		Title            string     `json:"title"`
+		Author           string     `json:"author"`
+		Institution      string     `json:"institution"`
+		Status           string     `json:"status"`
+		Visibility       string     `json:"visibility"`
+		QuestionCount    int        `json:"question_count"`
+		AttemptCount     int64      `json:"attempt_count"`
+		PublishedAt      *time.Time `json:"published_at,omitempty"`
+		CreatedAt        time.Time  `json:"created_at"`
+		PlatformAuthored bool       `json:"platform_authored"`
 	}
 	quizzes := []quizRow{}
 	for rows.Next() {
 		var x quizRow
 		rows.Scan(&x.ID, &x.Title, &x.Author, &x.Institution, &x.Status, &x.Visibility,
-			&x.QuestionCount, &x.AttemptCount, &x.PublishedAt, &x.CreatedAt)
+			&x.QuestionCount, &x.AttemptCount, &x.PublishedAt, &x.CreatedAt, &x.PlatformAuthored)
 		quizzes = append(quizzes, x)
 	}
 	middleware.JSONWithMeta(w, http.StatusOK, quizzes, &middleware.Meta{Page: page, Limit: limit, Total: total})

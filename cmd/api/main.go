@@ -684,10 +684,13 @@ func main() {
 					// "moderation-queue" as a quiz id.
 					r.Get("/quizzes/moderation-queue", adminH.ModerationQueue)
 					r.Get("/quizzes", adminH.ListQuizzes)
+					r.Get("/quizzes/taxonomy", quizH.GetTaxonomy)
 					// Platform-authored quizzes are always attributed to the Qwish
 					// system account. The service owns author, visibility, publish
 					// status, scheduling and question-delivery validation.
 					r.With(mw.RequireRole("super_admin")).Post("/quizzes", quizH.AdminCreate)
+					r.With(mw.RequireRole("super_admin")).Get("/quizzes/{quizId}", quizH.AdminGet)
+					r.With(mw.RequireRole("super_admin")).Patch("/quizzes/{quizId}", quizH.AdminUpdate)
 					r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/approve", adminH.ApproveQuiz)
 					r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/reject", adminH.RejectQuiz)
 					r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/request-edits", adminH.RequestEdits)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -97,6 +98,24 @@ type AdminCreateQuizReq struct {
 	Domain           *string          `json:"domain"`
 	Subdomain        *string          `json:"subdomain"`
 	Questions        []AddQuestionReq `json:"questions"`
+}
+
+// AdminAuthoringQuiz is the privileged authoring representation. Correct
+// answers are exposed only by the super-admin route, never by learner APIs.
+type AdminAuthoringQuiz struct {
+	ID               string     `json:"id"`
+	Title            string     `json:"title"`
+	Description      *string    `json:"description"`
+	Type             string     `json:"type"`
+	Status           string     `json:"status"`
+	QuestionLimit    *int       `json:"question_limit"`
+	ShuffleQuestions bool       `json:"shuffle_questions"`
+	StartsAt         *time.Time `json:"starts_at"`
+	EndsAt           *time.Time `json:"ends_at"`
+	Domain           *string    `json:"domain"`
+	Subdomain        *string    `json:"subdomain"`
+	PublishedAt      *time.Time `json:"published_at"`
+	Questions        []Question `json:"questions"`
 }
 
 // attemptStatsSelect aggregates a quiz's completed attempts: how many distinct
@@ -257,37 +276,8 @@ func (s *Service) Create(ctx context.Context, req CreateQuizReq, userID, institu
 // transaction. The author and visibility are server-owned so a request cannot
 // impersonate a person or create unexpected private platform content.
 func (s *Service) CreateForAdmin(ctx context.Context, req AdminCreateQuizReq, adminID string) (*Quiz, error) {
-	if len(req.Title) == 0 || len(req.Title) > 160 {
-		return nil, fmt.Errorf("title must be between 1 and 160 characters")
-	}
-	if len(req.Questions) == 0 || len(req.Questions) > 200 {
-		return nil, fmt.Errorf("a quiz must contain between 1 and 200 questions")
-	}
-	if req.Type == "" {
-		req.Type = "knowledge_check"
-	}
-	if req.Type != "knowledge_check" && req.Type != "play_and_win" {
-		return nil, fmt.Errorf("invalid quiz type")
-	}
-	if req.StartsAt != nil && req.EndsAt != nil && !req.EndsAt.After(*req.StartsAt) {
-		return nil, fmt.Errorf("end date must be after start date")
-	}
-	if req.QuestionLimit != nil && (*req.QuestionLimit < 1 || *req.QuestionLimit > len(req.Questions)) {
-		return nil, fmt.Errorf("question limit must be between 1 and the number of questions")
-	}
-	if err := s.validateTaxonomy(ctx, req.Domain, req.Subdomain); err != nil {
+	if err := s.validateAdminQuiz(ctx, req); err != nil {
 		return nil, err
-	}
-	for i, question := range req.Questions {
-		if len(question.Prompt) == 0 || len(question.Prompt) > 4000 {
-			return nil, fmt.Errorf("question %d needs a prompt", i+1)
-		}
-		if question.Type == "" || len(question.CorrectAnswer) == 0 {
-			return nil, fmt.Errorf("question %d needs a type and correct answer", i+1)
-		}
-		if question.TimeLimitSeconds < 0 || question.TimeLimitSeconds > 600 {
-			return nil, fmt.Errorf("question %d has an invalid time limit", i+1)
-		}
 	}
 
 	tx, err := s.db.Begin(ctx)
@@ -308,7 +298,55 @@ func (s *Service) CreateForAdmin(ctx context.Context, req AdminCreateQuizReq, ad
 		return nil, err
 	}
 
+	if err := insertAdminQuestions(ctx, tx, q.ID, req.Questions); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	// Creation is privileged; retain an audit trail when the authenticated
+	// principal is an admin_accounts identity. A user-table super-admin has no
+	// compatible audit FK, so it is deliberately not coerced into one.
+	s.auditAdminQuiz(ctx, adminID, "create_qwish_quiz", q.ID, q.Title, len(req.Questions))
+	q.TeacherName = "Qwish"
+	return q, nil
+}
+
+func (s *Service) validateAdminQuiz(ctx context.Context, req AdminCreateQuizReq) error {
+	if len(req.Title) == 0 || len(req.Title) > 160 {
+		return fmt.Errorf("title must be between 1 and 160 characters")
+	}
+	if len(req.Questions) == 0 || len(req.Questions) > 200 {
+		return fmt.Errorf("a quiz must contain between 1 and 200 questions")
+	}
+	if req.Type != "knowledge_check" && req.Type != "play_and_win" {
+		return fmt.Errorf("invalid quiz type")
+	}
+	if req.StartsAt != nil && req.EndsAt != nil && !req.EndsAt.After(*req.StartsAt) {
+		return fmt.Errorf("end date must be after start date")
+	}
+	if req.QuestionLimit != nil && (*req.QuestionLimit < 1 || *req.QuestionLimit > len(req.Questions)) {
+		return fmt.Errorf("question limit must be between 1 and the number of questions")
+	}
+	if err := s.validateTaxonomy(ctx, req.Domain, req.Subdomain); err != nil {
+		return err
+	}
 	for i, question := range req.Questions {
+		if len(question.Prompt) == 0 || len(question.Prompt) > 4000 {
+			return fmt.Errorf("question %d needs a prompt", i+1)
+		}
+		if question.Type == "" || len(question.CorrectAnswer) == 0 {
+			return fmt.Errorf("question %d needs a type and correct answer", i+1)
+		}
+		if question.TimeLimitSeconds < 0 || question.TimeLimitSeconds > 600 {
+			return fmt.Errorf("question %d has an invalid time limit", i+1)
+		}
+	}
+	return nil
+}
+
+func insertAdminQuestions(ctx context.Context, tx pgx.Tx, quizID string, questions []AddQuestionReq) error {
+	for i, question := range questions {
 		timeLimit := question.TimeLimitSeconds
 		if timeLimit == 0 {
 			timeLimit = 15
@@ -320,27 +358,88 @@ func (s *Service) CreateForAdmin(ctx context.Context, req AdminCreateQuizReq, ad
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO questions (quiz_id, position, type, prompt, media_url, options, correct_answer, time_limit_seconds, clues)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			q.ID, i+1, question.Type, question.Prompt, question.MediaURL, options, question.CorrectAnswer, timeLimit, question.Clues); err != nil {
-			return nil, err
+			quizID, i+1, question.Type, question.Prompt, question.MediaURL, options, question.CorrectAnswer, timeLimit, question.Clues); err != nil {
+			return err
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	// Creation is privileged; retain an audit trail when the authenticated
-	// principal is an admin_accounts identity. A user-table super-admin has no
-	// compatible audit FK, so it is deliberately not coerced into one.
+	return nil
+}
+
+func (s *Service) auditAdminQuiz(ctx context.Context, adminID, action, quizID, title string, count int) {
 	if adminID != "" {
 		var name, role string
 		if err := s.db.QueryRow(ctx, `SELECT name, role FROM admin_accounts WHERE id=$1`, adminID).Scan(&name, &role); err == nil {
 			s.db.Exec(ctx,
 				`INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, new_value)
-				 VALUES ($1,$2,$3,'create_qwish_quiz','quiz',$4,jsonb_build_object('title',$5,'question_count',$6))`,
-				adminID, name, role, q.ID, q.Title, len(req.Questions))
+				 VALUES ($1,$2,$3,$4,'quiz',$5,jsonb_build_object('title',$6,'question_count',$7))`,
+				adminID, name, role, action, quizID, title, count)
 		}
 	}
-	q.TeacherName = "Qwish"
+}
+
+// GetForAdmin exposes the complete Qwish-authored quiz to the privileged
+// authoring UI. The fixed creator check prevents this endpoint from leaking a
+// teacher's answer key or allowing cross-owner edits.
+func (s *Service) GetForAdmin(ctx context.Context, quizID string) (*AdminAuthoringQuiz, error) {
+	q := &AdminAuthoringQuiz{}
+	err := s.db.QueryRow(ctx, `
+		SELECT id, title, description, type, status, question_limit,
+		       shuffle_questions, starts_at, ends_at, domain, subdomain, published_at
+		FROM quizzes
+		WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL`, quizID, SystemUserID).Scan(
+		&q.ID, &q.Title, &q.Description, &q.Type, &q.Status, &q.QuestionLimit,
+		&q.ShuffleQuestions, &q.StartsAt, &q.EndsAt, &q.Domain, &q.Subdomain, &q.PublishedAt)
+	if err != nil {
+		return nil, err
+	}
+	questions, err := s.GetQuestions(ctx, quizID)
+	if err != nil {
+		return nil, err
+	}
+	if questions == nil {
+		questions = []Question{}
+	}
+	q.Questions = questions
 	return q, nil
+}
+
+// UpdateForAdmin atomically replaces a platform quiz and its question bank.
+// Existing attempts remain attached to the quiz id; historical attempt answer
+// snapshots are not rewritten.
+func (s *Service) UpdateForAdmin(ctx context.Context, quizID string, req AdminCreateQuizReq, adminID string) (*AdminAuthoringQuiz, error) {
+	if err := s.validateAdminQuiz(ctx, req); err != nil {
+		return nil, err
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `
+		UPDATE quizzes
+		SET title=$1, description=$2, type=$3, question_count=$4, starts_at=$5,
+		    ends_at=$6, question_limit=$7, shuffle_questions=$8, domain=$9,
+		    subdomain=$10, updated_at=now()
+		WHERE id=$11 AND created_by=$12 AND status='published' AND deleted_at IS NULL`,
+		req.Title, req.Description, req.Type, len(req.Questions), req.StartsAt, req.EndsAt,
+		req.QuestionLimit, req.ShuffleQuestions, req.Domain, req.Subdomain, quizID, SystemUserID)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() != 1 {
+		return nil, fmt.Errorf("published Qwish quiz not found")
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM questions WHERE quiz_id=$1`, quizID); err != nil {
+		return nil, err
+	}
+	if err := insertAdminQuestions(ctx, tx, quizID, req.Questions); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	s.auditAdminQuiz(ctx, adminID, "update_qwish_quiz", quizID, req.Title, len(req.Questions))
+	return s.GetForAdmin(ctx, quizID)
 }
 
 func (s *Service) Update(ctx context.Context, quizID, ownerID string, req CreateQuizReq) error {

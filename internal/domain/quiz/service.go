@@ -355,14 +355,56 @@ func (s *Service) validateAdminQuiz(ctx context.Context, req AdminCreateQuizReq)
 		if len(question.Prompt) == 0 || len(question.Prompt) > 4000 {
 			return fmt.Errorf("question %d needs a prompt", i+1)
 		}
-		if question.Type == "" || len(question.CorrectAnswer) == 0 {
-			return fmt.Errorf("question %d needs a type and correct answer", i+1)
+		if err := validateAdminQuestion(question); err != nil {
+			return fmt.Errorf("question %d: %w", i+1, err)
 		}
 		if question.TimeLimitSeconds < 0 || question.TimeLimitSeconds > 600 {
 			return fmt.Errorf("question %d has an invalid time limit", i+1)
 		}
 	}
 	return nil
+}
+
+func validateAdminQuestion(question AddQuestionReq) error {
+	choice := map[string]bool{
+		"multiple_choice": true, "confidence_based": true,
+		"eliminate_wrong": true, "puzzle": true, "speed_chain": true,
+	}
+	if choice[question.Type] {
+		var options []string
+		var answer string
+		if json.Unmarshal(question.Options, &options) != nil || len(options) < 2 || len(options) > 8 {
+			return fmt.Errorf("needs between 2 and 8 options")
+		}
+		if json.Unmarshal(question.CorrectAnswer, &answer) != nil || answer == "" {
+			return fmt.Errorf("needs a string correct answer")
+		}
+		for _, option := range options {
+			if option == answer {
+				return nil
+			}
+		}
+		return fmt.Errorf("correct answer must match an option")
+	}
+	if question.Type == "arrange_order" {
+		var options, answer []string
+		if json.Unmarshal(question.Options, &options) != nil || json.Unmarshal(question.CorrectAnswer, &answer) != nil || len(answer) < 2 || len(answer) > 20 || len(options) != len(answer) {
+			return fmt.Errorf("needs 2 to 20 ordered items")
+		}
+		return nil
+	}
+	if question.Type == "clue_reveal" {
+		var answer string
+		var clues []string
+		if json.Unmarshal(question.CorrectAnswer, &answer) != nil || answer == "" {
+			return fmt.Errorf("needs a string answer")
+		}
+		if json.Unmarshal(question.Clues, &clues) != nil || len(clues) < 1 || len(clues) > 10 {
+			return fmt.Errorf("needs between 1 and 10 clues")
+		}
+		return nil
+	}
+	return fmt.Errorf("has an unsupported type")
 }
 
 func insertAdminQuestions(ctx context.Context, tx pgx.Tx, quizID string, questions []AddQuestionReq) error {

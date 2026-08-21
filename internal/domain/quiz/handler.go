@@ -198,6 +198,7 @@ func (h *Handler) TeacherCreate(w http.ResponseWriter, r *http.Request) {
 // registration limits this to super_admin; the service fixes the author to the
 // Qwish system account and validates all delivery controls server-side.
 func (h *Handler) AdminCreate(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var req AdminCreateQuizReq
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
@@ -227,6 +228,7 @@ func (h *Handler) AdminGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) AdminUpdate(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var req AdminCreateQuizReq
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()

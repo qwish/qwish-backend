@@ -378,7 +378,8 @@ func (h *Handler) GetMyRecommendations(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, recs)
 }
 
-// GET /api/v1/admin/featured-quizzes (super_admin only; route-enforced).
+// GET /api/v1/quizzes/featured returns the current public featured set. The
+// same handler is also used by the super-admin console to read its selection.
 func (h *Handler) GetFeaturedQuizzes(w http.ResponseWriter, r *http.Request) {
 	quizzes, err := h.svc.GetFeaturedQuizzes(r.Context())
 	if err != nil {

@@ -464,6 +464,9 @@ func main() {
 				r.Get("/study-groups/{groupId}/leaderboard", studyGroupH.Leaderboard)
 
 				// Quiz browser (student / teacher)
+				// Must precede /quizzes/{quizId}, otherwise chi treats "featured"
+				// as a quiz id.
+				r.Get("/quizzes/featured", userH.GetFeaturedQuizzes)
 				r.Get("/quizzes", quizH.List)
 				r.Get("/quizzes/{quizId}", quizH.Get)
 				r.Post("/quizzes/{quizId}/save", quizH.Save)

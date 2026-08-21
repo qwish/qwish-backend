@@ -45,22 +45,22 @@ type InstInfo struct {
 }
 
 type PublicProfile struct {
-	ID              string `json:"id"`
-	DisplayName     string `json:"display_name"`
-	Institution     string `json:"institution,omitempty"`
-	TotalPoints     int64  `json:"total_points"`
-	CurrentStreak   int    `json:"current_streak"`
-	LongestStreak   int    `json:"longest_streak"`
-	QuizzesCompleted int   `json:"quizzes_completed"`
-	Badges          []string `json:"badges"`
+	ID               string   `json:"id"`
+	DisplayName      string   `json:"display_name"`
+	Institution      string   `json:"institution,omitempty"`
+	TotalPoints      int64    `json:"total_points"`
+	CurrentStreak    int      `json:"current_streak"`
+	LongestStreak    int      `json:"longest_streak"`
+	QuizzesCompleted int      `json:"quizzes_completed"`
+	Badges           []string `json:"badges"`
 }
 
 type Stats struct {
-	TotalPoints      int64   `json:"total_points"`
-	QuizzesTaken     int     `json:"quizzes_taken"`
-	AverageScore     float64 `json:"average_score"`
-	CurrentStreak    int     `json:"current_streak"`
-	LongestStreak    int     `json:"longest_streak"`
+	TotalPoints   int64   `json:"total_points"`
+	QuizzesTaken  int     `json:"quizzes_taken"`
+	AverageScore  float64 `json:"average_score"`
+	CurrentStreak int     `json:"current_streak"`
+	LongestStreak int     `json:"longest_streak"`
 }
 
 type Badge struct {
@@ -284,13 +284,13 @@ func (s *Service) GetProfileViews(ctx context.Context, userID string) (*ProfileV
 // ── Rank & percentile ─────────────────────────────────────────────────────────
 
 type RankInfo struct {
-	GlobalRank      int     `json:"global_rank"`
-	GlobalTotal     int     `json:"global_total"`
-	InstRank        *int    `json:"institution_rank,omitempty"`
-	InstTotal       *int    `json:"institution_total,omitempty"`
-	DomainRank      *int    `json:"domain_rank,omitempty"`
-	DomainTotal     *int    `json:"domain_total,omitempty"`
-	TopPercentile   float64 `json:"top_percentile"` // e.g. 12.5 → "Top 12.5%"
+	GlobalRank    int     `json:"global_rank"`
+	GlobalTotal   int     `json:"global_total"`
+	InstRank      *int    `json:"institution_rank,omitempty"`
+	InstTotal     *int    `json:"institution_total,omitempty"`
+	DomainRank    *int    `json:"domain_rank,omitempty"`
+	DomainTotal   *int    `json:"domain_total,omitempty"`
+	TopPercentile float64 `json:"top_percentile"` // e.g. 12.5 → "Top 12.5%"
 }
 
 func (s *Service) GetRank(ctx context.Context, userID, instID string) (*RankInfo, error) {
@@ -341,7 +341,7 @@ type Milestone struct {
 	ID          string  `json:"id"`
 	Title       string  `json:"title"`
 	Description string  `json:"description"`
-	Progress    float64 `json:"progress"`   // 0.0–1.0
+	Progress    float64 `json:"progress"` // 0.0–1.0
 	Current     int64   `json:"current"`
 	Target      int64   `json:"target"`
 	Completed   bool    `json:"completed"`
@@ -505,11 +505,20 @@ func (s *Service) UpdateDomain(ctx context.Context, userID, domain string) error
 // ── Recommendations ───────────────────────────────────────────────────────────
 
 type RecommendedQuiz struct {
-	ID            string  `json:"id"`
-	Title         string  `json:"title"`
-	Description   *string `json:"description,omitempty"`
-	QuestionCount int     `json:"question_count"`
-	Type          string  `json:"type"`
+	ID                   string     `json:"id"`
+	Title                string     `json:"title"`
+	Description          *string    `json:"description,omitempty"`
+	QuestionCount        int        `json:"question_count"`
+	Type                 string     `json:"type"`
+	Domain               *string    `json:"domain,omitempty"`
+	Subdomain            *string    `json:"subdomain,omitempty"`
+	PublishedAt          *time.Time `json:"published_at,omitempty"`
+	RecommendationReason string     `json:"recommendation_reason"`
+	RecommendationScore  float64    `json:"-"`
+	interestMatch        bool
+	weaknessScore        float64
+	difficultyScore      float64
+	saved                bool
 }
 
 // ── Settings: theme (dark mode) + privacy ──────────────────────────────────────
@@ -627,17 +636,17 @@ func (s *Service) UpdateNotifPrefs(ctx context.Context, userID string, in map[st
 // ── Weekly score insights ────────────────────────────────────────────────────
 
 type WeeklyInsights struct {
-	WeekStart       time.Time `json:"week_start"`
-	WeekEnd         time.Time `json:"week_end"`
-	PointsThisWeek  int64     `json:"points_this_week"`
-	PointsLastWeek  int64     `json:"points_last_week"`
-	PointsDeltaPct  float64   `json:"points_delta_pct"`
-	QuizzesThisWeek int       `json:"quizzes_this_week"`
-	AvgScoreThisWeek float64  `json:"avg_score_this_week"`
-	CurrentStreak   int       `json:"current_streak"`
-	Domain          *string   `json:"domain,omitempty"`
-	DomainRank      *int      `json:"domain_rank,omitempty"`
-	Suggestion      string    `json:"suggestion"`
+	WeekStart        time.Time `json:"week_start"`
+	WeekEnd          time.Time `json:"week_end"`
+	PointsThisWeek   int64     `json:"points_this_week"`
+	PointsLastWeek   int64     `json:"points_last_week"`
+	PointsDeltaPct   float64   `json:"points_delta_pct"`
+	QuizzesThisWeek  int       `json:"quizzes_this_week"`
+	AvgScoreThisWeek float64   `json:"avg_score_this_week"`
+	CurrentStreak    int       `json:"current_streak"`
+	Domain           *string   `json:"domain,omitempty"`
+	DomainRank       *int      `json:"domain_rank,omitempty"`
+	Suggestion       string    `json:"suggestion"`
 }
 
 // GetWeeklyInsights computes the user's last-7-days performance breakdown plus a
@@ -988,17 +997,66 @@ func buildSuggestion(wi *WeeklyInsights) string {
 
 func (s *Service) GetRecommendations(ctx context.Context, userID, instID string) ([]RecommendedQuiz, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT q.id, q.title, q.description, q.question_count, q.type
-		 FROM quizzes q
-		 WHERE (q.institution_id = $1 OR q.visibility = 'public')
-		   AND q.status = 'published'
-		   AND q.deleted_at IS NULL
-		   AND q.id NOT IN (
-		       SELECT quiz_id FROM quiz_attempts WHERE user_id = $2 AND status = 'completed'
-		   )
-		 ORDER BY q.published_at DESC
-		 LIMIT 5`,
-		instID, userID)
+		`WITH learner AS (
+		   SELECT COALESCE(interest_domains, '{}') AS interests
+		   FROM users WHERE id = $1
+		 ), ability AS (
+		   SELECT COALESCE(AVG(score_pct), 60)::float8 AS avg_score
+		   FROM quiz_attempts
+		   WHERE user_id = $1 AND status = 'completed'
+		 ), subdomain_performance AS (
+		   SELECT q.subdomain, AVG(qa.score_pct)::float8 AS avg_score
+		   FROM quiz_attempts qa JOIN quizzes q ON q.id = qa.quiz_id
+		   WHERE qa.user_id = $1 AND qa.status = 'completed' AND q.subdomain IS NOT NULL
+		   GROUP BY q.subdomain
+		 ), recent_domains AS (
+		   SELECT q.domain, COUNT(*)::int AS uses
+		   FROM (
+		     SELECT quiz_id FROM quiz_attempts
+		     WHERE user_id = $1 AND status = 'completed'
+		     ORDER BY completed_at DESC LIMIT 3
+		   ) recent JOIN quizzes q ON q.id = recent.quiz_id
+		   WHERE q.domain IS NOT NULL GROUP BY q.domain
+		 ), candidates AS (
+		   SELECT q.id, q.title, q.description, q.question_count, q.type,
+		          q.domain, q.subdomain, q.published_at,
+		          COALESCE(qd.difficulty, 0.60) AS difficulty,
+		          COALESCE(pop.completions, 0) AS completions,
+		          (q.subdomain = ANY(l.interests) OR q.domain = ANY(l.interests)) AS interest_match,
+		          CASE WHEN sp.avg_score IS NULL THEN 0 ELSE (100 - sp.avg_score) / 100 * 25 END AS weakness_score,
+		          GREATEST(0, 20 * (1 - ABS((0.40 + 0.60 * a.avg_score / 100) - COALESCE(qd.difficulty, 0.60)) / 0.60)) AS difficulty_score,
+		          EXISTS(SELECT 1 FROM saved_quizzes sq WHERE sq.quiz_id=q.id AND sq.user_id=$1) AS saved,
+		          COALESCE(rd.uses, 0) AS recent_domain_uses,
+		          COALESCE(hist.attempts, 0) AS prior_attempts
+		   FROM quizzes q
+		   CROSS JOIN learner l CROSS JOIN ability a
+		   LEFT JOIN subdomain_performance sp ON sp.subdomain = q.subdomain
+		   LEFT JOIN recent_domains rd ON rd.domain = q.domain
+		   LEFT JOIN LATERAL (SELECT AVG(difficulty)::float8 AS difficulty FROM questions WHERE quiz_id=q.id) qd ON true
+		   LEFT JOIN LATERAL (SELECT COUNT(DISTINCT user_id)::int AS completions FROM quiz_attempts WHERE quiz_id=q.id AND status='completed') pop ON true
+		   LEFT JOIN LATERAL (SELECT COUNT(*)::int AS attempts FROM quiz_attempts WHERE quiz_id=q.id AND user_id=$1 AND status='completed') hist ON true
+		   WHERE (q.visibility='public' OR q.institution_id = NULLIF($2, '')::uuid)
+		     AND q.status='published' AND q.deleted_at IS NULL
+		     AND (q.starts_at IS NULL OR q.starts_at <= now())
+		     AND (q.ends_at IS NULL OR q.ends_at > now())
+		     AND NOT EXISTS (
+		       SELECT 1 FROM quiz_attempts recent
+		       WHERE recent.user_id=$1 AND recent.quiz_id=q.id
+		         AND recent.status='completed' AND recent.completed_at >= now() - interval '14 days'
+		     )
+		 )
+		 SELECT id, title, description, question_count, type, domain, subdomain, published_at,
+		        interest_match, weakness_score, difficulty_score, saved,
+		        (CASE WHEN interest_match THEN 30 ELSE 0 END
+		         + weakness_score + difficulty_score
+		         + LEAST(10, LN(1 + completions) * 2)
+		         + GREATEST(0, 10 - EXTRACT(EPOCH FROM (now() - COALESCE(published_at, now() - interval '365 days'))) / 86400 / 9)
+		         + CASE WHEN saved THEN 5 ELSE 0 END
+		         - recent_domain_uses * 4 - LEAST(12, prior_attempts * 4))::float8 AS rank_score
+		 FROM candidates
+		 ORDER BY rank_score DESC, published_at DESC, id
+		 LIMIT 8`,
+		userID, instID)
 	if err != nil {
 		return nil, err
 	}
@@ -1007,9 +1065,13 @@ func (s *Service) GetRecommendations(ctx context.Context, userID, instID string)
 	var list []RecommendedQuiz
 	for rows.Next() {
 		var q RecommendedQuiz
-		if err := rows.Scan(&q.ID, &q.Title, &q.Description, &q.QuestionCount, &q.Type); err != nil {
+		if err := rows.Scan(&q.ID, &q.Title, &q.Description, &q.QuestionCount, &q.Type,
+			&q.Domain, &q.Subdomain, &q.PublishedAt, &q.interestMatch, &q.weaknessScore,
+			&q.difficultyScore, &q.saved, &q.RecommendationScore); err != nil {
 			return nil, err
 		}
+		q.RecommendationScore = round1(q.RecommendationScore)
+		q.RecommendationReason = recommendationReason(q)
 		list = append(list, q)
 	}
 	if list == nil {
@@ -1018,3 +1080,17 @@ func (s *Service) GetRecommendations(ctx context.Context, userID, instID string)
 	return list, nil
 }
 
+func recommendationReason(q RecommendedQuiz) string {
+	switch {
+	case q.interestMatch:
+		return "Matches your interests"
+	case q.weaknessScore >= 10:
+		return "Build strength in this topic"
+	case q.saved:
+		return "From your saved assessments"
+	case q.difficultyScore >= 17:
+		return "A good match for your level"
+	default:
+		return "Popular with Qwish learners"
+	}
+}

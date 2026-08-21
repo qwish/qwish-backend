@@ -11,6 +11,7 @@ INSERT INTO domains (slug, label, sort) VALUES
   ('language_learning', 'Language Learning', 9)
 ON CONFLICT (slug) DO NOTHING;
 
+
 INSERT INTO subdomains (slug, domain_slug, label, sort, difficulty) VALUES
   -- Science
   ('science_physics',       'science', 'Physics',             1, 0.80),

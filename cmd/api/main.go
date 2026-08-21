@@ -221,6 +221,14 @@ func main() {
 					}
 					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
 				})
+				r.Post("/purge-attempt-behavior", func(w http.ResponseWriter, r *http.Request) {
+					deleted, err := attemptSvc.PurgeExpiredBehavior(r.Context())
+					if err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]int64{"deleted": deleted})
+				})
 				r.Post("/streak-nudges", func(w http.ResponseWriter, r *http.Request) {
 					if err := sched.SendStreakNudges(r.Context()); err != nil {
 						mw.InternalError(w)
@@ -468,6 +476,7 @@ func main() {
 					r.Use(mw.RateLimitByUser(300, time.Minute))
 					r.Post("/quizzes/{quizId}/attempts", attemptH.Start)
 					r.Post("/attempts/{attemptId}/answers", attemptH.SubmitAnswer)
+					r.With(mw.RateLimit(300, time.Minute)).Post("/attempts/{attemptId}/behavior", attemptH.RecordBehavior)
 					r.Post("/attempts/{attemptId}/questions/{questionId}/clue", attemptH.RevealClue)
 					r.Post("/attempts/{attemptId}/complete", attemptH.Complete)
 				})
@@ -691,6 +700,7 @@ func main() {
 					r.With(mw.RequireRole("super_admin")).Post("/quizzes", quizH.AdminCreate)
 					r.With(mw.RequireRole("super_admin")).Get("/quizzes/{quizId}", quizH.AdminGet)
 					r.With(mw.RequireRole("super_admin")).Patch("/quizzes/{quizId}", quizH.AdminUpdate)
+					r.With(mw.RequireRole("super_admin", "moderator")).Get("/quizzes/{quizId}/behavior", attemptH.BehaviorSummary)
 					r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/approve", adminH.ApproveQuiz)
 					r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/reject", adminH.RejectQuiz)
 					r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/request-edits", adminH.RequestEdits)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/qwish/backend/internal/middleware"
@@ -30,7 +31,18 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > 50 {
 		limit = 20
 	}
-	quizzes, total, err := h.svc.ListForStudent(r.Context(), instID, q.Get("type"), q.Get("saved"), q.Get("search"), userID, page, limit)
+	var publishedAfter, publishedBefore *time.Time
+	for key, target := range map[string]**time.Time{"published_after": &publishedAfter, "published_before": &publishedBefore} {
+		if raw := q.Get(key); raw != "" {
+			parsed, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				middleware.BadRequest(w, key+" must be RFC3339")
+				return
+			}
+			*target = &parsed
+		}
+	}
+	quizzes, total, err := h.svc.ListForStudentFiltered(r.Context(), instID, q.Get("type"), q.Get("saved"), q.Get("search"), q.Get("domain"), q.Get("subdomain"), publishedAfter, publishedBefore, userID, page, limit)
 	if err != nil {
 		middleware.InternalError(w)
 		return

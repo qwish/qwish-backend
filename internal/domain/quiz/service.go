@@ -131,7 +131,7 @@ const attemptStatsSelect = `SELECT COUNT(DISTINCT qa.user_id) AS taker_count,
 // Shared with the profiling endpoint so profiled plans match production SQL.
 const studentListSelect = `SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
-		        st.taker_count, q.ends_at, q.published_at, q.group_id, q.created_at,
+		        st.taker_count, q.ends_at, q.published_at, q.group_id, q.domain, q.subdomain, q.created_at,
 		        st.avg_score_pct, st.avg_seconds
 		 FROM quizzes q
 		 JOIN users u ON u.id = q.created_by
@@ -173,10 +173,30 @@ func studentListWhere(institutionID, quizType, saved, search, userID string) (st
 }
 
 func (s *Service) ListForStudent(ctx context.Context, institutionID, quizType, saved, search, userID string, page, limit int) ([]Quiz, int, error) {
+	return s.ListForStudentFiltered(ctx, institutionID, quizType, saved, search, "", "", nil, nil, userID, page, limit)
+}
+
+func (s *Service) ListForStudentFiltered(ctx context.Context, institutionID, quizType, saved, search, domain, subdomain string, publishedAfter, publishedBefore *time.Time, userID string, page, limit int) ([]Quiz, int, error) {
 	offset := (page - 1) * limit
 	var total int
 
 	baseWhere, args := studentListWhere(institutionID, quizType, saved, search, userID)
+	if domain != "" {
+		baseWhere += fmt.Sprintf(` AND q.domain = $%d`, len(args)+1)
+		args = append(args, domain)
+	}
+	if subdomain != "" {
+		baseWhere += fmt.Sprintf(` AND q.subdomain = $%d`, len(args)+1)
+		args = append(args, subdomain)
+	}
+	if publishedAfter != nil {
+		baseWhere += fmt.Sprintf(` AND q.published_at >= $%d`, len(args)+1)
+		args = append(args, *publishedAfter)
+	}
+	if publishedBefore != nil {
+		baseWhere += fmt.Sprintf(` AND q.published_at < $%d`, len(args)+1)
+		args = append(args, *publishedBefore)
+	}
 	argN := len(args) + 1
 
 	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quizzes q WHERE `+baseWhere, args...).Scan(&total); err != nil {
@@ -735,7 +755,7 @@ func (s *Service) ListForTeacher(ctx context.Context, teacherID, statusFilter st
 	rows, err := s.db.Query(ctx,
 		`SELECT q.id, q.institution_id, q.created_by, '' as teacher, '' as institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
-		        0 AS taker_count, q.ends_at, q.published_at, q.group_id, q.created_at,
+		        0 AS taker_count, q.ends_at, q.published_at, q.group_id, q.domain, q.subdomain, q.created_at,
 		        NULL::float8, NULL::float8
 		 FROM quizzes q WHERE `+where+fmt.Sprintf(` ORDER BY q.created_at DESC LIMIT $%d OFFSET $%d`, n-1, n),
 		args...)
@@ -910,7 +930,7 @@ func (s *Service) scanQuizRows(rows interface {
 	for rows.Next() {
 		var q Quiz
 		rows.Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName, &q.Title, &q.Description,
-			&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.CreatedAt,
+			&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.Domain, &q.Subdomain, &q.CreatedAt,
 			&q.AvgScorePct, &q.AvgSeconds)
 		quizzes = append(quizzes, q)
 	}

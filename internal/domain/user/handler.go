@@ -378,6 +378,36 @@ func (h *Handler) GetMyRecommendations(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, recs)
 }
 
+func (h *Handler) GetMyLearningPreferences(w http.ResponseWriter, r *http.Request) {
+	prefs, err := h.svc.GetLearningPreferences(r.Context(), middleware.GetUserID(r))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, prefs)
+}
+
+func (h *Handler) UpdateMyLearningPreferences(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	var req LearningPreferences
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid request body")
+		return
+	}
+	prefs, err := h.svc.UpdateLearningPreferences(
+		r.Context(), middleware.GetUserID(r), req.Language, req.Topics,
+	)
+	if errors.Is(err, ErrInvalidLearningLanguage) || errors.Is(err, ErrInvalidLearningTopics) {
+		middleware.BadRequest(w, err.Error())
+		return
+	}
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, prefs)
+}
+
 // GET /api/v1/users/me/report-card
 func (h *Handler) GetMyReportCardPDF(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.GetUserID(r)
@@ -437,4 +467,3 @@ startxref
 
 	w.Write([]byte(pdfData))
 }
-

@@ -15,6 +15,11 @@ import (
 // neither the owner nor a follower).
 var ErrProfilePrivate = errors.New("profile is private")
 
+var (
+	ErrInvalidLearningLanguage = errors.New("unsupported language")
+	ErrInvalidLearningTopics   = errors.New("unknown or excessive topics")
+)
+
 type Service struct {
 	db *pgxpool.Pool
 }
@@ -519,6 +524,54 @@ type RecommendedQuiz struct {
 	weaknessScore        float64
 	difficultyScore      float64
 	saved                bool
+}
+
+type LearningPreferences struct {
+	Language string   `json:"language"`
+	Topics   []string `json:"topics"`
+}
+
+func (s *Service) GetLearningPreferences(ctx context.Context, userID string) (*LearningPreferences, error) {
+	p := &LearningPreferences{}
+	err := s.db.QueryRow(ctx,
+		`SELECT preferred_language, COALESCE(interest_domains, '{}') FROM users WHERE id=$1`,
+		userID).Scan(&p.Language, &p.Topics)
+	return p, err
+}
+
+func (s *Service) UpdateLearningPreferences(ctx context.Context, userID, language string, topics []string) (*LearningPreferences, error) {
+	if language != "en" && language != "hi" && language != "mr" {
+		return nil, ErrInvalidLearningLanguage
+	}
+	if len(topics) == 0 || len(topics) > 50 {
+		return nil, ErrInvalidLearningTopics
+	}
+	seen := make(map[string]struct{}, len(topics))
+	clean := make([]string, 0, len(topics))
+	for _, topic := range topics {
+		if topic == "" {
+			return nil, ErrInvalidLearningTopics
+		}
+		if _, ok := seen[topic]; !ok {
+			seen[topic] = struct{}{}
+			clean = append(clean, topic)
+		}
+	}
+	var valid int
+	if err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM subdomains WHERE slug = ANY($1::text[])`, clean,
+	).Scan(&valid); err != nil {
+		return nil, err
+	}
+	if valid != len(clean) {
+		return nil, ErrInvalidLearningTopics
+	}
+	if _, err := s.db.Exec(ctx,
+		`UPDATE users SET preferred_language=$2, interest_domains=$3, updated_at=now() WHERE id=$1`,
+		userID, language, clean); err != nil {
+		return nil, err
+	}
+	return &LearningPreferences{Language: language, Topics: clean}, nil
 }
 
 // ── Settings: theme (dark mode) + privacy ──────────────────────────────────────

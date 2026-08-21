@@ -378,6 +378,37 @@ func (h *Handler) GetMyRecommendations(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, recs)
 }
 
+// GET /api/v1/admin/featured-quizzes (super_admin only; route-enforced).
+func (h *Handler) GetFeaturedQuizzes(w http.ResponseWriter, r *http.Request) {
+	quizzes, err := h.svc.GetFeaturedQuizzes(r.Context())
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, quizzes)
+}
+
+// PUT /api/v1/admin/featured-quizzes (super_admin only; route-enforced).
+func (h *Handler) SetFeaturedQuizzes(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	var req struct {
+		QuizIDs []string `json:"quiz_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid request body")
+		return
+	}
+	if err := h.svc.SetFeaturedQuizzes(r.Context(), req.QuizIDs); err != nil {
+		if errors.Is(err, ErrInvalidFeaturedQuizzes) {
+			middleware.BadRequest(w, err.Error())
+			return
+		}
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]any{"quiz_ids": req.QuizIDs})
+}
+
 func (h *Handler) GetMyLearningPreferences(w http.ResponseWriter, r *http.Request) {
 	prefs, err := h.svc.GetLearningPreferences(r.Context(), middleware.GetUserID(r))
 	if err != nil {

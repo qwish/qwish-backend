@@ -1128,7 +1128,7 @@ func (s *Service) GetRecommendations(ctx context.Context, userID, instID string)
 		list = append(list, q)
 	}
 	if list == nil {
-		list = []RecommendedQuiz{}
+		return s.GetFeaturedQuizzes(ctx)
 	}
 	return list, nil
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/domain/scoring"
 )
 
 // ErrProfilePrivate is returned when a viewer is not allowed to see a private
@@ -852,17 +853,32 @@ func (s *Service) GetInsightsBreakdown(ctx context.Context, userID string) (*Ins
 		return nil, err
 	}
 
-	if totalQuestions > 0 {
-		c.Accuracy = float64(totalCorrect) / float64(totalQuestions)
+	scoreParts := scoring.CalculateQwishScoreComponents(scoring.QwishScoreFactors{
+		TotalCorrect:      int(totalCorrect),
+		TotalQuestions:    int(totalQuestions),
+		Streak:            streak,
+		ActivityCount:     completed,
+		SpeedSum:          speedAvg * float64(totalCorrect),
+		TotalDifficulty:   totalDiff,
+		CorrectDifficulty: correctDiff,
+	})
+	c = ScoreComponents{
+		Accuracy:    scoreParts.Accuracy,
+		Difficulty:  scoreParts.Difficulty,
+		Consistency: scoreParts.Consistency,
+		Speed:       scoreParts.Speed,
+		Activity:    scoreParts.Activity,
 	}
-	if totalDiff > 0 {
-		c.Difficulty = correctDiff / totalDiff
-	}
-	c.Speed = speedAvg
-	c.Consistency = streakTier(streak)
-	c.Activity = activityTier(completed)
 
-	qwishScore := scaleQwish(c.Accuracy*50 + c.Difficulty*20 + c.Consistency*15 + c.Speed*10 + c.Activity*5)
+	qwishScore := scaleQwish(scoring.CalculateQwishScore(scoring.QwishScoreFactors{
+		TotalCorrect:      int(totalCorrect),
+		TotalQuestions:    int(totalQuestions),
+		Streak:            streak,
+		ActivityCount:     completed,
+		SpeedSum:          speedAvg * float64(totalCorrect),
+		TotalDifficulty:   totalDiff,
+		CorrectDifficulty: correctDiff,
+	}))
 
 	domains, err := s.domainPerformance(ctx, userID)
 	if err != nil {
@@ -1001,40 +1017,6 @@ func trendLabel(b time.Time, unit string) string {
 		return b.Format("Jan")
 	}
 	return b.Format("1/2") // month/day of the week bucket
-}
-
-func streakTier(streak int) float64 {
-	switch {
-	case streak >= 30:
-		return 1.0
-	case streak >= 15:
-		return 0.8
-	case streak >= 7:
-		return 0.6
-	case streak >= 3:
-		return 0.4
-	case streak >= 1:
-		return 0.2
-	default:
-		return 0
-	}
-}
-
-func activityTier(count int) float64 {
-	switch {
-	case count >= 50:
-		return 1.0
-	case count >= 20:
-		return 0.8
-	case count >= 10:
-		return 0.6
-	case count >= 5:
-		return 0.4
-	case count >= 1:
-		return 0.2
-	default:
-		return 0
-	}
 }
 
 func round1(v float64) float64 {

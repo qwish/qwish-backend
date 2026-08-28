@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -12,16 +13,16 @@ import (
 
 // Config holds point economy config values loaded at attempt start.
 type Config struct {
-	BasePointsPerQuestion  float64            `json:"base_points_per_question"`
-	PerformanceBonusPct75  float64            `json:"performance_bonus_pct_75"`
-	DeductionPctBelow50    float64            `json:"deduction_pct_below_50"`
-	StreakBonus7Day        float64            `json:"streak_bonus_7_day"`
-	StreakBonus15Day       float64            `json:"streak_bonus_15_day"`
-	StreakBonus30Day       float64            `json:"streak_bonus_30_day"`
-	ComboMultiplierStep    float64            `json:"combo_multiplier_step"`
-	ClueRevealDeductionPer float64            `json:"clue_reveal_deduction_per_clue"`
-	PointsExpiryMonths     float64            `json:"points_expiry_months"`
-	ConfidenceMultipliers  ConfidenceTable    `json:"confidence_multiplier_table"`
+	BasePointsPerQuestion  float64         `json:"base_points_per_question"`
+	PerformanceBonusPct75  float64         `json:"performance_bonus_pct_75"`
+	DeductionPctBelow50    float64         `json:"deduction_pct_below_50"`
+	StreakBonus7Day        float64         `json:"streak_bonus_7_day"`
+	StreakBonus15Day       float64         `json:"streak_bonus_15_day"`
+	StreakBonus30Day       float64         `json:"streak_bonus_30_day"`
+	ComboMultiplierStep    float64         `json:"combo_multiplier_step"`
+	ClueRevealDeductionPer float64         `json:"clue_reveal_deduction_per_clue"`
+	PointsExpiryMonths     float64         `json:"points_expiry_months"`
+	ConfidenceMultipliers  ConfidenceTable `json:"confidence_multiplier_table"`
 }
 
 type ConfidenceTable struct {
@@ -93,15 +94,15 @@ func loadConfigUncached(ctx context.Context, db *pgxpool.Pool) (*Config, error) 
 	}
 
 	cfg := &Config{
-		BasePointsPerQuestion: parseFloat(kv["base_points_per_question"], 10),
-		PerformanceBonusPct75: parseFloat(kv["performance_bonus_pct_75"], 20),
-		DeductionPctBelow50:   parseFloat(kv["deduction_pct_below_50"], 50),
-		StreakBonus7Day:       parseFloat(kv["streak_bonus_7_day"], 50),
-		StreakBonus15Day:      parseFloat(kv["streak_bonus_15_day"], 100),
-		StreakBonus30Day:      parseFloat(kv["streak_bonus_30_day"], 250),
-		ComboMultiplierStep:   parseFloat(kv["combo_multiplier_step"], 0.5),
+		BasePointsPerQuestion:  parseFloat(kv["base_points_per_question"], 10),
+		PerformanceBonusPct75:  parseFloat(kv["performance_bonus_pct_75"], 20),
+		DeductionPctBelow50:    parseFloat(kv["deduction_pct_below_50"], 50),
+		StreakBonus7Day:        parseFloat(kv["streak_bonus_7_day"], 50),
+		StreakBonus15Day:       parseFloat(kv["streak_bonus_15_day"], 100),
+		StreakBonus30Day:       parseFloat(kv["streak_bonus_30_day"], 250),
+		ComboMultiplierStep:    parseFloat(kv["combo_multiplier_step"], 0.5),
 		ClueRevealDeductionPer: parseFloat(kv["clue_reveal_deduction_per_clue"], 0.25),
-		PointsExpiryMonths:    parseFloat(kv["points_expiry_months"], 6),
+		PointsExpiryMonths:     parseFloat(kv["points_expiry_months"], 6),
 	}
 
 	// Confidence table
@@ -238,8 +239,6 @@ func sliceEqual(a, b []string) bool {
 	return true
 }
 
-
-
 // ConfigJSON returns the config as JSON for snapshotting.
 func (c *Config) JSON() ([]byte, error) {
 	return json.Marshal(c)
@@ -268,58 +267,56 @@ type QwishScoreFactors struct {
 	CorrectDifficulty float64
 }
 
+// QwishScoreComponents are the normalized (0–1) inputs to the learner rating.
+// Accuracy uses a 50/50 Beta prior so a small sample cannot produce an
+// artificially perfect score. Streak and activity use smooth curves rather
+// than milestone jumps.
+type QwishScoreComponents struct {
+	Accuracy    float64
+	Difficulty  float64
+	Consistency float64
+	Speed       float64
+	Activity    float64
+}
+
+const (
+	accuracyPriorCorrect   = 5.0
+	accuracyPriorIncorrect = 5.0
+	streakCurveDays        = 14.0
+	activityCurveQuizzes   = 20.0
+)
+
+// CalculateQwishScoreComponents returns the normalized inputs used by both
+// per-attempt scoring and the lifetime Insights rating. Keeping this in the
+// scoring package prevents the two endpoints from drifting apart.
+func CalculateQwishScoreComponents(f QwishScoreFactors) QwishScoreComponents {
+	var c QwishScoreComponents
+	if f.TotalQuestions > 0 {
+		c.Accuracy = (float64(f.TotalCorrect) + accuracyPriorCorrect) /
+			(float64(f.TotalQuestions) + accuracyPriorCorrect + accuracyPriorIncorrect)
+	}
+	if f.TotalDifficulty > 0 {
+		c.Difficulty = f.CorrectDifficulty / f.TotalDifficulty
+	}
+	if f.TotalCorrect > 0 {
+		c.Speed = f.SpeedSum / float64(f.TotalCorrect)
+	}
+	if f.Streak > 0 {
+		c.Consistency = 1 - math.Exp(-float64(f.Streak)/streakCurveDays)
+	}
+	if f.ActivityCount > 0 {
+		c.Activity = 1 - math.Exp(-float64(f.ActivityCount)/activityCurveQuizzes)
+	}
+	return c
+}
+
 func CalculateQwishScore(f QwishScoreFactors) float64 {
 	if f.TotalQuestions == 0 {
 		return 0
 	}
 
-	// 1. Accuracy (50%)
-	accuracy := float64(f.TotalCorrect) / float64(f.TotalQuestions)
-	accuracyScore := 50.0 * accuracy
-
-	// 2. Difficulty (20%)
-	difficultyScore := 0.0
-	if f.TotalDifficulty > 0 {
-		difficultyScore = 20.0 * (f.CorrectDifficulty / f.TotalDifficulty)
-	}
-
-	// 3. Consistency (15%)
-	consistencyFraction := 0.0
-	if f.Streak >= 30 {
-		consistencyFraction = 1.0
-	} else if f.Streak >= 15 {
-		consistencyFraction = 0.8
-	} else if f.Streak >= 7 {
-		consistencyFraction = 0.6
-	} else if f.Streak >= 3 {
-		consistencyFraction = 0.4
-	} else if f.Streak >= 1 {
-		consistencyFraction = 0.2
-	}
-	consistencyScore := 15.0 * consistencyFraction
-
-	// 4. Speed (10%)
-	speedScore := 0.0
-	if f.TotalCorrect > 0 {
-		speedScore = 10.0 * (f.SpeedSum / float64(f.TotalCorrect))
-	}
-
-	// 5. Activity (5%)
-	activityFraction := 0.0
-	if f.ActivityCount >= 50 {
-		activityFraction = 1.0
-	} else if f.ActivityCount >= 20 {
-		activityFraction = 0.8
-	} else if f.ActivityCount >= 10 {
-		activityFraction = 0.6
-	} else if f.ActivityCount >= 5 {
-		activityFraction = 0.4
-	} else if f.ActivityCount >= 1 {
-		activityFraction = 0.2
-	}
-	activityScore := 5.0 * activityFraction
-
-	return accuracyScore + difficultyScore + consistencyScore + speedScore + activityScore
+	c := CalculateQwishScoreComponents(f)
+	return c.Accuracy*50 + c.Difficulty*20 + c.Consistency*15 + c.Speed*10 + c.Activity*5
 }
 
 // GetQuestionDifficultyCoefficient returns the question-type difficulty prior.

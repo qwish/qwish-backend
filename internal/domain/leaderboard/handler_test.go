@@ -123,6 +123,9 @@ func TestGetReturnsOnlyEligibleStudents(t *testing.T) {
 			if response.Data.Entries[0].UserID != studentID || response.Data.MyRank != 1 {
 				t.Fatalf("student result/rank = entries=%+v my_rank=%d", response.Data.Entries, response.Data.MyRank)
 			}
+			if response.Data.Entries[0].InstitutionName == nil || *response.Data.Entries[0].InstitutionName == "" {
+				t.Fatalf("student institution name missing: entries=%+v", response.Data.Entries)
+			}
 		})
 	}
 }

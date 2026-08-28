@@ -1225,23 +1225,28 @@ Returns the result of a completed attempt.
 | `domain` | Optional domain slug; filters either scope | — |
 | `page`, `limit` | — | page=1, limit=50 |
 
-Rankings are live and use cumulative `total_points`. Student accounts must
-complete five different quizzes first; otherwise the endpoint returns
+Rankings are live and ordered by the server-calculated `qwish_score`; cumulative
+`total_points` is retained as supporting data. Student accounts must complete
+five different quizzes first; otherwise the endpoint returns
 `403 LEADERBOARD_LOCKED`. Students appear in rankings after the same five-quiz
 threshold. Teachers and other non-student accounts never appear in rankings.
-Global entries omit `institution_name`.
+Institution names are included for global and institution-scoped entries.
 
 ### Response `200` (paginated)
 ```json
 {
   "scope":     "institution",
   "my_rank":   3,
+  "my_qwish_score": 712.5,
+  "my_institution_name": "Qwish Academy",
   "my_points": 1250,
   "entries": [
     {
       "rank":           1,
       "user_id":        "uuid",
       "display_name":   "Bob Jones",
+      "institution_name": "Qwish Academy",
+      "qwish_score":    745.2,
       "total_points":   2100,
       "current_streak": 9
     }

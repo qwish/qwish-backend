@@ -252,7 +252,7 @@ A streak increments by 1 each calendar day (institution timezone) the student co
 * Top 3 displayed with gold, silver, and bronze treatment.  
 * Each row: rank, display name, total points, current streak flame.  
 * The current student’s rank is pinned as a floating card at the bottom of the screen, always visible while scrolling.  
-* Rankings refresh every Monday at 00:01 UTC.  
+* Rankings update live and are based on cumulative total points.
 * On the global leaderboard, only display\_name is shown — no institution name or full name.
 
 ## **8.3 Viewing Another Student’s Profile from Leaderboard**
@@ -326,4 +326,3 @@ A streak increments by 1 each calendar day (institution timezone) the student co
 | 6 | Should topic requests be visible to all teachers or only assigned teachers? | Product | Open |
 | 7 | Can a student un-report a quiz/question after submission? | Product | Open |
 | 8 | Attempt recovery: if app crashes mid-quiz, can the student resume? | Engineering | Open |
-

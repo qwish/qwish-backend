@@ -611,7 +611,9 @@ Returns the authenticated user's rank and top-percentile across all scopes.
   "institution_total":  120,
   "domain_rank":        87,
   "domain_total":       340,
-  "top_percentile":     12.5
+  "top_percentile":     12.5,
+  "distinct_quizzes_completed": 7,
+  "leaderboard_unlocked": true
 }
 ```
 
@@ -620,6 +622,8 @@ Returns the authenticated user's rank and top-percentile across all scopes.
 | `top_percentile` | `float` | e.g. `12.5` → "Top 12.5%" of all active users |
 | `institution_rank` / `institution_total` | `int` | Omitted if user has no institution |
 | `domain_rank` / `domain_total` | `int` | Omitted if user's `domain` is not set |
+| `distinct_quizzes_completed` | `int` | Authoritative progress toward leaderboard eligibility |
+| `leaderboard_unlocked` | `bool` | Students unlock at five different completed quizzes; teachers are eligible immediately |
 
 ---
 
@@ -1204,7 +1208,14 @@ Returns the result of a completed attempt.
 | Param | Values | Default |
 |-------|--------|---------|
 | `scope` | `institution`, `global` | `institution` |
+| `domain` | Optional domain slug; filters either scope | — |
 | `page`, `limit` | — | page=1, limit=50 |
+
+Rankings are live and use cumulative `total_points`. Student accounts must
+complete five different quizzes first; otherwise the endpoint returns
+`403 LEADERBOARD_LOCKED`. Students appear in rankings after the same five-quiz
+threshold; teachers are eligible immediately. Global entries omit
+`institution_name`.
 
 ### Response `200` (paginated)
 ```json
@@ -3466,7 +3477,7 @@ Archives the group (owner only, `403` otherwise).
 ### GET `/study-groups/{groupId}/leaderboard`
 Members ranked by total points (private league). `403` if not a member.
 ```json
-[ { "user_id": "uuid", "display_name": "Asha", "role": "owner",
+[ { "rank": 1, "user_id": "uuid", "display_name": "Asha", "role": "owner",
     "total_points": 5200, "current_streak": 9, "joined_at": "..." } ]
 ```
 

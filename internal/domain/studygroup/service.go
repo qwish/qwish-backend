@@ -38,6 +38,7 @@ type Group struct {
 }
 
 type Member struct {
+	Rank          int       `json:"rank"`
 	UserID        string    `json:"user_id"`
 	DisplayName   string    `json:"display_name"`
 	Role          string    `json:"role"`
@@ -171,18 +172,21 @@ func (s *Service) Archive(ctx context.Context, userID, groupID string) error {
 func (s *Service) Leaderboard(ctx context.Context, userID, groupID string) ([]Member, error) {
 	// Membership check.
 	var exists bool
-	s.db.QueryRow(ctx,
+	if err := s.db.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM study_group_members WHERE group_id=$1 AND user_id=$2)`,
-		groupID, userID).Scan(&exists)
+		groupID, userID).Scan(&exists); err != nil {
+		return nil, err
+	}
 	if !exists {
 		return nil, ErrForbidden
 	}
 	rows, err := s.db.Query(ctx,
-		`SELECT u.id, u.display_name, m.role, u.total_points, u.current_streak, m.joined_at
+		`SELECT RANK() OVER (ORDER BY u.total_points DESC),
+		        u.id, u.display_name, m.role, u.total_points, u.current_streak, m.joined_at
 		 FROM study_group_members m
-		 JOIN users u ON u.id = m.user_id AND u.deleted_at IS NULL
+		 JOIN users u ON u.id = m.user_id AND u.deleted_at IS NULL AND u.status='active'
 		 WHERE m.group_id = $1
-		 ORDER BY u.total_points DESC, u.current_streak DESC`, groupID)
+		 ORDER BY u.total_points DESC, u.current_streak DESC, u.id`, groupID)
 	if err != nil {
 		return nil, err
 	}
@@ -190,8 +194,13 @@ func (s *Service) Leaderboard(ctx context.Context, userID, groupID string) ([]Me
 	var list []Member
 	for rows.Next() {
 		var m Member
-		rows.Scan(&m.UserID, &m.DisplayName, &m.Role, &m.TotalPoints, &m.CurrentStreak, &m.JoinedAt)
+		if err := rows.Scan(&m.Rank, &m.UserID, &m.DisplayName, &m.Role, &m.TotalPoints, &m.CurrentStreak, &m.JoinedAt); err != nil {
+			return nil, err
+		}
 		list = append(list, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	if list == nil {
 		list = []Member{}

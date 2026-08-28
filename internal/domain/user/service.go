@@ -289,13 +289,15 @@ func (s *Service) GetProfileViews(ctx context.Context, userID string) (*ProfileV
 // ── Rank & percentile ─────────────────────────────────────────────────────────
 
 type RankInfo struct {
-	GlobalRank    int     `json:"global_rank"`
-	GlobalTotal   int     `json:"global_total"`
-	InstRank      *int    `json:"institution_rank,omitempty"`
-	InstTotal     *int    `json:"institution_total,omitempty"`
-	DomainRank    *int    `json:"domain_rank,omitempty"`
-	DomainTotal   *int    `json:"domain_total,omitempty"`
-	TopPercentile float64 `json:"top_percentile"` // e.g. 12.5 → "Top 12.5%"
+	GlobalRank               int     `json:"global_rank"`
+	GlobalTotal              int     `json:"global_total"`
+	InstRank                 *int    `json:"institution_rank,omitempty"`
+	InstTotal                *int    `json:"institution_total,omitempty"`
+	DomainRank               *int    `json:"domain_rank,omitempty"`
+	DomainTotal              *int    `json:"domain_total,omitempty"`
+	TopPercentile            float64 `json:"top_percentile"` // e.g. 12.5 → "Top 12.5%"
+	DistinctQuizzesCompleted int     `json:"distinct_quizzes_completed"`
+	LeaderboardUnlocked      bool    `json:"leaderboard_unlocked"`
 }
 
 func (s *Service) GetRank(ctx context.Context, userID, instID string) (*RankInfo, error) {
@@ -307,21 +309,40 @@ func (s *Service) GetRank(ctx context.Context, userID, instID string) (*RankInfo
 	// only surfaced below when applicable; NULLIF guards the empty instID so the
 	// ::uuid cast doesn't blow up.
 	var domain *string
+	var role string
 	var ir, it, dr, dt int
 	err := s.db.QueryRow(ctx, `
-		WITH me AS (SELECT total_points, domain FROM users WHERE id = $1)
+		WITH me AS (
+			SELECT total_points, domain, role FROM users WHERE id=$1
+		), eligible AS (
+			SELECT u.id, u.total_points, u.domain, u.institution_id
+			  FROM users u
+			 WHERE u.status='active' AND u.role IN ('student','teacher')
+			   AND (u.role='teacher' OR (
+				SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa
+				 WHERE qa.user_id=u.id AND qa.status='completed'
+			   ) >= 5)
+		)
 		SELECT
 			(SELECT domain FROM me),
-			(SELECT COUNT(*)+1 FROM users WHERE status='active' AND total_points > (SELECT total_points FROM me)),
-			(SELECT COUNT(*) FROM users WHERE status='active'),
-			(SELECT COUNT(*)+1 FROM users WHERE institution_id = NULLIF($2,'')::uuid AND status='active' AND total_points > (SELECT total_points FROM me)),
-			(SELECT COUNT(*) FROM users WHERE institution_id = NULLIF($2,'')::uuid AND status='active'),
-			(SELECT COUNT(*)+1 FROM users WHERE domain = (SELECT domain FROM me) AND status='active' AND total_points > (SELECT total_points FROM me)),
-			(SELECT COUNT(*) FROM users WHERE domain = (SELECT domain FROM me) AND status='active')`,
+			(SELECT role FROM me),
+			(SELECT COUNT(DISTINCT quiz_id) FROM quiz_attempts WHERE user_id=$1 AND status='completed'),
+			(SELECT COUNT(*)+1 FROM eligible WHERE total_points>(SELECT total_points FROM me)),
+			(SELECT COUNT(*) FROM eligible),
+			(SELECT COUNT(*)+1 FROM eligible WHERE institution_id=NULLIF($2,'')::uuid AND total_points>(SELECT total_points FROM me)),
+			(SELECT COUNT(*) FROM eligible WHERE institution_id=NULLIF($2,'')::uuid),
+			(SELECT COUNT(*)+1 FROM eligible WHERE LOWER(domain)=LOWER((SELECT domain FROM me)) AND total_points>(SELECT total_points FROM me)),
+			(SELECT COUNT(*) FROM eligible WHERE LOWER(domain)=LOWER((SELECT domain FROM me)))`,
 		userID, instID,
-	).Scan(&domain, &ri.GlobalRank, &ri.GlobalTotal, &ir, &it, &dr, &dt)
+	).Scan(&domain, &role, &ri.DistinctQuizzesCompleted, &ri.GlobalRank, &ri.GlobalTotal, &ir, &it, &dr, &dt)
 	if err != nil {
 		return nil, err
+	}
+	ri.LeaderboardUnlocked = role == "teacher" || (role == "student" && ri.DistinctQuizzesCompleted >= 5)
+	if !ri.LeaderboardUnlocked {
+		ri.GlobalRank = 0
+		ri.GlobalTotal = 0
+		return ri, nil
 	}
 
 	if ri.GlobalTotal > 0 {

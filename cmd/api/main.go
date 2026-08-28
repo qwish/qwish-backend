@@ -395,7 +395,7 @@ func main() {
 				r.Get("/users/me/points", pointsH.GetBalance)
 				r.Get("/users/me/points/ledger", pointsH.GetLedger)
 				r.Get("/users/me/streak", streakH.GetStreak)
-				r.Get("/users/me/rank", userH.GetMyRank)
+				r.With(mw.RateLimitByUser(120, time.Minute)).Get("/users/me/rank", userH.GetMyRank)
 				r.Get("/users/me/profile-views", userH.GetMyProfileViews)
 				r.Get("/users/me/milestones", userH.GetMyMilestones)
 				r.Get("/users/me/education", userH.GetMyEducation)
@@ -488,7 +488,7 @@ func main() {
 				r.Get("/attempts/{attemptId}", attemptH.GetResult)
 
 				// Leaderboard
-				r.Get("/leaderboard", leaderboardH.Get)
+				r.With(mw.RateLimitByUser(120, time.Minute)).Get("/leaderboard", leaderboardH.Get)
 
 				// Topic requests (student)
 				r.Post("/topic-requests", topicH.Create)

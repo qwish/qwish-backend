@@ -8,13 +8,13 @@ import (
 	"github.com/qwish/backend/internal/middleware"
 )
 
+const quizzesRequiredToUnlock = 5
+
 type Handler struct {
 	db *pgxpool.Pool
 }
 
-func NewHandler(db *pgxpool.Pool) *Handler {
-	return &Handler{db: db}
-}
+func NewHandler(db *pgxpool.Pool) *Handler { return &Handler{db: db} }
 
 type Entry struct {
 	Rank            int     `json:"rank"`
@@ -25,12 +25,17 @@ type Entry struct {
 	CurrentStreak   int     `json:"current_streak"`
 }
 
-// GET /api/v1/leaderboard?scope=institution|global
+// GET /api/v1/leaderboard?scope=institution|global&domain=<optional>
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	scope := r.URL.Query().Get("scope")
 	if scope == "" {
 		scope = "institution"
 	}
+	if scope != "institution" && scope != "global" {
+		middleware.BadRequest(w, "scope must be institution or global")
+		return
+	}
+
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if page < 1 {
@@ -44,121 +49,160 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.GetUserID(r)
 	instID := middleware.GetInstitutionID(r)
 	role := middleware.GetRole(r)
-
 	if role == "super_admin" {
-		if reqInstID := r.URL.Query().Get("institution_id"); reqInstID != "" {
-			instID = reqInstID
+		if requested := r.URL.Query().Get("institution_id"); requested != "" {
+			instID = requested
 		}
 	}
-
-	domain := r.URL.Query().Get("domain")
-
 	if scope == "institution" && instID == "" {
 		middleware.BadRequest(w, "institution_id is required for institution scope")
 		return
 	}
-	if scope == "domain" && domain == "" {
-		middleware.BadRequest(w, "domain is required for domain scope")
-		return
+
+	// The mobile lock is presentation only; enforce the same eligibility at the
+	// data boundary so a direct HTTP request cannot bypass it.
+	if role == "student" {
+		var completed int
+		if err := h.db.QueryRow(r.Context(),
+			`SELECT COUNT(DISTINCT quiz_id) FROM quiz_attempts WHERE user_id=$1 AND status='completed'`,
+			userID,
+		).Scan(&completed); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+		if completed < quizzesRequiredToUnlock {
+			middleware.Error(w, http.StatusForbidden, "LEADERBOARD_LOCKED", "complete 5 different quizzes to unlock the leaderboard")
+			return
+		}
 	}
 
+	domain := r.URL.Query().Get("domain")
 	var total int
 	var entries []Entry
 
 	if scope == "institution" {
-		h.db.QueryRow(r.Context(),
-			`SELECT COUNT(*) FROM users WHERE institution_id=$1 AND status='active' AND role IN ('student','teacher')`, instID,
-		).Scan(&total)
-
-		rows, err := h.db.Query(r.Context(),
-			`SELECT u.id, u.display_name, i.name, u.total_points, u.current_streak,
-			        RANK() OVER (ORDER BY u.total_points DESC) as rank
-			 FROM users u LEFT JOIN institutions i ON i.id = u.institution_id
+		if err := h.db.QueryRow(r.Context(), `
+			SELECT COUNT(*) FROM users u
 			 WHERE u.institution_id=$1 AND u.status='active' AND u.role IN ('student','teacher')
-			 ORDER BY u.total_points DESC LIMIT $2 OFFSET $3`,
-			instID, limit, offset)
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var e Entry
-				rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.TotalPoints, &e.CurrentStreak, &e.Rank)
-				entries = append(entries, e)
-			}
+			   AND (u.role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5)
+			   AND ($2='' OR LOWER(u.domain)=LOWER($2))`, instID, domain).Scan(&total); err != nil {
+			middleware.InternalError(w)
+			return
 		}
-	} else if scope == "domain" {
-		h.db.QueryRow(r.Context(),
-			`SELECT COUNT(*) FROM users WHERE LOWER(domain)=LOWER($1) AND status='active' AND role IN ('student','teacher')`, domain,
-		).Scan(&total)
 
-		rows, err := h.db.Query(r.Context(),
-			`SELECT u.id, u.display_name, i.name, u.total_points, u.current_streak,
-			        RANK() OVER (ORDER BY u.total_points DESC) as rank
-			 FROM users u LEFT JOIN institutions i ON i.id = u.institution_id
-			 WHERE LOWER(u.domain)=LOWER($1) AND u.status='active' AND u.role IN ('student','teacher')
-			 ORDER BY u.total_points DESC LIMIT $2 OFFSET $3`,
-			domain, limit, offset)
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var e Entry
-				rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.TotalPoints, &e.CurrentStreak, &e.Rank)
-				entries = append(entries, e)
+		rows, err := h.db.Query(r.Context(), `
+			SELECT u.id, u.display_name, i.name, u.total_points, u.current_streak,
+			       RANK() OVER (ORDER BY u.total_points DESC) AS rank
+			  FROM users u LEFT JOIN institutions i ON i.id=u.institution_id
+			 WHERE u.institution_id=$1 AND u.status='active' AND u.role IN ('student','teacher')
+			   AND (u.role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5)
+			   AND ($2='' OR LOWER(u.domain)=LOWER($2))
+			 ORDER BY u.total_points DESC, u.id LIMIT $3 OFFSET $4`, instID, domain, limit, offset)
+		if err != nil {
+			middleware.InternalError(w)
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var e Entry
+			if err := rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.TotalPoints, &e.CurrentStreak, &e.Rank); err != nil {
+				middleware.InternalError(w)
+				return
 			}
+			entries = append(entries, e)
+		}
+		if rows.Err() != nil {
+			middleware.InternalError(w)
+			return
 		}
 	} else {
-		h.db.QueryRow(r.Context(),
-			`SELECT COUNT(*) FROM users WHERE status='active' AND role IN ('student','teacher')`,
-		).Scan(&total)
-
-		rows, err := h.db.Query(r.Context(),
-			`SELECT u.id, u.display_name, i.name, u.total_points, u.current_streak,
-			        RANK() OVER (ORDER BY u.total_points DESC) as rank
-			 FROM users u LEFT JOIN institutions i ON i.id = u.institution_id
+		if err := h.db.QueryRow(r.Context(), `
+			SELECT COUNT(*) FROM users u
 			 WHERE u.status='active' AND u.role IN ('student','teacher')
-			 ORDER BY u.total_points DESC LIMIT $1 OFFSET $2`,
-			limit, offset)
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var e Entry
-				rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.TotalPoints, &e.CurrentStreak, &e.Rank)
-				entries = append(entries, e)
+			   AND (u.role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5)
+			   AND ($1='' OR LOWER(u.domain)=LOWER($1))`, domain).Scan(&total); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+
+		rows, err := h.db.Query(r.Context(), `
+			SELECT u.id, u.display_name, NULL::text, u.total_points, u.current_streak,
+			       RANK() OVER (ORDER BY u.total_points DESC) AS rank
+			  FROM users u
+			 WHERE u.status='active' AND u.role IN ('student','teacher')
+			   AND (u.role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5)
+			   AND ($1='' OR LOWER(u.domain)=LOWER($1))
+			 ORDER BY u.total_points DESC, u.id LIMIT $2 OFFSET $3`, domain, limit, offset)
+		if err != nil {
+			middleware.InternalError(w)
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var e Entry
+			if err := rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.TotalPoints, &e.CurrentStreak, &e.Rank); err != nil {
+				middleware.InternalError(w)
+				return
 			}
+			entries = append(entries, e)
+		}
+		if rows.Err() != nil {
+			middleware.InternalError(w)
+			return
 		}
 	}
-
 	if entries == nil {
 		entries = []Entry{}
 	}
 
-	// Get current user's rank
 	var myRank int
 	var myPoints int64
 	if role == "student" || role == "teacher" {
+		var err error
 		if scope == "institution" {
-			h.db.QueryRow(r.Context(),
-				`SELECT COUNT(*)+1 FROM users WHERE institution_id=$1 AND total_points > (SELECT total_points FROM users WHERE id=$2) AND status='active'`,
-				instID, userID,
-			).Scan(&myRank)
-		} else if scope == "domain" {
-			h.db.QueryRow(r.Context(),
-				`SELECT COUNT(*)+1 FROM users WHERE LOWER(domain)=LOWER($1) AND total_points > (SELECT total_points FROM users WHERE id=$2) AND status='active'`,
-				domain, userID,
-			).Scan(&myRank)
+			err = h.db.QueryRow(r.Context(), `
+				WITH me AS (
+					SELECT total_points, institution_id, domain FROM users
+					 WHERE id=$2 AND status='active' AND role IN ('student','teacher')
+				)
+				SELECT CASE WHEN EXISTS(
+					SELECT 1 FROM me WHERE institution_id=$1 AND ($3='' OR LOWER(domain)=LOWER($3))
+				) THEN (
+					SELECT COUNT(*)+1 FROM users
+					 WHERE institution_id=$1 AND status='active' AND role IN ('student','teacher')
+					   AND (role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=users.id AND qa.status='completed') >= 5)
+					   AND ($3='' OR LOWER(domain)=LOWER($3))
+					   AND total_points>(SELECT total_points FROM me)
+				) ELSE 0 END,
+				COALESCE((SELECT total_points FROM me),0)`, instID, userID, domain).Scan(&myRank, &myPoints)
 		} else {
-			h.db.QueryRow(r.Context(),
-				`SELECT COUNT(*)+1 FROM users WHERE total_points > (SELECT total_points FROM users WHERE id=$1) AND status='active'`,
-				userID,
-			).Scan(&myRank)
+			err = h.db.QueryRow(r.Context(), `
+				WITH me AS (
+					SELECT total_points, domain FROM users
+					 WHERE id=$1 AND status='active' AND role IN ('student','teacher')
+				)
+				SELECT CASE WHEN EXISTS(
+					SELECT 1 FROM me WHERE $2='' OR LOWER(domain)=LOWER($2)
+				) THEN (
+					SELECT COUNT(*)+1 FROM users
+					 WHERE status='active' AND role IN ('student','teacher')
+					   AND (role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=users.id AND qa.status='completed') >= 5)
+					   AND ($2='' OR LOWER(domain)=LOWER($2))
+					   AND total_points>(SELECT total_points FROM me)
+				) ELSE 0 END,
+				COALESCE((SELECT total_points FROM me),0)`, userID, domain).Scan(&myRank, &myPoints)
 		}
-		h.db.QueryRow(r.Context(), `SELECT total_points FROM users WHERE id=$1`, userID).Scan(&myPoints)
+		if err != nil {
+			middleware.InternalError(w)
+			return
+		}
 	}
 
 	middleware.JSONWithMeta(w, http.StatusOK, map[string]interface{}{
 		"scope":     scope,
+		"domain":    domain,
 		"my_rank":   myRank,
 		"my_points": myPoints,
 		"entries":   entries,
 	}, &middleware.Meta{Page: page, Limit: limit, Total: total})
 }
-

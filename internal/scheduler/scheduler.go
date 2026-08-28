@@ -144,7 +144,8 @@ func (s *Scheduler) sendStreakRecoveryAlerts(ctx context.Context) {
 	log.Printf("[cron] streak-recovery alerts sent (%d)", len(targets))
 }
 
-// SnapshotLeaderboard runs every Monday at 00:01 UTC.
+// SnapshotLeaderboard records a weekly historical snapshot for reporting and
+// auditing. The public leaderboard itself is live.
 func (s *Scheduler) SnapshotLeaderboard(ctx context.Context) error {
 	log.Println("[cron] running snapshot-leaderboard")
 
@@ -154,7 +155,8 @@ func (s *Scheduler) SnapshotLeaderboard(ctx context.Context) error {
 	rows, err := s.db.Query(ctx,
 		`SELECT id, display_name, total_points, current_streak,
 		        RANK() OVER (ORDER BY total_points DESC) as rank
-		 FROM users WHERE status='active' AND role IN ('student','teacher')
+		 FROM users u WHERE u.status='active' AND u.role IN ('student','teacher')
+		   AND (u.role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5)
 		 ORDER BY total_points DESC LIMIT 100`)
 	if err != nil {
 		return err
@@ -192,7 +194,8 @@ func (s *Scheduler) SnapshotLeaderboard(ctx context.Context) error {
 		         ROW_NUMBER() OVER (PARTITION BY u.institution_id ORDER BY u.total_points DESC) AS rn
 		    FROM users u
 		    JOIN institutions i ON i.id = u.institution_id AND i.status = 'verified'
-		   WHERE u.status = 'active' AND u.role IN ('student','teacher')
+			   WHERE u.status = 'active' AND u.role IN ('student','teacher')
+			     AND (u.role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5)
 		)
 		INSERT INTO leaderboard_snapshots (scope, institution_id, week_start, rankings)
 		SELECT 'institution', institution_id, $1,
@@ -223,7 +226,8 @@ func (s *Scheduler) SendStreakNudges(ctx context.Context) error {
 		`SELECT u.id, u.current_streak
 		 FROM users u
 		 LEFT JOIN notification_preferences np ON np.user_id = u.id
-		 WHERE u.status='active' AND u.role IN ('student','teacher')
+			   WHERE u.status='active' AND u.role IN ('student','teacher')
+			     AND (u.role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5)
 		   AND u.current_streak > 0
 		   AND (u.last_completed_date IS NULL OR u.last_completed_date < CURRENT_DATE)
 		   AND COALESCE(np.push_streak_nudge, true)`)

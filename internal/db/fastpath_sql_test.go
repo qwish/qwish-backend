@@ -248,7 +248,9 @@ var fastPathStatements = map[string]string{
 		         ROW_NUMBER() OVER (PARTITION BY u.institution_id ORDER BY u.total_points DESC) AS rn
 		    FROM users u
 		    JOIN institutions i ON i.id = u.institution_id AND i.status = 'verified'
-		   WHERE u.status = 'active' AND u.role IN ('student','teacher')
+		   WHERE u.status = 'active' AND u.role='student'
+		     AND (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa
+		           WHERE qa.user_id=u.id AND qa.status='completed') >= 5
 		)
 		INSERT INTO leaderboard_snapshots (scope, institution_id, week_start, rankings)
 		SELECT 'institution', institution_id, $1,

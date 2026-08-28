@@ -317,11 +317,11 @@ func (s *Service) GetRank(ctx context.Context, userID, instID string) (*RankInfo
 		), eligible AS (
 			SELECT u.id, u.total_points, u.domain, u.institution_id
 			  FROM users u
-			 WHERE u.status='active' AND u.role IN ('student','teacher')
-			   AND (u.role='teacher' OR (
+			 WHERE u.status='active' AND u.role='student'
+			   AND (
 				SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa
 				 WHERE qa.user_id=u.id AND qa.status='completed'
-			   ) >= 5)
+			   ) >= 5
 		)
 		SELECT
 			(SELECT domain FROM me),
@@ -338,7 +338,7 @@ func (s *Service) GetRank(ctx context.Context, userID, instID string) (*RankInfo
 	if err != nil {
 		return nil, err
 	}
-	ri.LeaderboardUnlocked = role == "teacher" || (role == "student" && ri.DistinctQuizzesCompleted >= 5)
+	ri.LeaderboardUnlocked = role == "student" && ri.DistinctQuizzesCompleted >= 5
 	if !ri.LeaderboardUnlocked {
 		ri.GlobalRank = 0
 		ri.GlobalTotal = 0

@@ -623,7 +623,7 @@ Returns the authenticated user's rank and top-percentile across all scopes.
 | `institution_rank` / `institution_total` | `int` | Omitted if user has no institution |
 | `domain_rank` / `domain_total` | `int` | Omitted if user's `domain` is not set |
 | `distinct_quizzes_completed` | `int` | Authoritative progress toward leaderboard eligibility |
-| `leaderboard_unlocked` | `bool` | Students unlock at five different completed quizzes; teachers are eligible immediately |
+| `leaderboard_unlocked` | `bool` | Students unlock at five different completed quizzes; non-student accounts are not ranked |
 
 ---
 
@@ -1214,8 +1214,8 @@ Returns the result of a completed attempt.
 Rankings are live and use cumulative `total_points`. Student accounts must
 complete five different quizzes first; otherwise the endpoint returns
 `403 LEADERBOARD_LOCKED`. Students appear in rankings after the same five-quiz
-threshold; teachers are eligible immediately. Global entries omit
-`institution_name`.
+threshold. Teachers and other non-student accounts never appear in rankings.
+Global entries omit `institution_name`.
 
 ### Response `200` (paginated)
 ```json

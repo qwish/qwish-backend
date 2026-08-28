@@ -83,8 +83,8 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	if scope == "institution" {
 		if err := h.db.QueryRow(r.Context(), `
 			SELECT COUNT(*) FROM users u
-			 WHERE u.institution_id=$1 AND u.status='active' AND u.role IN ('student','teacher')
-			   AND (u.role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5)
+			 WHERE u.institution_id=$1 AND u.status='active' AND u.role='student'
+			   AND (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5
 			   AND ($2='' OR LOWER(u.domain)=LOWER($2))`, instID, domain).Scan(&total); err != nil {
 			middleware.InternalError(w)
 			return
@@ -94,8 +94,8 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 			SELECT u.id, u.display_name, i.name, u.total_points, u.current_streak,
 			       RANK() OVER (ORDER BY u.total_points DESC) AS rank
 			  FROM users u LEFT JOIN institutions i ON i.id=u.institution_id
-			 WHERE u.institution_id=$1 AND u.status='active' AND u.role IN ('student','teacher')
-			   AND (u.role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5)
+			 WHERE u.institution_id=$1 AND u.status='active' AND u.role='student'
+			   AND (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5
 			   AND ($2='' OR LOWER(u.domain)=LOWER($2))
 			 ORDER BY u.total_points DESC, u.id LIMIT $3 OFFSET $4`, instID, domain, limit, offset)
 		if err != nil {
@@ -118,8 +118,8 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	} else {
 		if err := h.db.QueryRow(r.Context(), `
 			SELECT COUNT(*) FROM users u
-			 WHERE u.status='active' AND u.role IN ('student','teacher')
-			   AND (u.role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5)
+			 WHERE u.status='active' AND u.role='student'
+			   AND (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5
 			   AND ($1='' OR LOWER(u.domain)=LOWER($1))`, domain).Scan(&total); err != nil {
 			middleware.InternalError(w)
 			return
@@ -129,8 +129,8 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 			SELECT u.id, u.display_name, NULL::text, u.total_points, u.current_streak,
 			       RANK() OVER (ORDER BY u.total_points DESC) AS rank
 			  FROM users u
-			 WHERE u.status='active' AND u.role IN ('student','teacher')
-			   AND (u.role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5)
+			 WHERE u.status='active' AND u.role='student'
+			   AND (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5
 			   AND ($1='' OR LOWER(u.domain)=LOWER($1))
 			 ORDER BY u.total_points DESC, u.id LIMIT $2 OFFSET $3`, domain, limit, offset)
 		if err != nil {
@@ -157,20 +157,20 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 
 	var myRank int
 	var myPoints int64
-	if role == "student" || role == "teacher" {
+	if role == "student" {
 		var err error
 		if scope == "institution" {
 			err = h.db.QueryRow(r.Context(), `
 				WITH me AS (
 					SELECT total_points, institution_id, domain FROM users
-					 WHERE id=$2 AND status='active' AND role IN ('student','teacher')
+					 WHERE id=$2 AND status='active' AND role='student'
 				)
 				SELECT CASE WHEN EXISTS(
 					SELECT 1 FROM me WHERE institution_id=$1 AND ($3='' OR LOWER(domain)=LOWER($3))
 				) THEN (
 					SELECT COUNT(*)+1 FROM users
-					 WHERE institution_id=$1 AND status='active' AND role IN ('student','teacher')
-					   AND (role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=users.id AND qa.status='completed') >= 5)
+					 WHERE institution_id=$1 AND status='active' AND role='student'
+					   AND (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=users.id AND qa.status='completed') >= 5
 					   AND ($3='' OR LOWER(domain)=LOWER($3))
 					   AND total_points>(SELECT total_points FROM me)
 				) ELSE 0 END,
@@ -179,14 +179,14 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 			err = h.db.QueryRow(r.Context(), `
 				WITH me AS (
 					SELECT total_points, domain FROM users
-					 WHERE id=$1 AND status='active' AND role IN ('student','teacher')
+					 WHERE id=$1 AND status='active' AND role='student'
 				)
 				SELECT CASE WHEN EXISTS(
 					SELECT 1 FROM me WHERE $2='' OR LOWER(domain)=LOWER($2)
 				) THEN (
 					SELECT COUNT(*)+1 FROM users
-					 WHERE status='active' AND role IN ('student','teacher')
-					   AND (role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=users.id AND qa.status='completed') >= 5)
+					 WHERE status='active' AND role='student'
+					   AND (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=users.id AND qa.status='completed') >= 5
 					   AND ($2='' OR LOWER(domain)=LOWER($2))
 					   AND total_points>(SELECT total_points FROM me)
 				) ELSE 0 END,

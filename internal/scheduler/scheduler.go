@@ -155,8 +155,8 @@ func (s *Scheduler) SnapshotLeaderboard(ctx context.Context) error {
 	rows, err := s.db.Query(ctx,
 		`SELECT id, display_name, total_points, current_streak,
 		        RANK() OVER (ORDER BY total_points DESC) as rank
-		 FROM users u WHERE u.status='active' AND u.role IN ('student','teacher')
-		   AND (u.role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5)
+		 FROM users u WHERE u.status='active' AND u.role='student'
+		   AND (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5
 		 ORDER BY total_points DESC LIMIT 100`)
 	if err != nil {
 		return err
@@ -194,8 +194,8 @@ func (s *Scheduler) SnapshotLeaderboard(ctx context.Context) error {
 		         ROW_NUMBER() OVER (PARTITION BY u.institution_id ORDER BY u.total_points DESC) AS rn
 		    FROM users u
 		    JOIN institutions i ON i.id = u.institution_id AND i.status = 'verified'
-			   WHERE u.status = 'active' AND u.role IN ('student','teacher')
-			     AND (u.role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5)
+			   WHERE u.status = 'active' AND u.role='student'
+			     AND (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5
 		)
 		INSERT INTO leaderboard_snapshots (scope, institution_id, week_start, rankings)
 		SELECT 'institution', institution_id, $1,
@@ -322,7 +322,8 @@ func (s *Scheduler) SendRankChangeAlerts(ctx context.Context) error {
 		          COALESCE(np.push_rank_changes, true) AS notify
 		   FROM users u
 		   LEFT JOIN notification_preferences np ON np.user_id = u.id
-		   WHERE u.status='active' AND u.role IN ('student','teacher')
+		   WHERE u.status='active' AND u.role='student'
+		     AND (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5
 		 ) ranked`)
 	if err != nil {
 		return err

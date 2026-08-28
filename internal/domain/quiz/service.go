@@ -19,16 +19,18 @@ func NewService(db *pgxpool.Pool) *Service {
 }
 
 type Quiz struct {
-	ID              string     `json:"id"`
-	InstitutionID   *string    `json:"institution_id,omitempty"`
-	CreatedBy       string     `json:"created_by"`
-	TeacherName     string     `json:"teacher_name,omitempty"`
-	InstitutionName string     `json:"institution_name,omitempty"`
-	Title           string     `json:"title"`
-	Description     *string    `json:"description,omitempty"`
-	Type            string     `json:"type"`
-	Visibility      string     `json:"visibility"`
-	Status          string     `json:"status"`
+	ID              string  `json:"id"`
+	InstitutionID   *string `json:"institution_id,omitempty"`
+	CreatedBy       string  `json:"created_by"`
+	TeacherName     string  `json:"teacher_name,omitempty"`
+	InstitutionName string  `json:"institution_name,omitempty"`
+	Title           string  `json:"title"`
+	Description     *string `json:"description,omitempty"`
+	Type            string  `json:"type"`
+	Visibility      string  `json:"visibility"`
+	Status          string  `json:"status"`
+	// QuestionCount is the number delivered to a learner. Learner-facing
+	// queries must never expose the larger authoring-bank size.
 	QuestionCount   int        `json:"question_count"`
 	TakerCount      int        `json:"taker_count"`
 	EndsAt          *time.Time `json:"ends_at,omitempty"`
@@ -130,7 +132,8 @@ const attemptStatsSelect = `SELECT COUNT(DISTINCT qa.user_id) AS taker_count,
 // studentListSelect is the SELECT/FROM prefix of the student quiz list query.
 // Shared with the profiling endpoint so profiled plans match production SQL.
 const studentListSelect = `SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
-		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
+		        q.title, q.description, q.type, q.visibility, q.status,
+		        LEAST(q.question_count, COALESCE(q.question_limit, q.question_count)) AS question_count,
 		        st.taker_count, q.ends_at, q.published_at, q.group_id, q.domain, q.subdomain, q.created_at,
 		        st.avg_score_pct, st.avg_seconds
 		 FROM quizzes q
@@ -219,7 +222,8 @@ func (s *Service) GetByID(ctx context.Context, quizID string) (*Quiz, error) {
 	q := &Quiz{}
 	err := s.db.QueryRow(ctx,
 		`SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
-		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
+		        q.title, q.description, q.type, q.visibility, q.status,
+		        LEAST(q.question_count, COALESCE(q.question_limit, q.question_count)) AS question_count,
 		        st.taker_count, q.ends_at, q.published_at, q.rejection_reason, q.group_id, q.domain, q.subdomain, q.created_at,
 		        st.avg_score_pct, st.avg_seconds
 		 FROM quizzes q

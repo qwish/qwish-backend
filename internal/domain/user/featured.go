@@ -13,7 +13,8 @@ const maxFeaturedQuizzes = 12
 var ErrInvalidFeaturedQuizzes = errors.New("featured quizzes must be unique valid quiz ids (maximum 12)")
 
 func (s *Service) GetFeaturedQuizzes(ctx context.Context) ([]RecommendedQuiz, error) {
-	rows, err := s.db.Query(ctx, `SELECT q.id, q.title, q.description, q.question_count, q.type,
+	rows, err := s.db.Query(ctx, `SELECT q.id, q.title, q.description,
+		LEAST(q.question_count, COALESCE(q.question_limit, q.question_count)) AS question_count, q.type,
 		q.domain, q.subdomain, q.published_at
 		FROM featured_quizzes f JOIN quizzes q ON q.id=f.quiz_id
 		WHERE q.visibility='public' AND q.status='published' AND q.deleted_at IS NULL

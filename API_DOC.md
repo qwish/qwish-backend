@@ -938,6 +938,20 @@ Returns a list of up to 5 personalized quiz recommendations (quizzes in the user
 
 ---
 
+## GET `/users/me/quiz-pick`
+**Auth required:** Yes
+
+Returns one random, currently available assessment that the authenticated
+student has never attempted. Quizzes matching the student's selected interests
+form the candidate pool. Students must select at least 10 unique topics first.
+Pass `exclude_id=<quiz UUID>` when refreshing from the detail screen to
+guarantee a different result.
+
+Returns `409 INTERESTS_REQUIRED` when the student has fewer than 10 selected
+topics. Returns `404 NO_QUIZ_AVAILABLE` when no matching unplayed assessment remains.
+
+---
+
 ## GET `/users/me/report-card`
 **Auth required:** Yes
 
@@ -3386,7 +3400,7 @@ Push alerts are delivered via FCM (existing `/users/me/devices` registration) an
 The same breakdown is emailed weekly to users with `email_weekly_insights=true`.
 
 ### GET `/users/me/insights/breakdown`
-Lifetime Qwish Score breakdown plus question-weighted domain/subdomain performance. `qwish_score` is the weighted sum of the five components, scaled to the 100–980 display range (every user starts at 100). `components` are lifetime fractions (0–1): accuracy 50%, difficulty 20%, consistency 15%, speed 10%, activity 5%. Each domain's `avg_score` is question-weighted accuracy (0–100); `low_sample` is true when fewer than 10 questions have been answered.
+Lifetime Qwish Score breakdown plus question-weighted domain/subdomain performance. `qwish_score` is the weighted sum of the five components, scaled to the 100–900 display range (every user starts at 100). `components` are lifetime fractions (0–1): accuracy 50%, difficulty 20%, consistency 15%, speed 10%, activity 5%. Each domain's `avg_score` is question-weighted accuracy (0–100); `low_sample` is true when fewer than 10 questions have been answered.
 ```json
 {
   "qwish_score": 737.1,
@@ -3408,7 +3422,7 @@ Lifetime Qwish Score breakdown plus question-weighted domain/subdomain performan
 ```
 
 ### GET `/users/me/insights/trend?range=4w|12w|all`
-Bucketed average `score_pct` over time for the insights chart, scaled to the same 100–980 range as `qwish_score`. `4w` → 4 weekly buckets, `12w` → 12 weekly, `all` → 12 monthly. Empty buckets carry the previous value forward so the line stays continuous.
+Bucketed average `score_pct` over time for the insights chart, scaled to the same 100–900 range as `qwish_score`. `4w` → 4 weekly buckets, `12w` → 12 weekly, `all` → 12 monthly. Empty buckets carry the previous value forward so the line stays continuous.
 ```json
 [
   { "label": "5/12", "value": 724.8 },

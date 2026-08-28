@@ -1,6 +1,14 @@
 package user
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/qwish/backend/internal/middleware"
+)
 
 func TestRecommendationReasonPriority(t *testing.T) {
 	tests := []struct {
@@ -20,5 +28,34 @@ func TestRecommendationReasonPriority(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPickMyQuizRejectsMalformedExclusionBeforeDatabaseAccess(t *testing.T) {
+	h := NewHandler(nil)
+	req := httptest.NewRequest(http.MethodGet, "/users/me/quiz-pick?exclude_id=not-a-uuid", nil)
+	ctx := context.WithValue(req.Context(), middleware.ContextKeyRole, "student")
+	recorder := httptest.NewRecorder()
+
+	h.PickMyQuiz(recorder, req.WithContext(ctx))
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	if !strings.Contains(recorder.Body.String(), "exclude_id must be a UUID") {
+		t.Fatalf("response did not explain invalid exclusion: %s", recorder.Body.String())
+	}
+}
+
+func TestPickMyQuizIsStudentOnlyBeforeDatabaseAccess(t *testing.T) {
+	h := NewHandler(nil)
+	req := httptest.NewRequest(http.MethodGet, "/users/me/quiz-pick", nil)
+	ctx := context.WithValue(req.Context(), middleware.ContextKeyRole, "teacher")
+	recorder := httptest.NewRecorder()
+
+	h.PickMyQuiz(recorder, req.WithContext(ctx))
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
 	}
 }

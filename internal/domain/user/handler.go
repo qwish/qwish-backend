@@ -10,6 +10,8 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -376,6 +378,40 @@ func (h *Handler) GetMyRecommendations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	middleware.JSON(w, http.StatusOK, recs)
+}
+
+// GET /api/v1/users/me/quiz-pick?exclude_id=<optional-current-quiz>
+func (h *Handler) PickMyQuiz(w http.ResponseWriter, r *http.Request) {
+	if middleware.GetRole(r) != "student" {
+		middleware.Forbidden(w)
+		return
+	}
+	excludeID := r.URL.Query().Get("exclude_id")
+	if excludeID != "" {
+		if _, err := uuid.Parse(excludeID); err != nil {
+			middleware.BadRequest(w, "exclude_id must be a UUID")
+			return
+		}
+	}
+	quiz, err := h.svc.PickQuiz(
+		r.Context(),
+		middleware.GetUserID(r),
+		middleware.GetInstitutionID(r),
+		excludeID,
+	)
+	if errors.Is(err, ErrInterestsRequired) {
+		middleware.Error(w, http.StatusConflict, "INTERESTS_REQUIRED", "select at least 10 topics before requesting a quiz")
+		return
+	}
+	if err == pgx.ErrNoRows {
+		middleware.Error(w, http.StatusNotFound, "NO_QUIZ_AVAILABLE", "no unplayed assessment is available")
+		return
+	}
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, quiz)
 }
 
 // GET /api/v1/quizzes/featured returns the current public featured set. The

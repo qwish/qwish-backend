@@ -17,8 +17,11 @@ var ErrProfilePrivate = errors.New("profile is private")
 
 var (
 	ErrInvalidLearningLanguage = errors.New("unsupported language")
-	ErrInvalidLearningTopics   = errors.New("unknown or excessive topics")
+	ErrInvalidLearningTopics   = errors.New("select between 10 and 50 valid topics")
+	ErrInterestsRequired       = errors.New("select at least 10 topics")
 )
+
+const MinLearningTopics = 10
 
 type Service struct {
 	db *pgxpool.Pool
@@ -564,7 +567,7 @@ func (s *Service) UpdateLearningPreferences(ctx context.Context, userID, languag
 	if language != "en" && language != "hi" && language != "mr" {
 		return nil, ErrInvalidLearningLanguage
 	}
-	if len(topics) == 0 || len(topics) > 50 {
+	if len(topics) < MinLearningTopics || len(topics) > 50 {
 		return nil, ErrInvalidLearningTopics
 	}
 	seen := make(map[string]struct{}, len(topics))
@@ -577,6 +580,9 @@ func (s *Service) UpdateLearningPreferences(ctx context.Context, userID, languag
 			seen[topic] = struct{}{}
 			clean = append(clean, topic)
 		}
+	}
+	if len(clean) < MinLearningTopics {
+		return nil, ErrInvalidLearningTopics
 	}
 	var valid int
 	if err := s.db.QueryRow(ctx,
@@ -796,7 +802,7 @@ type DomainPerf struct {
 }
 
 type InsightsBreakdown struct {
-	QwishScore float64         `json:"qwish_score"` // weighted components scaled to 100–980
+	QwishScore float64         `json:"qwish_score"` // weighted components scaled to 100–900
 	Components ScoreComponents `json:"components"`
 	Domains    []DomainPerf    `json:"domains"`
 }
@@ -937,7 +943,7 @@ func (s *Service) domainPerformance(ctx context.Context, userID string) ([]Domai
 
 type TrendPoint struct {
 	Label string  `json:"label"`
-	Value float64 `json:"value"` // avg score_pct scaled to 100–980, carried forward
+	Value float64 `json:"value"` // avg score_pct scaled to 100–900, carried forward
 }
 
 // GetScoreTrend returns bucketed average score_pct over time for the chart.
@@ -1039,10 +1045,10 @@ func round1(v float64) float64 {
 // starts at qwishScoreMin and tops out at qwishScoreMax.
 const (
 	qwishScoreMin = 100.0
-	qwishScoreMax = 980.0
+	qwishScoreMax = 900.0
 )
 
-// scaleQwish maps a 0–100 weighted score onto the [100, 980] display range.
+// scaleQwish maps a 0–100 weighted score onto the [100, 900] display range.
 func scaleQwish(pct float64) float64 {
 	s := qwishScoreMin + pct/100*(qwishScoreMax-qwishScoreMin)
 	if s < qwishScoreMin {
@@ -1092,7 +1098,8 @@ func (s *Service) GetRecommendations(ctx context.Context, userID, instID string)
 		   ) recent JOIN quizzes q ON q.id = recent.quiz_id
 		   WHERE q.domain IS NOT NULL GROUP BY q.domain
 		 ), candidates AS (
-		   SELECT q.id, q.title, q.description, q.question_count, q.type,
+		   SELECT q.id, q.title, q.description,
+		          LEAST(q.question_count, COALESCE(q.question_limit, q.question_count)) AS question_count, q.type,
 		          q.domain, q.subdomain, q.published_at,
 		          COALESCE(qd.difficulty, 0.60) AS difficulty,
 		          COALESCE(pop.completions, 0) AS completions,
@@ -1114,9 +1121,9 @@ func (s *Service) GetRecommendations(ctx context.Context, userID, instID string)
 		     AND (q.starts_at IS NULL OR q.starts_at <= now())
 		     AND (q.ends_at IS NULL OR q.ends_at > now())
 		     AND NOT EXISTS (
-		       SELECT 1 FROM quiz_attempts recent
-		       WHERE recent.user_id=$1 AND recent.quiz_id=q.id
-		         AND recent.status='completed' AND recent.completed_at >= now() - interval '14 days'
+		       SELECT 1 FROM quiz_attempts played
+		       WHERE played.user_id=$1 AND played.quiz_id=q.id
+		         AND played.status='completed'
 		     )
 		 )
 		 SELECT id, title, description, question_count, type, domain, subdomain, published_at,
@@ -1152,6 +1159,67 @@ func (s *Service) GetRecommendations(ctx context.Context, userID, instID string)
 		return s.GetFeaturedQuizzes(ctx)
 	}
 	return list, nil
+}
+
+// PickQuiz chooses one currently available assessment the learner has never
+// attempted. Selected interests define the pool; random ordering only happens
+// inside that server-authorized candidate set. excludeID lets the
+// detail screen request a different choice without trusting the client to
+// supply user history or interests.
+func (s *Service) PickQuiz(ctx context.Context, userID, instID, excludeID string) (*RecommendedQuiz, error) {
+	var interestCount int
+	if err := s.db.QueryRow(ctx,
+		`SELECT cardinality(ARRAY(
+		   SELECT DISTINCT unnest(COALESCE(interest_domains, '{}'::text[]))
+		 )) FROM users WHERE id=$1`,
+		userID,
+	).Scan(&interestCount); err != nil {
+		return nil, err
+	}
+	if interestCount < MinLearningTopics {
+		return nil, ErrInterestsRequired
+	}
+
+	q := &RecommendedQuiz{}
+	var interestMatch bool
+	err := s.db.QueryRow(ctx, `
+		WITH learner AS (
+		  SELECT COALESCE(interest_domains, '{}') AS interests
+		    FROM users WHERE id=$1
+		), candidates AS (
+		  SELECT q.id, q.title, q.description,
+		         LEAST(q.question_count, COALESCE(q.question_limit, q.question_count)) AS question_count,
+		         q.type, q.domain, q.subdomain, q.published_at,
+		         COALESCE(q.domain = ANY(l.interests) OR q.subdomain = ANY(l.interests), false) AS interest_match
+		    FROM quizzes q CROSS JOIN learner l
+		   WHERE (q.visibility='public' OR q.institution_id = NULLIF($2, '')::uuid)
+		     AND q.status='published' AND q.deleted_at IS NULL
+		     AND (q.starts_at IS NULL OR q.starts_at <= now())
+		     AND (q.ends_at IS NULL OR q.ends_at > now())
+		     AND COALESCE(q.domain = ANY(l.interests) OR q.subdomain = ANY(l.interests), false)
+		     AND ($3='' OR q.id <> $3::uuid)
+		     AND NOT EXISTS (
+		       SELECT 1 FROM quiz_attempts played
+		        WHERE played.user_id=$1 AND played.quiz_id=q.id
+		     )
+		)
+		SELECT id, title, description, question_count, type, domain, subdomain,
+		       published_at, interest_match
+		  FROM candidates
+		 ORDER BY random()
+		 LIMIT 1`, userID, instID, excludeID).Scan(
+		&q.ID, &q.Title, &q.Description, &q.QuestionCount, &q.Type,
+		&q.Domain, &q.Subdomain, &q.PublishedAt, &interestMatch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if interestMatch {
+		q.RecommendationReason = "Matches your interests"
+	} else {
+		q.RecommendationReason = "An unplayed assessment for you"
+	}
+	return q, nil
 }
 
 func recommendationReason(q RecommendedQuiz) string {

@@ -420,6 +420,7 @@ func main() {
 				r.Delete("/users/me/profile-entries/{entryId}", profileEntryH.Delete)
 				r.Patch("/users/me/domain", userH.UpdateMyDomain)
 				r.Get("/users/me/recommendations", userH.GetMyRecommendations)
+				r.Get("/users/me/quiz-pick", userH.PickMyQuiz)
 				r.Get("/users/me/learning-preferences", userH.GetMyLearningPreferences)
 				r.Patch("/users/me/learning-preferences", userH.UpdateMyLearningPreferences)
 				r.Get("/users/me/report-card", userH.GetMyReportCardPDF)

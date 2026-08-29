@@ -54,11 +54,13 @@ services:
       # Passkey / WebAuthn (super-admin login). RP_ID must be the registrable
       # domain (e.g. qwish.in); RP_ORIGINS the exact admin origin(s) with scheme.
       - key: WEBAUTHN_RP_ID
-        sync: false
+        value: qwish.in
       - key: WEBAUTHN_RP_ORIGINS
-        sync: false
+        # Android origin = base64url(SHA-256 signing certificate fingerprint),
+        # without padding. Keep this aligned with Play App Signing / assetlinks.
+        value: "https://app.qwish.in,https://qwish.in,https://superadmin.qwish.in,android:apk-key-hash:CapMhpbwljRivsSQzwSQbxHfnODPOYPURPaVkYAeL6c"
       - key: WEBAUTHN_RP_DISPLAY_NAME
-        sync: false
+        value: Qwish
       # Frontend URLs used in invite emails & generated links. Code defaults
       # already point here; set explicitly so ops can see/override per env.
       - key: APP_URL

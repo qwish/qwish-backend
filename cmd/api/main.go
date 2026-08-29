@@ -31,6 +31,7 @@ import (
 	"github.com/qwish/backend/internal/domain/points"
 	"github.com/qwish/backend/internal/domain/push"
 	"github.com/qwish/backend/internal/domain/quiz"
+	"github.com/qwish/backend/internal/domain/recruiter"
 	"github.com/qwish/backend/internal/domain/scoring"
 	"github.com/qwish/backend/internal/domain/streak"
 	"github.com/qwish/backend/internal/domain/studygroup"
@@ -107,6 +108,7 @@ func main() {
 	editRequestH := editrequest.NewHandler(editrequest.NewService(pool))
 	studentAdminH := admin.NewStudentAdminHandler(pool)
 	profileEntryH := user.NewProfileEntryHandler(pool)
+	recruiterH := recruiter.NewHandler(pool)
 
 	_ = notifSvc
 	_ = scoring.LoadConfig // referenced by services
@@ -144,6 +146,9 @@ func main() {
 	// API v1
 	// ==========================================
 	r.Route("/api/v1", func(r chi.Router) {
+		if cfg.AppEnv != "production" && cfg.RecruiterTestLoginSecret != "" {
+			r.With(mw.RateLimit(20, time.Hour)).Post("/auth/recruiter-test-login", authH.RecruiterTestLogin)
+		}
 
 		// Stream route must bypass the 30s timeout middleware
 		r.Group(func(r chi.Router) {
@@ -384,6 +389,18 @@ func main() {
 			// ------ Protected routes (all require auth) ------
 			r.Group(func(r chi.Router) {
 				r.Use(mw.Authenticate(cfg.SupabaseJWTSecret, cfg.SupabaseURL, pool))
+
+				// Recruiter tenancy is enforced again inside every handler. The
+				// organisation is derived from membership, never from request input.
+				r.Route("/recruiter", func(r chi.Router) {
+					r.Use(mw.RateLimitByUser(240, time.Minute))
+					r.Get("/context", recruiterH.Context)
+					r.Get("/overview", recruiterH.Overview)
+					r.Get("/candidates", recruiterH.Candidates)
+					r.Get("/candidates/{candidateId}", recruiterH.Candidate)
+					r.Put("/candidates/{candidateId}/shortlist", recruiterH.Shortlist)
+					r.Delete("/candidates/{candidateId}/shortlist", recruiterH.RemoveShortlist)
+				})
 
 				// Users (self)
 				r.Get("/users/me", userH.GetMe)

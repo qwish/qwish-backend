@@ -307,6 +307,24 @@ func (s *Service) mintSession(supabaseUID, email string, gen int) (access, refre
 	return access, refresh, nil
 }
 
+// MintRecruiterTestSession creates a normal revocable session for an existing
+// active recruiter member. Registration is limited to non-production in main.
+func (s *Service) MintRecruiterTestSession(ctx context.Context, email string) (access, refresh string, err error) {
+	var uid, accountEmail string
+	var generation int
+	err = s.db.QueryRow(ctx, `
+		SELECT u.supabase_uid, u.email, COALESCE(u.token_generation,0)
+		  FROM users u
+		  JOIN recruiter_memberships m ON m.user_id=u.id AND m.status='active'
+		  JOIN recruiter_organisations o ON o.id=m.organisation_id AND o.status='active'
+		 WHERE u.status='active' AND lower(u.email)=lower($1)
+		 LIMIT 1`, email).Scan(&uid, &accountEmail, &generation)
+	if err != nil {
+		return "", "", err
+	}
+	return s.mintSession(uid, accountEmail, generation)
+}
+
 // tokenGeneration reads the `gen` claim.
 //
 // A token minted before migration 040 carries no `gen`, and must keep working

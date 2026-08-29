@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log"
@@ -16,6 +17,38 @@ import (
 // An interface so auth does not import the onboarding session package.
 type OnboardingClaimer interface {
 	Claim(ctx context.Context, sessionID, userID string) error
+}
+
+// POST /api/v1/auth/recruiter-test-login. Registered only outside production
+// when an explicit secret is configured.
+func (h *Handler) RecruiterTestLogin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Secret string `json:"secret"`
+		Email  string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid request body")
+		return
+	}
+	want := h.svc.cfg.RecruiterTestLoginSecret
+	if want == "" || len(req.Secret) != len(want) || subtle.ConstantTimeCompare([]byte(req.Secret), []byte(want)) != 1 {
+		middleware.Unauthorized(w)
+		return
+	}
+	email := h.svc.cfg.RecruiterTestLoginEmail
+	if email == "" {
+		email = req.Email
+	}
+	if email == "" {
+		middleware.BadRequest(w, "test recruiter email is not configured")
+		return
+	}
+	access, refresh, err := h.svc.MintRecruiterTestSession(r.Context(), email)
+	if err != nil {
+		middleware.Error(w, http.StatusForbidden, "TEST_RECRUITER_UNAVAILABLE", "configured test recruiter is not an active organisation member")
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]string{"access_token": access, "refresh_token": refresh})
 }
 
 // SetOnboardingClaimer wires the claim path. Optional — unset means signup

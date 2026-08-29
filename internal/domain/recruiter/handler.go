@@ -3,6 +3,7 @@ package recruiter
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -42,6 +43,7 @@ func (h *Handler) requireMember(w http.ResponseWriter, r *http.Request) (members
 		return m, false
 	}
 	if err != nil {
+		log.Printf("recruiter membership lookup failed: %v", err)
 		middleware.InternalError(w)
 		return m, false
 	}
@@ -157,6 +159,7 @@ func (h *Handler) Candidates(w http.ResponseWriter, r *http.Request) {
 		                           WHERE qa.user_id=r.id AND qa.status='completed' AND qz.domain=$4))
 		 ORDER BY r.qwish_score DESC, r.id LIMIT $5`, m.OrganisationID, minScore, query, domain, limit)
 	if err != nil {
+		log.Printf("recruiter candidates: list query failed: %v", err)
 		middleware.InternalError(w)
 		return
 	}
@@ -165,17 +168,20 @@ func (h *Handler) Candidates(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var c candidate
 		if err := rows.Scan(&c.ID, &c.Name, &c.Institution, &c.Education, &c.QwishScore, &c.Percentile, &c.AssessmentCount, &c.LastAssessedAt, &c.Shortlisted); err != nil {
+			log.Printf("recruiter candidates: list scan failed: %v", err)
 			middleware.InternalError(w)
 			return
 		}
 		c.Domains, err = h.domains(r, c.ID)
 		if err != nil {
+			log.Printf("recruiter candidates: domain query failed: %v", err)
 			middleware.InternalError(w)
 			return
 		}
 		out = append(out, c)
 	}
 	if rows.Err() != nil {
+		log.Printf("recruiter candidates: row iteration failed: %v", rows.Err())
 		middleware.InternalError(w)
 		return
 	}

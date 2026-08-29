@@ -103,7 +103,7 @@ const scoredCandidates = `WITH attempt_stats AS (
 	         CASE WHEN COALESCE(rs.total_difficulty,0)>0 THEN rs.correct_difficulty/rs.total_difficulty*20 ELSE 0 END +
 	         (1-EXP(-COALESCE(u.current_streak,0)::float8/14))*15 + COALESCE(rs.speed,0)*10 +
 	         (1-EXP(-COALESCE(a.completed,0)/20))*5)))::float8 qwish_score,
-	       COALESCE(a.completed,0)::int, a.last_assessed_at
+	       COALESCE(a.completed,0)::int AS completed, a.last_assessed_at
 	  FROM users u LEFT JOIN institutions i ON i.id=u.institution_id
 	  LEFT JOIN attempt_stats a ON a.user_id=u.id LEFT JOIN response_stats rs ON rs.user_id=u.id
 	 WHERE u.status='active' AND u.role='student' AND u.recruiter_visible=true

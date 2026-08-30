@@ -33,7 +33,7 @@ func NewService(db *pgxpool.Pool, apiKey, instituteURL, superAdminURL string) *S
 	return &Service{
 		db:            db,
 		apiKey:        apiKey,
-		fromEmail:     "Qwish <noreply@qwish.in>",
+		fromEmail:     "Qwish <noreply@mail.qwish.in>",
 		instituteURL:  instituteURL,
 		superAdminURL: superAdminURL,
 		subscribers:   make(map[string][]chan Notification),
@@ -130,6 +130,13 @@ func (s *Service) logSend(ctx context.Context, to, subject, status, errMsg, refe
 func (s *Service) SendLoginOTP(ctx context.Context, to, code string, expiryMinutes int) error {
 	return s.SendEmail(ctx, to, "Your Qwish verification code",
 		tmplLoginOTP(code, expiryMinutes), "login_otp")
+}
+
+// SendUserWelcome greets a user immediately after their first profile is
+// created. Repeated logins do not call this path.
+func (s *Service) SendUserWelcome(ctx context.Context, to, name, appURL string) error {
+	return s.SendEmail(ctx, to, "Welcome to Qwish",
+		tmplUserWelcome(name, s.dashURL(appURL)), "user_welcome")
 }
 
 func (s *Service) SendInstitutionApproval(ctx context.Context, contactEmail, instName, adminEmail, adminPassword, sCode, tCode string) error {

@@ -198,6 +198,20 @@ func tmplLoginOTP(code string, expiryMinutes int) string {
 	return emailLayout("Your Qwish verification code is "+esc(code), body)
 }
 
+func tmplUserWelcome(name, appURL string) string {
+	greeting := "Hi"
+	if name != "" {
+		greeting = "Hi " + esc(name)
+	}
+	body := heading("Welcome to Qwish! 🎉") +
+		paragraph(greeting+",") +
+		paragraph("Your account is ready. Discover quizzes, build your streak, and turn every answer into progress you can see.") +
+		primaryButton("Start exploring", appURL) +
+		fallbackLink(appURL) +
+		mutedNote("We’re glad you’re here. Let’s make your next answer count.")
+	return emailLayout("Your Qwish account is ready", body)
+}
+
 func tmplTeacherInvite(name, instName, inviteLink string) string {
 	greeting := "Hi"
 	if name != "" {

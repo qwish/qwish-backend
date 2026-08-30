@@ -19,6 +19,12 @@ type OnboardingClaimer interface {
 	Claim(ctx context.Context, sessionID, userID string) error
 }
 
+// WelcomeSender delivers the post-signup email without coupling auth to the
+// notification package.
+type WelcomeSender interface {
+	SendUserWelcome(ctx context.Context, to, name, appURL string) error
+}
+
 // POST /api/v1/auth/recruiter-test-login. Registered only outside production
 // when an explicit secret is configured.
 func (h *Handler) RecruiterTestLogin(w http.ResponseWriter, r *http.Request) {
@@ -55,9 +61,13 @@ func (h *Handler) RecruiterTestLogin(w http.ResponseWriter, r *http.Request) {
 // ignores any session id it is handed.
 func (h *Handler) SetOnboardingClaimer(c OnboardingClaimer) { h.onboardingClaimer = c }
 
+// SetWelcomeSender wires optional post-signup email delivery.
+func (h *Handler) SetWelcomeSender(sender WelcomeSender) { h.welcomeSender = sender }
+
 type Handler struct {
 	svc               *Service
 	onboardingClaimer OnboardingClaimer
+	welcomeSender     WelcomeSender
 }
 
 func NewHandler(svc *Service) *Handler {
@@ -309,6 +319,14 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 	if req.OnboardingSession != "" && h.onboardingClaimer != nil {
 		if err := h.onboardingClaimer.Claim(r.Context(), req.OnboardingSession, newUser.ID); err != nil {
 			log.Printf("CreateProfile: onboarding claim for %s: %v", newUser.ID, err)
+		}
+	}
+
+	// The users row now exists, so this is a genuine first-time signup. Email
+	// delivery is best-effort: a provider outage must not fail account creation.
+	if h.welcomeSender != nil {
+		if err := h.welcomeSender.SendUserWelcome(r.Context(), newUser.Email, newUser.DisplayName, h.svc.cfg.AppURL); err != nil {
+			log.Printf("CreateProfile: welcome email to user %s failed: %v", newUser.ID, err)
 		}
 	}
 

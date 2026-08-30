@@ -1,0 +1,55 @@
+<!-- Qwish new-user welcome email.
+     This standalone template mirrors supabase_otp_email.html and the live
+     tmplUserWelcome builder in internal/domain/notification/templates.go.
+     Replace {{ .Name }} with an HTML-escaped display name before sending. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light">
+<title>Welcome to Qwish</title>
+</head>
+<body style="margin:0;padding:0;background:#F7F7F7;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#F7F7F7;font-size:1px;line-height:1px;">Your Qwish account is ready</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F7F7F7;">
+  <tr>
+    <td align="center" style="padding:32px 16px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:100%;max-width:600px;">
+        <!-- Header / wordmark -->
+        <tr>
+          <td align="center" style="padding:8px 0 24px 0;">
+            <span style="font-family:Circular, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, Inter, Roboto, Helvetica, Arial, sans-serif;font-size:26px;font-weight:700;letter-spacing:-0.5px;color:#222222;">Qwish<span style="color:#FF385C;">.</span></span>
+          </td>
+        </tr>
+        <!-- Card -->
+        <tr>
+          <td style="background:#FFFFFF;border-radius:20px;box-shadow:rgba(0,0,0,0.04) 0px 2px 6px, rgba(0,0,0,0.06) 0px 4px 12px;padding:40px;font-family:Circular, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, Inter, Roboto, Helvetica, Arial, sans-serif;color:#222222;">
+            <h1 style="margin:0 0 16px 0;font-size:24px;line-height:30px;font-weight:700;letter-spacing:-0.4px;color:#222222;">Welcome to Qwish! 🎉</h1>
+            <p style="margin:0 0 16px 0;font-size:16px;line-height:24px;color:#222222;">Hi {{ .Name }},</p>
+            <p style="margin:0 0 16px 0;font-size:16px;line-height:24px;color:#222222;">Your account is ready. Discover quizzes, build your streak, and turn every answer into progress you can see.</p>
+            <table role="presentation" cellpadding="0" cellspacing="0" style="margin:28px 0;">
+              <tr>
+                <td align="center" bgcolor="#FF385C" style="border-radius:8px;">
+                  <a href="https://app.qwish.in" target="_blank" style="display:inline-block;padding:14px 32px;font-family:Circular, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, Inter, Roboto, Helvetica, Arial, sans-serif;font-size:16px;font-weight:600;color:#FFFFFF;text-decoration:none;border-radius:8px;">Start exploring</a>
+                </td>
+              </tr>
+            </table>
+            <p style="margin:0 0 8px 0;font-size:13px;line-height:20px;color:#6A6A6A;">Or paste this link into your browser:<br><a href="https://app.qwish.in" style="color:#6C63FF;word-break:break-all;">https://app.qwish.in</a></p>
+            <p style="margin:16px 0 0 0;font-size:13px;line-height:20px;color:#6A6A6A;">We&rsquo;re glad you&rsquo;re here. Let&rsquo;s make your next answer count.</p>
+          </td>
+        </tr>
+        <!-- Footer -->
+        <tr>
+          <td align="center" style="padding:24px 16px 8px 16px;font-family:Circular, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, Inter, Roboto, Helvetica, Arial, sans-serif;font-size:12px;line-height:18px;color:#6A6A6A;">
+            One score. Nationwide visibility.<br>
+            &copy; 2026 Qwish &nbsp;&middot;&nbsp; <a href="https://qwish.in" style="color:#6A6A6A;text-decoration:underline;">qwish.in</a><br>
+            You received this email because you have a Qwish account.
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>

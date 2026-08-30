@@ -73,6 +73,7 @@ func main() {
 
 	// Handlers
 	authH := auth.NewHandler(authSvc)
+	authH.SetWelcomeSender(notifSvc)
 	avatarH := avatar.NewHandler()
 	userH := user.NewHandler(userSvc)
 	quizH := quiz.NewHandler(quizSvc)

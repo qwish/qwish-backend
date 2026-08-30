@@ -237,6 +237,30 @@ func (s *Service) GetAttempts(ctx context.Context, userID string, page, limit in
 	return attempts, total, nil
 }
 
+func (s *Service) GetAttemptsAfter(ctx context.Context, userID string, at time.Time, id string, limit int) ([]AttemptSummary, int, error) {
+	var total int
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed'`, userID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query(ctx, `SELECT qa.id,qa.quiz_id,q.title,COALESCE(qa.score_pct,0),COALESCE(qa.points_delta,0),qa.status,qa.completed_at
+		FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
+		WHERE qa.user_id=$1 AND qa.status='completed' AND (qa.completed_at,qa.id)<($2,$3::uuid)
+		ORDER BY qa.completed_at DESC,qa.id DESC LIMIT $4`, userID, at, id, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []AttemptSummary{}
+	for rows.Next() {
+		var a AttemptSummary
+		if err := rows.Scan(&a.ID, &a.QuizID, &a.QuizTitle, &a.ScorePct, &a.PointsDelta, &a.Status, &a.CompletedAt); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, a)
+	}
+	return out, total, rows.Err()
+}
+
 func (s *Service) UpdateDisplayName(ctx context.Context, userID, name string) error {
 	_, err := s.db.Exec(ctx,
 		`UPDATE users SET display_name = $1, updated_at = now() WHERE id = $2`, name, userID)
@@ -1079,6 +1103,9 @@ func (s *Service) GetRecommendations(ctx context.Context, userID, instID string)
 		     ORDER BY completed_at DESC LIMIT 3
 		   ) recent JOIN quizzes q ON q.id = recent.quiz_id
 		   WHERE q.domain IS NOT NULL GROUP BY q.domain
+		 ), bandit_total AS (
+		   SELECT COALESCE(SUM(impressions),0)::float8 AS total
+		   FROM recommendation_bandit_stats WHERE user_id=$1
 		 ), candidates AS (
 		   SELECT q.id, q.title, q.description,
 		          LEAST(q.question_count, COALESCE(q.question_limit, q.question_count)) AS question_count, q.type,
@@ -1090,14 +1117,22 @@ func (s *Service) GetRecommendations(ctx context.Context, userID, instID string)
 		          GREATEST(0, 20 * (1 - ABS((0.40 + 0.60 * a.avg_score / 100) - COALESCE(qd.difficulty, 0.60)) / 0.60)) AS difficulty_score,
 		          EXISTS(SELECT 1 FROM saved_quizzes sq WHERE sq.quiz_id=q.id AND sq.user_id=$1) AS saved,
 		          COALESCE(rd.uses, 0) AS recent_domain_uses,
-		          COALESCE(hist.attempts, 0) AS prior_attempts
+		          COALESCE(hist.attempts, 0) AS prior_attempts,
+		          COALESCE(bs.impressions, 0)::float8 AS bandit_impressions,
+		          COALESCE(bs.rewards, 0)::float8 AS bandit_rewards,
+		          bt.total AS bandit_total,
+		          CASE WHEN lm.next_review_at <= now()
+		               THEN 15*(1-lm.mastery) ELSE 0 END AS review_score
 		   FROM quizzes q
-		   CROSS JOIN learner l CROSS JOIN ability a
+		   CROSS JOIN learner l CROSS JOIN ability a CROSS JOIN bandit_total bt
 		   LEFT JOIN subdomain_performance sp ON sp.subdomain = q.subdomain
 		   LEFT JOIN recent_domains rd ON rd.domain = q.domain
 		   LEFT JOIN LATERAL (SELECT AVG(difficulty)::float8 AS difficulty FROM questions WHERE quiz_id=q.id) qd ON true
 		   LEFT JOIN LATERAL (SELECT COUNT(DISTINCT user_id)::int AS completions FROM quiz_attempts WHERE quiz_id=q.id AND status='completed') pop ON true
 		   LEFT JOIN LATERAL (SELECT COUNT(*)::int AS attempts FROM quiz_attempts WHERE quiz_id=q.id AND user_id=$1 AND status='completed') hist ON true
+		   LEFT JOIN recommendation_bandit_stats bs ON bs.user_id=$1 AND bs.quiz_id=q.id
+		   LEFT JOIN learner_topic_mastery lm ON lm.user_id=$1
+		     AND lm.topic=COALESCE(NULLIF(q.subdomain,''), NULLIF(q.domain,''))
 		   WHERE (q.visibility='public' OR q.institution_id = NULLIF($2, '')::uuid)
 		     AND q.status='published' AND q.deleted_at IS NULL
 		     AND (q.starts_at IS NULL OR q.starts_at <= now())
@@ -1115,7 +1150,10 @@ func (s *Service) GetRecommendations(ctx context.Context, userID, instID string)
 		         + LEAST(10, LN(1 + completions) * 2)
 		         + GREATEST(0, 10 - EXTRACT(EPOCH FROM (now() - COALESCE(published_at, now() - interval '365 days'))) / 86400 / 9)
 		         + CASE WHEN saved THEN 5 ELSE 0 END
-		         - recent_domain_uses * 4 - LEAST(12, prior_attempts * 4))::float8 AS rank_score
+		         - recent_domain_uses * 4 - LEAST(12, prior_attempts * 4) + review_score
+		         + CASE WHEN bandit_impressions=0 THEN 12
+		                ELSE 8*(bandit_rewards/bandit_impressions)
+		                  + SQRT(2*LN(1+bandit_total)/bandit_impressions) END)::float8 AS rank_score
 		 FROM candidates
 		 ORDER BY rank_score DESC, published_at DESC, id
 		 LIMIT 8`,
@@ -1140,6 +1178,15 @@ func (s *Service) GetRecommendations(ctx context.Context, userID, instID string)
 	if list == nil {
 		return s.GetFeaturedQuizzes(ctx)
 	}
+	ids := make([]string, len(list))
+	for i := range list {
+		ids[i] = list[i].ID
+	}
+	_, _ = s.db.Exec(ctx, `
+		INSERT INTO recommendation_bandit_stats (user_id, quiz_id, impressions)
+		SELECT $1, id, 1 FROM unnest($2::uuid[]) id
+		ON CONFLICT (user_id, quiz_id) DO UPDATE SET
+		  impressions=recommendation_bandit_stats.impressions+1, updated_at=now()`, userID, ids)
 	return list, nil
 }
 

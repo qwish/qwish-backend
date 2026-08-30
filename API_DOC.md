@@ -3864,6 +3864,21 @@ POST   /admin/students/merge                        (super_admin)
 DELETE /admin/students/{userId}/purge               (super_admin)
 ```
 
+Student search uses a versioned trigram Bloom prefilter for definite misses and
+PostgreSQL trigram indexes for authoritative substring matches.
+
+### Approximate trends
+
+`GET /admin/analytics/trends?hours=24` returns recent attempt volume,
+HyperLogLog-estimated unique learners, and Count-Min Sketch/Space-Saving top
+domains. `hours` accepts `1` through `2160` (90 days).
+
+### Cursor pagination
+
+`GET /users/me/attempts` continues to accept `page`, but responses now include
+`meta.next_cursor`. Pass it as `cursor` to use stable keyset pagination instead
+of increasingly expensive deep offsets.
+
 **Merge** folds `merge_user_id` into `keep_user_id`: points sum, attempts,
 points ledger and CV entries repoint, enrollments move where they would not
 violate the one-live-enrollment rule, and the loser is soft-deleted. Logged to

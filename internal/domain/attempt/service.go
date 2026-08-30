@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -646,6 +647,10 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		return nil, err
 	}
 
+	// Update spaced-repetition mastery and reward the recommendation arm. Both
+	// are best-effort learning signals and never invalidate a completed attempt.
+	s.recordAdaptiveLearning(ctx, userID, quizID, scorePct)
+
 	// Update streak and get bonus
 	streakBonus, _ := s.streakSvc.RecordCompletion(ctx, userID, cfg)
 	if streakBonus > 0 {
@@ -710,6 +715,41 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		QuestionBreakdown:  breakdown,
 		IsRepeatAttempt:    isRepeatAttempt,
 	}, nil
+}
+
+func (s *Service) recordAdaptiveLearning(ctx context.Context, userID, quizID string, scorePct float64) {
+	_, err := s.db.Exec(ctx, `
+		WITH topic AS (
+		  SELECT COALESCE(NULLIF(subdomain,''), NULLIF(domain,'')) AS name
+		    FROM quizzes WHERE id=$2
+		), upsert_mastery AS (
+		  INSERT INTO learner_topic_mastery
+		    (user_id, topic, mastery, ease_factor, interval_days, review_count, next_review_at)
+		  SELECT $1, name, $3::float8/100,
+		         GREATEST(1.3, LEAST(3.0, 2.5 + ($3::float8-70)/100)),
+		         CASE WHEN $3 < 50 THEN 1 WHEN $3 < 75 THEN 3 ELSE 7 END,
+		         1,
+		         now() + make_interval(days => CASE WHEN $3 < 50 THEN 1 WHEN $3 < 75 THEN 3 ELSE 7 END)
+		    FROM topic WHERE name IS NOT NULL
+		  ON CONFLICT (user_id, topic) DO UPDATE SET
+		    mastery = 0.7*learner_topic_mastery.mastery + 0.3*EXCLUDED.mastery,
+		    ease_factor = GREATEST(1.3, LEAST(3.0,
+		      learner_topic_mastery.ease_factor + ($3::float8-70)/200)),
+		    interval_days = CASE WHEN $3 < 50 THEN 1 ELSE GREATEST(1,
+		      ROUND(learner_topic_mastery.interval_days * learner_topic_mastery.ease_factor)::int) END,
+		    review_count = learner_topic_mastery.review_count + 1,
+		    next_review_at = now() + make_interval(days => CASE WHEN $3 < 50 THEN 1 ELSE GREATEST(1,
+		      ROUND(learner_topic_mastery.interval_days * learner_topic_mastery.ease_factor)::int) END),
+		    updated_at = now()
+		)
+		INSERT INTO recommendation_bandit_stats (user_id, quiz_id, rewards, updated_at)
+		VALUES ($1, $2, $3::float8/100, now())
+		ON CONFLICT (user_id, quiz_id) DO UPDATE SET
+		  rewards = recommendation_bandit_stats.rewards + EXCLUDED.rewards,
+		  updated_at = now()`, userID, quizID, scorePct)
+	if err != nil {
+		log.Printf("adaptive learning update for attempt on quiz %s: %v", quizID, err)
+	}
 }
 
 func (s *Service) GetResult(ctx context.Context, userID, attemptID string) (map[string]interface{}, error) {

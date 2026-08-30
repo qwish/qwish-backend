@@ -13,6 +13,7 @@ import (
 	"github.com/qwish/backend/internal/config"
 	"github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/domain/admin"
+	"github.com/qwish/backend/internal/domain/analytics"
 	"github.com/qwish/backend/internal/domain/attempt"
 	"github.com/qwish/backend/internal/domain/auth"
 	"github.com/qwish/backend/internal/domain/avatar"
@@ -108,6 +109,7 @@ func main() {
 	enrollmentTeacherH := enrollment.NewTeacherHandler(enrollmentSvc)
 	editRequestH := editrequest.NewHandler(editrequest.NewService(pool))
 	studentAdminH := admin.NewStudentAdminHandler(pool)
+	analyticsH := analytics.NewHandler(pool)
 	profileEntryH := user.NewProfileEntryHandler(pool)
 	recruiterH := recruiter.NewHandler(pool)
 
@@ -666,6 +668,7 @@ func main() {
 					r.Get("/metrics/catalog", metricsH.Catalog)
 					r.Get("/metrics", metricsH.Metrics)
 					r.Get("/distributions", metricsH.Distributions)
+					r.Get("/analytics/trends", analyticsH.Trends)
 					r.Get("/points-liability", metricsH.PointsLiability)
 
 					// Dashboard layouts — private to the calling admin, so no

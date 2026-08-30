@@ -30,49 +30,15 @@ type Entry struct {
 // It mirrors the lifetime Insights formula: confidence-adjusted accuracy,
 // difficulty, smooth consistency/activity, and response speed. Keeping the
 // calculation in SQL means clients cannot submit or alter a ranking score.
-const leaderboardScoreCTE = `WITH attempt_stats AS (
-	SELECT user_id,
-	       COALESCE(SUM(total_correct), 0)::float8 AS total_correct,
-	       COALESCE(SUM(total_questions), 0)::float8 AS total_questions,
-	       COUNT(*)::float8 AS completed
-	  FROM quiz_attempts
-	 WHERE status='completed'
-	 GROUP BY user_id
-), response_stats AS (
-	SELECT a.user_id,
-	       COALESCE(SUM(q.difficulty), 0)::float8 AS total_difficulty,
-	       COALESCE(SUM(q.difficulty) FILTER (WHERE qr.is_correct), 0)::float8 AS correct_difficulty,
-	       COALESCE(AVG(CASE
-	         WHEN qr.time_taken_ms < 1000 THEN 0.1
-	         WHEN qr.time_taken_ms <= (q.time_limit_seconds * 1000) / 3.0 THEN 1.0
-	         ELSE GREATEST(
-	           (q.time_limit_seconds * 1000.0 - qr.time_taken_ms) /
-	           NULLIF(q.time_limit_seconds * 1000.0 - q.time_limit_seconds * 1000.0 / 3.0, 0), 0.1)
-	       END) FILTER (WHERE qr.is_correct AND qr.time_taken_ms IS NOT NULL), 0)::float8 AS speed
-	  FROM question_responses qr
-	  JOIN questions q ON q.id=qr.question_id
-	  JOIN quiz_attempts a ON a.id=qr.attempt_id AND a.status='completed'
-	 GROUP BY a.user_id
-), scored AS (
+const leaderboardScoreCTE = `WITH scored AS (
 	SELECT u.id, u.display_name, i.name AS institution_name, u.institution_id,
 	       COALESCE(u.total_points, 0) AS total_points,
 	       COALESCE(u.current_streak, 0) AS current_streak,
-	       (100 + 8 * (
-	         CASE WHEN COALESCE(at.total_questions, 0) > 0 THEN
-	           ((COALESCE(at.total_correct, 0) + 5.0) /
-	            (COALESCE(at.total_questions, 0) + 10.0)) * 50.0
-	         ELSE 0 END
-	         + CASE WHEN COALESCE(rs.total_difficulty, 0) > 0 THEN
-	           (rs.correct_difficulty / rs.total_difficulty) * 20.0
-	           ELSE 0 END
-	         + (1 - EXP(-COALESCE(u.current_streak, 0)::float8 / 14.0)) * 15.0
-	         + COALESCE(rs.speed, 0) * 10.0
-	         + (1 - EXP(-COALESCE(at.completed, 0) / 20.0)) * 5.0
-	       ))::float8 AS qwish_score
+	       COALESCE(ls.qwish_score,100)::float8 AS qwish_score,
+	       COALESCE(ls.completed_quizzes,0) AS completed_quizzes
 	  FROM users u
 	  LEFT JOIN institutions i ON i.id=u.institution_id
-	  LEFT JOIN attempt_stats at ON at.user_id=u.id
-	  LEFT JOIN response_stats rs ON rs.user_id=u.id
+	  LEFT JOIN leaderboard_scores ls ON ls.user_id=u.id
 	 WHERE u.status='active' AND u.role='student'
 )
 `
@@ -116,7 +82,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	if role == "student" {
 		var completed int
 		if err := h.db.QueryRow(r.Context(),
-			`SELECT COUNT(DISTINCT quiz_id) FROM quiz_attempts WHERE user_id=$1 AND status='completed'`,
+			`SELECT COALESCE((SELECT completed_quizzes FROM leaderboard_scores WHERE user_id=$1),0)`,
 			userID,
 		).Scan(&completed); err != nil {
 			middleware.InternalError(w)
@@ -137,7 +103,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 			`+leaderboardScoreCTE+`SELECT COUNT(*) FROM scored s
 			 JOIN users u ON u.id=s.id
 			 WHERE s.institution_id=$1
-			   AND (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=s.id AND qa.status='completed') >= 5
+			   AND s.completed_quizzes >= 5
 			   AND ($2='' OR LOWER(u.domain)=LOWER($2))`, instID, domain).Scan(&total); err != nil {
 			middleware.InternalError(w)
 			return
@@ -148,7 +114,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 			       RANK() OVER (ORDER BY s.qwish_score DESC) AS rank
 			  FROM scored s JOIN users u ON u.id=s.id
 			 WHERE s.institution_id=$1
-			   AND (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=s.id AND qa.status='completed') >= 5
+			   AND s.completed_quizzes >= 5
 			   AND ($2='' OR LOWER(u.domain)=LOWER($2))
 			 ORDER BY s.qwish_score DESC, s.id LIMIT $3 OFFSET $4`, instID, domain, limit, offset)
 		if err != nil {
@@ -171,7 +137,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	} else {
 		if err := h.db.QueryRow(r.Context(), leaderboardScoreCTE+`
 			SELECT COUNT(*) FROM scored s JOIN users u ON u.id=s.id
-			 WHERE (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=s.id AND qa.status='completed') >= 5
+			 WHERE s.completed_quizzes >= 5
 			   AND ($1='' OR LOWER(u.domain)=LOWER($1))`, domain).Scan(&total); err != nil {
 			middleware.InternalError(w)
 			return
@@ -181,7 +147,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 			SELECT s.id, s.display_name, s.institution_name, s.qwish_score, s.total_points, s.current_streak,
 			       RANK() OVER (ORDER BY s.qwish_score DESC) AS rank
 			  FROM scored s JOIN users u ON u.id=s.id
-			 WHERE (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=s.id AND qa.status='completed') >= 5
+			 WHERE s.completed_quizzes >= 5
 			   AND ($1='' OR LOWER(u.domain)=LOWER($1))
 			 ORDER BY s.qwish_score DESC, s.id LIMIT $2 OFFSET $3`, domain, limit, offset)
 		if err != nil {
@@ -220,7 +186,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 			) THEN (
 				SELECT COUNT(*)+1 FROM scored s JOIN users u ON u.id=s.id
 				 WHERE s.institution_id=$1
-				   AND (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=s.id AND qa.status='completed') >= 5
+				   AND s.completed_quizzes >= 5
 				   AND ($3='' OR LOWER(u.domain)=LOWER($3))
 				   AND s.qwish_score>(SELECT qwish_score FROM scored WHERE id=$2)
 			) ELSE 0 END,
@@ -234,7 +200,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 				 WHERE me.id=$1 AND ($2='' OR LOWER(mu.domain)=LOWER($2))
 			) THEN (
 				SELECT COUNT(*)+1 FROM scored s JOIN users u ON u.id=s.id
-				 WHERE (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=s.id AND qa.status='completed') >= 5
+				 WHERE s.completed_quizzes >= 5
 				   AND ($2='' OR LOWER(u.domain)=LOWER($2))
 				   AND s.qwish_score>(SELECT qwish_score FROM scored WHERE id=$1)
 			) ELSE 0 END,

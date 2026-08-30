@@ -12,19 +12,18 @@ import (
 	"time"
 )
 
-// fixedWindow tracks request count for one client within the current window.
-type fixedWindow struct {
-	count   int
-	resetAt time.Time
-}
+// gcraState stores the theoretical arrival time used by the Generic Cell Rate
+// Algorithm. Unlike a fixed window, GCRA does not allow a double burst at a
+// window boundary.
+type gcraState struct{ tat time.Time }
 
-// rateLimiter is an in-memory, per-IP fixed-window rate limiter. It is process
+// rateLimiter is an in-memory, per-key GCRA rate limiter. It is process
 // local — adequate for protecting low-volume public endpoints (e.g. the contact
 // form) against bursts and naive spam. It is NOT a distributed limiter; behind
 // multiple instances each replica enforces the limit independently.
 type rateLimiter struct {
 	mu      sync.Mutex
-	clients map[string]*fixedWindow
+	clients map[string]*gcraState
 	max     int
 	window  time.Duration
 }
@@ -33,7 +32,7 @@ type rateLimiter struct {
 // within window. Excess requests get 429 with a Retry-After header.
 func RateLimit(max int, window time.Duration) func(http.Handler) http.Handler {
 	rl := &rateLimiter{
-		clients: make(map[string]*fixedWindow),
+		clients: make(map[string]*gcraState),
 		max:     max,
 		window:  window,
 	}
@@ -61,7 +60,7 @@ func RateLimit(max int, window time.Duration) func(http.Handler) http.Handler {
 // the field are passed through untouched (the handler does its own validation).
 func RateLimitByJSONField(max int, window time.Duration, field string) func(http.Handler) http.Handler {
 	rl := &rateLimiter{
-		clients: make(map[string]*fixedWindow),
+		clients: make(map[string]*gcraState),
 		max:     max,
 		window:  window,
 	}
@@ -108,7 +107,7 @@ func RateLimitByJSONField(max int, window time.Duration, field string) func(http
 // Falls back to IP when no user is on the request.
 func RateLimitByUser(max int, window time.Duration) func(http.Handler) http.Handler {
 	rl := &rateLimiter{
-		clients: make(map[string]*fixedWindow),
+		clients: make(map[string]*gcraState),
 		max:     max,
 		window:  window,
 	}
@@ -139,16 +138,25 @@ func (rl *rateLimiter) allow(ip string) (bool, time.Duration) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	c, ok := rl.clients[ip]
-	if !ok || now.After(c.resetAt) {
-		rl.clients[ip] = &fixedWindow{count: 1, resetAt: now.Add(rl.window)}
-		return true, 0
+	if rl.max <= 0 || rl.window <= 0 {
+		return false, rl.window
 	}
-
-	if c.count >= rl.max {
-		return false, time.Until(c.resetAt)
+	interval := rl.window / time.Duration(rl.max)
+	burstTolerance := interval * time.Duration(rl.max-1)
+	state, ok := rl.clients[ip]
+	if !ok {
+		state = &gcraState{}
+		rl.clients[ip] = state
 	}
-	c.count++
+	tat := state.tat
+	if tat.Before(now) {
+		tat = now
+	}
+	allowedAt := tat.Add(-burstTolerance)
+	if now.Before(allowedAt) {
+		return false, allowedAt.Sub(now)
+	}
+	state.tat = tat.Add(interval)
 	return true, 0
 }
 
@@ -161,7 +169,7 @@ func (rl *rateLimiter) cleanupLoop() {
 		now := time.Now()
 		rl.mu.Lock()
 		for ip, c := range rl.clients {
-			if now.After(c.resetAt) {
+			if now.After(c.tat.Add(rl.window)) {
 				delete(rl.clients, ip)
 			}
 		}

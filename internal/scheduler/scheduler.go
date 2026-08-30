@@ -535,15 +535,19 @@ func (s *Scheduler) RecomputeQuestionDifficulty(ctx context.Context) error {
 	return nil
 }
 
-// deriveDifficulty is the pure item-difficulty model (see the job above).
-// prior/return are difficulty coefficients in [0.4,1.0]; p, timeRatio, clueFrac
-// are in [0,1]; n is the response count driving shrinkage toward the prior.
+// deriveDifficulty uses a Beta-Binomial posterior for correctness, preventing
+// one or two answers from making a new question look extremely easy or hard.
+// Time and clue signals are confidence-weighted by the same prior strength.
 func deriveDifficulty(prior float64, n int, p, timeRatio, clueFrac float64) float64 {
-	const shrinkK = 20.0 // responses for empirical signal to reach ~half weight
-	rawHard := clamp01(0.65*(1.0-p) + 0.25*timeRatio + 0.10*clueFrac)
-	emp := 0.40 + 0.60*rawHard // map hardness [0,1] → coefficient [0.4,1.0]
-	w := float64(n) / (float64(n) + shrinkK)
-	return clampRange(w*emp+(1.0-w)*prior, 0.40, 1.00)
+	const priorStrength = 20.0
+	priorHard := clamp01((prior - 0.40) / 0.60)
+	posteriorWrong := (float64(n)*(1.0-clamp01(p)) + priorStrength*priorHard) /
+		(float64(n) + priorStrength)
+	confidence := float64(n) / (float64(n) + priorStrength)
+	rawHard := clamp01(0.65*posteriorWrong +
+		0.25*(confidence*clamp01(timeRatio)+(1-confidence)*priorHard) +
+		0.10*(confidence*clamp01(clueFrac)+(1-confidence)*priorHard))
+	return clampRange(0.40+0.60*rawHard, 0.40, 1.00)
 }
 
 func clamp01(v float64) float64 { return clampRange(v, 0, 1) }

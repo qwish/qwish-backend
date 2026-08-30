@@ -18,9 +18,10 @@ type APIError struct {
 }
 
 type Meta struct {
-	Page  int `json:"page"`
-	Limit int `json:"limit"`
-	Total int `json:"total"`
+	Page   int    `json:"page"`
+	Limit  int    `json:"limit"`
+	Total  int    `json:"total"`
+	Cursor string `json:"next_cursor,omitempty"`
 }
 
 func JSON(w http.ResponseWriter, status int, data interface{}) {

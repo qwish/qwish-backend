@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -95,18 +96,34 @@ func MergeStudents(ctx context.Context, db *pgxpool.Pool, keepID, mergeID, actor
 	return tx.Commit(ctx)
 }
 
-type StudentAdminHandler struct{ db *pgxpool.Pool }
+type StudentAdminHandler struct {
+	db          *pgxpool.Pool
+	searchBloom *studentSearchBloom
+}
 
 func NewStudentAdminHandler(db *pgxpool.Pool) *StudentAdminHandler {
-	return &StudentAdminHandler{db: db}
+	return &StudentAdminHandler{db: db, searchBloom: newStudentSearchBloom()}
 }
 
 // GET /api/v1/admin/students/search?q=<email|roll|name>
 func (h *StudentAdminHandler) Search(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query().Get("q")
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if len(q) < 3 {
 		middleware.BadRequest(w, "q must be at least 3 characters")
 		return
+	}
+
+	// The Bloom filter is only a negative prefilter. A positive still goes to
+	// PostgreSQL, which remains authoritative and applies the actual ILIKE
+	// substring match. If refresh fails, search proceeds normally.
+	if h.searchBloom != nil {
+		fresh, err := h.searchBloom.refresh(r.Context(), h.db)
+		if err != nil {
+			log.Printf("student search bloom refresh: %v", err)
+		} else if fresh && !h.searchBloom.mightContain(q) {
+			middleware.JSON(w, http.StatusOK, []any{})
+			return
+		}
 	}
 
 	rows, err := h.db.Query(r.Context(), `

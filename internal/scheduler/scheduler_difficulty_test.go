@@ -25,9 +25,9 @@ func TestDeriveDifficulty(t *testing.T) {
 
 	// Result always stays within the coefficient range.
 	for _, tc := range []struct {
-		prior            float64
-		n                int
-		p, tRatio, clue  float64
+		prior           float64
+		n               int
+		p, tRatio, clue float64
 	}{
 		{0.4, 5, 0.5, 0.5, 0}, {1.0, 50, 0.9, 0.1, 0}, {0.6, 20, 0.3, 0.8, 0.5},
 	} {
@@ -37,10 +37,10 @@ func TestDeriveDifficulty(t *testing.T) {
 		}
 	}
 
-	// Shrinkage: at n == shrinkK the empirical and prior are equally weighted.
-	// prior 0.4, empirical for p=0 (rawHard=0.65 → emp=0.79): midpoint ≈ 0.595.
+	// At n == prior strength, correctness has equal empirical/prior weight;
+	// time and clue signals are confidence-weighted the same way.
 	got := deriveDifficulty(0.4, 20, 0.0, 0, 0)
-	if !approx(got, 0.5*0.4+0.5*(0.40+0.60*0.65)) {
+	if !approx(got, 0.40+0.60*(0.65*0.5)) {
 		t.Fatalf("half-weight blend wrong: %v", got)
 	}
 }

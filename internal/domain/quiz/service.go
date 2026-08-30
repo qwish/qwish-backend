@@ -576,6 +576,11 @@ func (s *Service) AddQuestion(ctx context.Context, quizID, ownerID string, req A
 	if check == 0 {
 		return nil, fmt.Errorf("not found or forbidden")
 	}
+	if duplicate, err := findNearDuplicate(ctx, s.db, req.Prompt, ""); err != nil {
+		return nil, err
+	} else if duplicate {
+		return nil, ErrDuplicateQuestion
+	}
 
 	if req.TimeLimitSeconds == 0 {
 		req.TimeLimitSeconds = 15
@@ -595,6 +600,7 @@ func (s *Service) AddQuestion(ctx context.Context, quizID, ownerID string, req A
 	if err != nil {
 		return nil, err
 	}
+	storeMinhash(ctx, s.db, q.ID, q.Prompt)
 	// Update question count
 	s.db.Exec(ctx,
 		`UPDATE quizzes SET question_count = (SELECT COUNT(*) FROM questions WHERE quiz_id=$1), updated_at=now() WHERE id=$1`, quizID)
@@ -607,10 +613,16 @@ func (s *Service) UpdateQuestion(ctx context.Context, quizID, questionID, ownerI
 	if check == 0 {
 		return fmt.Errorf("forbidden")
 	}
+	if duplicate, err := findNearDuplicate(ctx, s.db, req.Prompt, questionID); err != nil {
+		return err
+	} else if duplicate {
+		return ErrDuplicateQuestion
+	}
 	_, err := s.db.Exec(ctx,
 		`UPDATE questions SET position=$1, type=$2, prompt=$3, media_url=$4, options=$5, correct_answer=$6, time_limit_seconds=$7, clues=$8
 		 WHERE id=$9 AND quiz_id=$10`,
 		req.Position, req.Type, req.Prompt, req.MediaURL, req.Options, req.CorrectAnswer, req.TimeLimitSeconds, req.Clues, questionID, quizID)
+	if err == nil { storeMinhash(ctx, s.db, questionID, req.Prompt) }
 	return err
 }
 

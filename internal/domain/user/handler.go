@@ -1,6 +1,7 @@
 package user
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -108,14 +111,37 @@ func (h *Handler) GetMyAttempts(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > 50 {
 		limit = 20
 	}
-	attempts, total, err := h.svc.GetAttempts(r.Context(), userID, page, limit)
+	var attempts []AttemptSummary
+	var total int
+	var err error
+	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+		raw, decErr := base64.RawURLEncoding.DecodeString(cursor)
+		parts := strings.SplitN(string(raw), "|", 2)
+		if decErr != nil || len(parts) != 2 {
+			middleware.BadRequest(w, "invalid cursor")
+			return
+		}
+		at, parseErr := time.Parse(time.RFC3339Nano, parts[0])
+		if parseErr != nil {
+			middleware.BadRequest(w, "invalid cursor")
+			return
+		}
+		attempts, total, err = h.svc.GetAttemptsAfter(r.Context(), userID, at, parts[1], limit)
+	} else {
+		attempts, total, err = h.svc.GetAttempts(r.Context(), userID, page, limit)
+	}
 	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
-	middleware.JSONWithMeta(w, http.StatusOK, attempts, &middleware.Meta{
-		Page: page, Limit: limit, Total: total,
-	})
+	next := ""
+	if len(attempts) == limit {
+		last := attempts[len(attempts)-1]
+		if last.CompletedAt != nil {
+			next = base64.RawURLEncoding.EncodeToString([]byte(last.CompletedAt.UTC().Format(time.RFC3339Nano) + "|" + last.ID))
+		}
+	}
+	middleware.JSONWithMeta(w, http.StatusOK, attempts, &middleware.Meta{Page: page, Limit: limit, Total: total, Cursor: next})
 }
 
 // GET /api/v1/users/:userId/profile

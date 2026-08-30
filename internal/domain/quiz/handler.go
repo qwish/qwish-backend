@@ -2,6 +2,7 @@ package quiz
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -283,6 +284,10 @@ func (h *Handler) TeacherAddQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 	q, err := h.svc.AddQuestion(r.Context(), chi.URLParam(r, "quizId"), middleware.GetUserID(r), req)
 	if err != nil {
+		if errors.Is(err, ErrDuplicateQuestion) {
+			middleware.Error(w, http.StatusConflict, "DUPLICATE_QUESTION", err.Error())
+			return
+		}
 		middleware.Error(w, http.StatusForbidden, "FORBIDDEN", err.Error())
 		return
 	}

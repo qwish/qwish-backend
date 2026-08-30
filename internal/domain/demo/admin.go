@@ -78,14 +78,10 @@ func (s *Service) Create(ctx context.Context, req CreateReq) (string, error) {
 		if len(opts) == 0 {
 			opts = json.RawMessage("[]")
 		}
-		tl := q.TimeLimitSeconds
-		if tl == 0 {
-			tl = 15
-		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO questions (quiz_id, position, type, prompt, media_url, options, correct_answer, time_limit_seconds)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-			quizID, i+1, q.Type, q.Prompt, q.MediaURL, opts, q.CorrectAnswer, tl); err != nil {
+			quizID, i+1, q.Type, q.Prompt, q.MediaURL, opts, q.CorrectAnswer, q.TimeLimitSeconds); err != nil {
 			return "", err
 		}
 	}
@@ -161,10 +157,10 @@ type QuestionStat struct {
 
 // Analytics is the detailed per-quiz breakdown for improving a demo quiz.
 type Analytics struct {
-	Starts       int            `json:"starts"`
-	Completions  int            `json:"completions"`
-	AvgScorePct  float64        `json:"avg_score_pct"`
-	Questions    []QuestionStat `json:"questions"`
+	Starts      int            `json:"starts"`
+	Completions int            `json:"completions"`
+	AvgScorePct float64        `json:"avg_score_pct"`
+	Questions   []QuestionStat `json:"questions"`
 }
 
 // Analytics returns per-question correctness for a demo quiz, so admins can see

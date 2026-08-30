@@ -547,7 +547,10 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 			timeLimitMs := float64(timeLimitSeconds * 1000)
 			timeTaken := float64(tTaken)
 			var qSpeed float64
-			if timeTaken < 1000 {
+			if timeLimitSeconds <= 0 {
+				// Untimed questions have no meaningful speed target.
+				qSpeed = 1.0
+			} else if timeTaken < 1000 {
 				qSpeed = 0.1 // avoid random fast guessing
 			} else if timeTaken <= timeLimitMs/3.0 {
 				qSpeed = 1.0 // optimal speed

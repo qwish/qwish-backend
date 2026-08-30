@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -77,10 +78,17 @@ func (h *Handler) AdminList(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/admin/demo/quizzes — author a demo quiz
 func (h *Handler) AdminCreate(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req CreateReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Title == "" || len(req.Questions) == 0 {
 		middleware.BadRequest(w, "title and at least one question are required")
 		return
+	}
+	for _, question := range req.Questions {
+		if strings.TrimSpace(question.Prompt) == "" || question.TimeLimitSeconds < 0 || question.TimeLimitSeconds > 600 {
+			middleware.BadRequest(w, "each question needs a prompt and a time limit from 0 to 600 seconds")
+			return
+		}
 	}
 	id, err := h.svc.Create(r.Context(), req)
 	if err != nil {

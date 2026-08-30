@@ -36,6 +36,7 @@ import (
 	"github.com/qwish/backend/internal/domain/scoring"
 	"github.com/qwish/backend/internal/domain/streak"
 	"github.com/qwish/backend/internal/domain/studygroup"
+	"github.com/qwish/backend/internal/domain/survey"
 	"github.com/qwish/backend/internal/domain/teacher"
 	"github.com/qwish/backend/internal/domain/topicrequest"
 	"github.com/qwish/backend/internal/domain/upload"
@@ -103,6 +104,7 @@ func main() {
 	pushH := push.NewHandler(pool)
 	offlineH := offline.NewHandler(offlineSvc)
 	studyGroupH := studygroup.NewHandler(studyGroupSvc)
+	surveyH := survey.NewHandler(pool)
 
 	enrollmentStudentH := enrollment.NewStudentHandler(enrollmentSvc)
 	enrollmentInstH := enrollment.NewInstitutionHandler(enrollmentSvc, pool)
@@ -304,6 +306,8 @@ func main() {
 			// ------ Public Contact Form ------
 			// Public + unauthenticated, so rate-limit per IP to curb spam/abuse.
 			r.With(mw.RateLimit(5, 10*time.Minute)).Post("/contact", contactH.Submit)
+			r.Get("/surveys/{slug}", surveyH.PublicGet)
+			r.With(mw.RateLimit(120, time.Minute)).Post("/surveys/{slug}/responses", surveyH.Submit)
 
 			// ------ Public Demo Quizzes (onboarding, no auth) ------
 			// Curated demo quizzes played before login; graded statelessly.
@@ -727,6 +731,10 @@ func main() {
 					// system account. The service owns author, visibility, publish
 					// status, scheduling and question-delivery validation.
 					r.With(mw.RequireRole("super_admin")).Post("/quizzes", quizH.AdminCreate)
+					r.With(mw.RequireRole("super_admin")).Get("/surveys", surveyH.List)
+					r.With(mw.RequireRole("super_admin")).Post("/surveys", surveyH.Create)
+					r.With(mw.RequireRole("super_admin")).Get("/surveys/{surveyId}/results", surveyH.Results)
+					r.With(mw.RequireRole("super_admin")).Patch("/surveys/{surveyId}/status", surveyH.SetStatus)
 					r.With(mw.RequireRole("super_admin")).Get("/quizzes/{quizId}", quizH.AdminGet)
 					r.With(mw.RequireRole("super_admin")).Patch("/quizzes/{quizId}", quizH.AdminUpdate)
 					r.With(mw.RequireRole("super_admin", "moderator")).Get("/quizzes/{quizId}/behavior", attemptH.BehaviorSummary)

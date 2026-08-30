@@ -413,10 +413,6 @@ func validateAdminQuestion(question AddQuestionReq) error {
 
 func insertAdminQuestions(ctx context.Context, tx pgx.Tx, quizID string, questions []AddQuestionReq) error {
 	for i, question := range questions {
-		timeLimit := question.TimeLimitSeconds
-		if timeLimit == 0 {
-			timeLimit = 15
-		}
 		options := question.Options
 		if len(options) == 0 {
 			options = json.RawMessage("[]")
@@ -424,7 +420,7 @@ func insertAdminQuestions(ctx context.Context, tx pgx.Tx, quizID string, questio
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO questions (quiz_id, position, type, prompt, media_url, options, correct_answer, time_limit_seconds, clues)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			quizID, i+1, question.Type, question.Prompt, question.MediaURL, options, question.CorrectAnswer, timeLimit, question.Clues); err != nil {
+			quizID, i+1, question.Type, question.Prompt, question.MediaURL, options, question.CorrectAnswer, question.TimeLimitSeconds, question.Clues); err != nil {
 			return err
 		}
 	}
@@ -570,6 +566,9 @@ func (s *Service) GetTaxonomy(ctx context.Context) ([]DomainOption, error) {
 }
 
 func (s *Service) AddQuestion(ctx context.Context, quizID, ownerID string, req AddQuestionReq) (*Question, error) {
+	if req.TimeLimitSeconds < 0 || req.TimeLimitSeconds > 600 {
+		return nil, fmt.Errorf("time limit must be from 0 to 600 seconds")
+	}
 	// Verify ownership
 	var check int
 	s.db.QueryRow(ctx, `SELECT 1 FROM quizzes WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL`, quizID, ownerID).Scan(&check)
@@ -582,9 +581,6 @@ func (s *Service) AddQuestion(ctx context.Context, quizID, ownerID string, req A
 		return nil, ErrDuplicateQuestion
 	}
 
-	if req.TimeLimitSeconds == 0 {
-		req.TimeLimitSeconds = 15
-	}
 	if req.Options == nil {
 		req.Options = json.RawMessage("[]")
 	}
@@ -608,6 +604,9 @@ func (s *Service) AddQuestion(ctx context.Context, quizID, ownerID string, req A
 }
 
 func (s *Service) UpdateQuestion(ctx context.Context, quizID, questionID, ownerID string, req AddQuestionReq) error {
+	if req.TimeLimitSeconds < 0 || req.TimeLimitSeconds > 600 {
+		return fmt.Errorf("time limit must be from 0 to 600 seconds")
+	}
 	var check int
 	s.db.QueryRow(ctx, `SELECT 1 FROM quizzes WHERE id=$1 AND created_by=$2`, quizID, ownerID).Scan(&check)
 	if check == 0 {
@@ -622,7 +621,9 @@ func (s *Service) UpdateQuestion(ctx context.Context, quizID, questionID, ownerI
 		`UPDATE questions SET position=$1, type=$2, prompt=$3, media_url=$4, options=$5, correct_answer=$6, time_limit_seconds=$7, clues=$8
 		 WHERE id=$9 AND quiz_id=$10`,
 		req.Position, req.Type, req.Prompt, req.MediaURL, req.Options, req.CorrectAnswer, req.TimeLimitSeconds, req.Clues, questionID, quizID)
-	if err == nil { storeMinhash(ctx, s.db, questionID, req.Prompt) }
+	if err == nil {
+		storeMinhash(ctx, s.db, questionID, req.Prompt)
+	}
 	return err
 }
 

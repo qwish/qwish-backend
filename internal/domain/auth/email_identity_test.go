@@ -149,3 +149,41 @@ func TestOneIdentityPerEmailIsEnforced(t *testing.T) {
 		}
 	})
 }
+
+func TestGetUserForLoginRepairsChangedSupabaseUID(t *testing.T) {
+	pool := openTestDB(t)
+	ctx := context.Background()
+	oldUID := uuid.NewString()
+	newUID := uuid.NewString()
+	email := "uid-repair-" + uuid.NewString()[:8] + "@example.test"
+
+	var userID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO users (supabase_uid, full_name, display_name, email, role)
+		 VALUES ($1,'UID Repair','UID Repair',$2,'student') RETURNING id`,
+		oldUID, email,
+	).Scan(&userID); err != nil {
+		t.Fatalf("seed student: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(ctx, `DELETE FROM streaks WHERE user_id=$1`, userID)
+		pool.Exec(ctx, `DELETE FROM users WHERE id=$1`, userID)
+	})
+
+	svc := &Service{db: pool}
+	got, err := svc.GetUserForLogin(ctx, newUID, strings.ToUpper(email))
+	if err != nil {
+		t.Fatalf("GetUserForLogin: %v", err)
+	}
+	if got.ID != userID {
+		t.Fatalf("user id = %q, want %q", got.ID, userID)
+	}
+
+	var storedUID string
+	if err := pool.QueryRow(ctx, `SELECT supabase_uid FROM users WHERE id=$1`, userID).Scan(&storedUID); err != nil {
+		t.Fatalf("read repaired UID: %v", err)
+	}
+	if storedUID != newUID {
+		t.Errorf("supabase_uid = %q, want %q", storedUID, newUID)
+	}
+}

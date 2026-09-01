@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/config"
@@ -126,16 +127,6 @@ func NormalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
-// UserExistsByEmail returns true if a user with the given email exists in the DB.
-func (s *Service) UserExistsByEmail(ctx context.Context, email string) bool {
-	var exists bool
-	s.db.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM users WHERE lower(btrim(email)) = $1 AND deleted_at IS NULL)`,
-		NormalizeEmail(email),
-	).Scan(&exists)
-	return exists
-}
-
 // ErrEmailTaken reports an address that already holds an identity somewhere in
 // Qwish. Surface is a human phrase naming where, Role the role held there.
 //
@@ -229,6 +220,57 @@ func (s *Service) GetUserBySupabaseUID(ctx context.Context, uid string) (*UserPr
 		return nil, err
 	}
 	return &u, nil
+}
+
+// GetUserForLogin resolves the identity proven by Supabase. A Supabase user can
+// receive a new UID after an auth-account recovery/recreation even though the
+// Qwish users row (and all of its quiz history) still belongs to the same
+// verified email address. In that case, repair the UID before issuing the app
+// session. The email is supplied by Supabase's verified response, never from an
+// unverified client-only lookup.
+func (s *Service) GetUserForLogin(ctx context.Context, uid, verifiedEmail string) (*UserProfile, error) {
+	u, err := s.GetUserBySupabaseUID(ctx, uid)
+	if err == nil {
+		return u, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+
+	var candidateID string
+	err = s.db.QueryRow(ctx,
+		`SELECT id
+		   FROM users
+		  WHERE lower(btrim(email)) = $1 AND deleted_at IS NULL`,
+		NormalizeEmail(verifiedEmail),
+	).Scan(&candidateID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Do not let reconciliation merge two local principals. The users UID
+	// uniqueness constraint closes the same-table race; the explicit admin check
+	// also preserves the users/admin_accounts identity boundary.
+	tag, err := s.db.Exec(ctx,
+		`UPDATE users
+		    SET supabase_uid=$1, updated_at=now()
+		  WHERE id=$2
+		    AND NOT EXISTS (
+		      SELECT 1 FROM users WHERE supabase_uid=$1 AND id<>$2
+		    )
+		    AND NOT EXISTS (
+		      SELECT 1 FROM admin_accounts WHERE supabase_uid=$1 AND deleted_at IS NULL
+		    )`,
+		uid, candidateID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() != 1 {
+		return nil, fmt.Errorf("verified identity conflicts with another Qwish account")
+	}
+
+	return s.GetUserBySupabaseUID(ctx, uid)
 }
 
 // GetAdminForLogin returns an active admin_accounts record matching the

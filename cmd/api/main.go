@@ -288,14 +288,14 @@ func main() {
 				r.Get("/institution/status", onboardingH.CheckStatus)
 				r.Get("/taxonomy", obSessionH.Taxonomy)
 
-				// Pre-signup calibration. Public and unauthenticated: the
-				// session id is the only credential, so rate-limit per IP.
+				// Pre-signup calibration. The opaque session bearer credential is
+				// carried in Authorization, never in a loggable URL path.
 				r.Route("/session", func(r chi.Router) {
 					r.With(mw.RateLimit(10, 10*time.Minute)).Post("/", obSessionH.Create)
-					r.Patch("/{sessionId}", obSessionH.UpdatePrefs)
-					r.Get("/{sessionId}/recommendations", obSessionH.Recommendations)
-					r.Get("/{sessionId}/quizzes/{quizId}", obSessionH.Questions)
-					r.With(mw.RateLimit(30, 10*time.Minute)).Post("/{sessionId}/submit", obSessionH.Submit)
+					r.Patch("/", obSessionH.UpdatePrefs)
+					r.Get("/recommendations", obSessionH.Recommendations)
+					r.Get("/quizzes/{quizId}", obSessionH.Questions)
+					r.With(mw.RateLimit(30, 10*time.Minute)).Post("/submit", obSessionH.Submit)
 				})
 			})
 
@@ -325,10 +325,10 @@ func main() {
 					mw.RateLimit(5, 15*time.Minute),
 					mw.RateLimitByJSONField(3, 15*time.Minute, "email"),
 				).Post("/send-otp", authH.SendOTP)
-				r.Post("/verify-otp", authH.VerifyOTP)
-				// Sign-up forms check an address before spending an OTP on it.
-				// Answers only taken/free — never which surface holds it.
-				r.With(mw.RateLimit(20, 15*time.Minute)).Get("/email-availability", authH.EmailAvailability)
+				r.With(
+					mw.RateLimit(10, 15*time.Minute),
+					mw.RateLimitByJSONField(5, 15*time.Minute, "email"),
+				).Post("/verify-otp", authH.VerifyOTP)
 				r.Post("/refresh", authH.Refresh)
 				r.Get("/teacher-invite", authH.GetTeacherInvite)
 

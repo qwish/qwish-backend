@@ -84,15 +84,14 @@ func (h *Handler) SendOTP(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "email is required")
 		return
 	}
-	isNewUser := !h.svc.UserExistsByEmail(r.Context(), req.Email)
-	// ponytail: log but still return 200 — enumeration protection intact, failures now visible
-	if err := h.svc.SupabaseSendOTP(r.Context(), req.Email); err != nil {
-		log.Printf("auth: send-otp failed for %s: %v", req.Email, err)
+	email := NormalizeEmail(req.Email)
+	// Do not query local identities here. Account state is disclosed only after
+	// the OTP proves control of the address in VerifyOTP.
+	if err := h.svc.SupabaseSendOTP(r.Context(), email); err != nil {
+		// Email addresses are PII; keep them out of application logs.
+		log.Printf("auth: send-otp upstream failure: %v", err)
 	}
-	middleware.JSON(w, http.StatusOK, map[string]interface{}{
-		"message":     "OTP sent",
-		"is_new_user": isNewUser,
-	})
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "OTP sent"})
 }
 
 // POST /api/v1/auth/verify-otp
@@ -112,7 +111,7 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authResp, err := h.svc.SupabaseVerifyOTP(r.Context(), req.Email, req.OTP)
+	authResp, err := h.svc.SupabaseVerifyOTP(r.Context(), NormalizeEmail(req.Email), req.OTP)
 	if err != nil {
 		middleware.Error(w, http.StatusUnauthorized, "INVALID_OTP", "invalid or expired OTP")
 		return
@@ -124,7 +123,9 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	existingUser, err := h.svc.GetUserBySupabaseUID(r.Context(), uid)
+	// Use the provider-returned address, not the request body, for UID repair:
+	// Supabase has just verified that this UID controls this email address.
+	existingUser, err := h.svc.GetUserForLogin(r.Context(), uid, authResp.User.Email)
 	if err == nil {
 		// A teacher awaiting institution verification cannot sign in yet. Return
 		// 403 without tokens so the client can't enter the dashboard.
@@ -182,29 +183,6 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		"access_token":  authResp.AccessToken,
 		"refresh_token": authResp.RefreshToken,
 		"is_new_user":   true,
-	})
-}
-
-// GET /api/v1/auth/email-availability?email=...
-//
-// Lets a sign-up form say "that address is already a teacher account" while the
-// person is still typing, instead of after they have burned an OTP.
-//
-// Deliberately does not reveal the role or the specific surface: this endpoint
-// is unauthenticated, and an enumeration oracle that answers "which kind of
-// account is this?" is worth more to an attacker than to a form. The full
-// sentence is only returned to someone who has already proved control of the
-// address by verifying an OTP.
-func (h *Handler) EmailAvailability(w http.ResponseWriter, r *http.Request) {
-	email := NormalizeEmail(r.URL.Query().Get("email"))
-	if email == "" || !strings.Contains(email, "@") {
-		middleware.BadRequest(w, "email is required")
-		return
-	}
-
-	middleware.JSON(w, http.StatusOK, map[string]interface{}{
-		"email":     email,
-		"available": h.svc.EmailIdentity(r.Context(), email) == nil,
 	})
 }
 

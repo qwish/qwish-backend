@@ -231,7 +231,9 @@ send-otp → verify-otp → (if is_new_user) create-profile → home
 ## POST `/auth/send-otp`
 **Auth required:** No
 
-Sends a 6-digit OTP to the given email address. Also indicates whether the email belongs to a new or returning user so the client can prepare the correct next screen.
+Sends a 6-digit OTP to the normalized email address. The response is identical
+whether or not an account exists; account state is returned only after OTP
+verification. Limited per source IP and normalized email.
 
 ### Request Body
 ```json
@@ -240,27 +242,22 @@ Sends a 6-digit OTP to the given email address. Also indicates whether the email
 
 ### Response `200`
 ```json
-{
-  "message":     "OTP sent",
-  "is_new_user": true
-}
+{ "message": "OTP sent" }
 ```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `is_new_user` | `bool` | `true` → no account yet, show name & referral fields after OTP. `false` → returning user. |
 
 ### Errors
 | Status | Code | Meaning |
 |--------|------|---------|
 | 400 | `BAD_REQUEST` | Missing `email` |
+| 429 | `RATE_LIMITED` | IP or normalized-email limit exceeded |
 
 ---
 
 ## POST `/auth/verify-otp`
 **Auth required:** No
 
-Verifies the OTP and returns session tokens.
+Verifies the OTP and returns session tokens. Limited per source IP and
+normalized email to prevent brute force.
 
 - `is_new_user: false` → profile exists, go to home
 - `is_new_user: true` → call `POST /auth/create-profile` next
@@ -305,6 +302,7 @@ Verifies the OTP and returns session tokens.
 |--------|------|---------|
 | 400 | `BAD_REQUEST` | Missing `email` or `otp` |
 | 401 | `INVALID_OTP` | OTP is wrong or expired |
+| 429 | `RATE_LIMITED` | IP or normalized-email limit exceeded |
 
 ---
 

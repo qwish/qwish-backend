@@ -30,8 +30,13 @@ func NewHandler(svc *Service) *Handler {
 func (h *Handler) GetMe(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.GetUserID(r)
 	profile, err := h.svc.GetProfile(r.Context(), userID)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		middleware.NotFound(w, "user")
+		return
+	}
+	if err != nil {
+		log.Printf("GetMe: user %s: %v", userID, err)
+		middleware.InternalError(w)
 		return
 	}
 	middleware.JSON(w, http.StatusOK, profile)
@@ -377,6 +382,7 @@ func (h *Handler) GetMyWeeklyInsights(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) GetMyInsightsBreakdown(w http.ResponseWriter, r *http.Request) {
 	bd, err := h.svc.GetInsightsBreakdown(r.Context(), middleware.GetUserID(r))
 	if err != nil {
+		log.Printf("GetMyInsightsBreakdown: user %s: %v", middleware.GetUserID(r), err)
 		middleware.InternalError(w)
 		return
 	}

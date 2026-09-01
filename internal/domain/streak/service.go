@@ -17,11 +17,11 @@ func NewService(db *pgxpool.Pool) *Service {
 }
 
 type StreakInfo struct {
-	CurrentStreak      int    `json:"current_streak"`
-	LongestStreak      int    `json:"longest_streak"`
-	GraceWindowActive  bool   `json:"grace_window_active"`
-	NextMilestone      int    `json:"next_milestone"`
-	ProgressToMilestone int   `json:"progress_to_milestone"`
+	CurrentStreak       int  `json:"current_streak"`
+	LongestStreak       int  `json:"longest_streak"`
+	GraceWindowActive   bool `json:"grace_window_active"`
+	NextMilestone       int  `json:"next_milestone"`
+	ProgressToMilestone int  `json:"progress_to_milestone"`
 }
 
 func (s *Service) GetInfo(ctx context.Context, userID string) (*StreakInfo, error) {
@@ -30,10 +30,10 @@ func (s *Service) GetInfo(ctx context.Context, userID string) (*StreakInfo, erro
 	// the nightly reset is an in-process cron, so a restart across the wrong
 	// night used to leave a dead streak on display indefinitely.
 	err := s.db.QueryRow(ctx,
-		`SELECT CASE WHEN last_completed_date >= CURRENT_DATE - 2 THEN current_streak ELSE 0 END,
-		        longest_streak,
-		        COALESCE(last_completed_date = CURRENT_DATE - 2, false)
-		   FROM streaks WHERE user_id=$1`, userID,
+		`SELECT COALESCE((SELECT CASE WHEN last_completed_date >= CURRENT_DATE - 2 THEN current_streak ELSE 0 END
+		                          FROM streaks WHERE user_id=$1), 0),
+		        COALESCE((SELECT longest_streak FROM streaks WHERE user_id=$1), 0),
+		        COALESCE((SELECT last_completed_date = CURRENT_DATE - 2 FROM streaks WHERE user_id=$1), false)`, userID,
 	).Scan(&info.CurrentStreak, &info.LongestStreak, &info.GraceWindowActive)
 	if err != nil {
 		return nil, err

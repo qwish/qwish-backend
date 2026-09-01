@@ -410,7 +410,7 @@ func main() {
 				})
 
 				// Users (self)
-				r.Get("/users/me", userH.GetMe)
+				r.With(mw.RequireUserRecord()).Get("/users/me", userH.GetMe)
 				r.Patch("/users/me", userH.UpdateMe)
 				r.Delete("/users/me", userH.DeleteMe)
 				r.Get("/users/me/stats", userH.GetMyStats)
@@ -418,8 +418,8 @@ func main() {
 				r.Get("/users/me/attempts", userH.GetMyAttempts)
 				r.Get("/users/me/points", pointsH.GetBalance)
 				r.Get("/users/me/points/ledger", pointsH.GetLedger)
-				r.Get("/users/me/streak", streakH.GetStreak)
-				r.With(mw.RateLimitByUser(120, time.Minute)).Get("/users/me/rank", userH.GetMyRank)
+				r.With(mw.RequireUserRecord()).Get("/users/me/streak", streakH.GetStreak)
+				r.With(mw.RequireUserRecord(), mw.RateLimitByUser(120, time.Minute)).Get("/users/me/rank", userH.GetMyRank)
 				r.Get("/users/me/profile-views", userH.GetMyProfileViews)
 				r.Get("/users/me/milestones", userH.GetMyMilestones)
 				r.Get("/users/me/education", userH.GetMyEducation)
@@ -429,8 +429,8 @@ func main() {
 				r.Get("/users/me/notifications/unread-count", notifH.UnreadCount)
 				r.Patch("/users/me/notifications/read-all", notifH.MarkAllRead)
 				r.Patch("/users/me/notifications/{id}/read", notifH.MarkRead)
-				r.Post("/users/me/devices", pushH.Register)
-				r.Delete("/users/me/devices/{token}", pushH.Unregister)
+				r.With(mw.RequireUserRecord()).Post("/users/me/devices", pushH.Register)
+				r.With(mw.RequireUserRecord()).Delete("/users/me/devices/{token}", pushH.Unregister)
 				r.Get("/users/me/skills", userH.GetMySkills)
 				r.Post("/users/me/skills", userH.AddMySkill)
 				r.Delete("/users/me/skills/{skill}", userH.DeleteMySkill)
@@ -444,7 +444,7 @@ func main() {
 				r.Delete("/users/me/profile-entries/{entryId}", profileEntryH.Delete)
 				r.Patch("/users/me/domain", userH.UpdateMyDomain)
 				r.Get("/users/me/recommendations", userH.GetMyRecommendations)
-				r.Get("/users/me/quiz-pick", userH.PickMyQuiz)
+				r.With(mw.RequireUserRecord()).Get("/users/me/quiz-pick", userH.PickMyQuiz)
 				r.Get("/users/me/learning-preferences", userH.GetMyLearningPreferences)
 				r.Patch("/users/me/learning-preferences", userH.UpdateMyLearningPreferences)
 				r.Get("/users/me/report-card", userH.GetMyReportCardPDF)
@@ -460,7 +460,7 @@ func main() {
 
 				// Weekly score insights
 				r.Get("/users/me/insights/weekly", userH.GetMyWeeklyInsights)
-				r.Get("/users/me/insights/breakdown", userH.GetMyInsightsBreakdown)
+				r.With(mw.RequireUserRecord()).Get("/users/me/insights/breakdown", userH.GetMyInsightsBreakdown)
 				r.Get("/users/me/insights/trend", userH.GetMyScoreTrend)
 
 				// Offline mode: prefetch practice pack + sync offline results
@@ -503,6 +503,7 @@ func main() {
 				// Attempts. Rate limited per user: these routes mint points, so a
 				// script hammering them is the cheapest attack surface here.
 				r.Group(func(r chi.Router) {
+					r.Use(mw.RequireUserRecord())
 					r.Use(mw.RateLimitByUser(300, time.Minute))
 					r.Post("/quizzes/{quizId}/attempts", attemptH.Start)
 					r.Post("/attempts/{attemptId}/answers", attemptH.SubmitAnswer)

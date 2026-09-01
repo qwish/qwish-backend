@@ -870,7 +870,7 @@ func (s *Service) GetInsightsBreakdown(ctx context.Context, userID string) (*Ins
 			(SELECT total_diff FROM diff),
 			(SELECT correct_diff FROM diff),
 			(SELECT speed_avg FROM diff),
-			(SELECT current_streak FROM users WHERE id=$1),
+			COALESCE((SELECT current_streak FROM users WHERE id=$1), 0),
 			(SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed')`,
 		userID,
 	).Scan(&totalCorrect, &totalQuestions, &totalDiff, &correctDiff, &speedAvg, &streak, &completed); err != nil {

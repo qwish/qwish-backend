@@ -66,6 +66,22 @@ func NewService(db *pgxpool.Pool, projectID, credentialsJSON string) *Service {
 	}
 	var sa serviceAccount
 	if err := json.Unmarshal([]byte(credentialsJSON), &sa); err != nil {
+		// Some environment dashboards wrap a long JSON value by placing a
+		// backslash immediately before a real newline. JSON only permits the two
+		// characters `\\n` inside strings, so repair that transport artefact.
+		repaired := strings.ReplaceAll(strings.ReplaceAll(credentialsJSON, "\\\r\n", "\\n"), "\\\n", "\\n")
+		err = json.Unmarshal([]byte(repaired), &sa)
+		if err == nil {
+			credentialsJSON = repaired
+		}
+	}
+	if sa.ClientEmail == "" || sa.PrivateKey == "" {
+		var err error
+		if unmarshalErr := json.Unmarshal([]byte(credentialsJSON), &sa); unmarshalErr != nil {
+			err = unmarshalErr
+		} else {
+			err = errors.New("client_email or private_key is missing")
+		}
 		log.Printf("[push] failed to parse FCM_SERVICE_ACCOUNT_JSON: %v", err)
 		return s
 	}

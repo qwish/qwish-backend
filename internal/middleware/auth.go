@@ -18,6 +18,7 @@ const (
 	ContextKeyAdminID     contextKey = "admin_id"
 	ContextKeySupabaseUID contextKey = "supabase_uid"
 	ContextKeyEmail       contextKey = "email"
+	ContextKeyUserRecord  contextKey = "user_record"
 )
 
 type userRow struct {
@@ -157,6 +158,7 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 			}
 
 			ctx := context.WithValue(r.Context(), ContextKeyUserID, u.ID)
+			ctx = context.WithValue(ctx, ContextKeyUserRecord, true)
 			ctx = context.WithValue(ctx, ContextKeyRole, u.Role)
 			if u.InstitutionID != nil {
 				ctx = context.WithValue(ctx, ContextKeyInstID, *u.InstitutionID)
@@ -174,6 +176,24 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 			}
 
 			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// RequireUserRecord rejects an admin_accounts-only principal from routes whose
+// data is backed by users.id. Authenticate accepts both identity tables because
+// admin and app routes share a router; without this second boundary an admin ID
+// reaches user foreign keys and turns an authorization mistake into assorted
+// 404/500 responses (and, more importantly, crosses identity surfaces).
+func RequireUserRecord() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			isUser, _ := r.Context().Value(ContextKeyUserRecord).(bool)
+			if !isUser {
+				Forbidden(w)
+				return
+			}
+			next.ServeHTTP(w, r)
 		})
 	}
 }

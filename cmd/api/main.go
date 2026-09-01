@@ -274,6 +274,10 @@ func main() {
 					}
 					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
 				})
+				r.Post("/dispatch-announcements", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.DispatchAnnouncements(r.Context()); err != nil { mw.InternalError(w); return }
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
 			})
 		}
 
@@ -444,6 +448,8 @@ func main() {
 				r.Delete("/users/me/profile-entries/{entryId}", profileEntryH.Delete)
 				r.Patch("/users/me/domain", userH.UpdateMyDomain)
 				r.Get("/users/me/recommendations", userH.GetMyRecommendations)
+				r.With(mw.RequireUserRecord()).Get("/users/me/content", userH.GetMyAppContent)
+				r.With(mw.RequireUserRecord(), mw.RateLimitByUser(240, time.Minute)).Post("/users/me/content/{kind}/{contentId}/events", userH.RecordMyContentEvent)
 				r.With(mw.RequireUserRecord()).Get("/users/me/quiz-pick", userH.PickMyQuiz)
 				r.Get("/users/me/learning-preferences", userH.GetMyLearningPreferences)
 				r.Patch("/users/me/learning-preferences", userH.UpdateMyLearningPreferences)
@@ -754,7 +760,8 @@ func main() {
 
 					// Announcements
 					r.Get("/announcements", adminH.ListAnnouncements)
-					r.Post("/announcements", adminH.CreateAnnouncement)
+					r.With(mw.RequireRole("super_admin", "moderator")).Post("/announcements", adminH.CreateAnnouncement)
+					r.With(mw.RequireRole("super_admin")).Post("/announcements/{announcementId}/publish", adminH.PublishAnnouncement)
 					r.With(mw.RequireRole("super_admin", "moderator")).Patch("/announcements/{announcementId}/retract", adminH.RetractAnnouncement)
 
 					// Promos

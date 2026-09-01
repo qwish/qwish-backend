@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log"
 	"time"
 
@@ -25,6 +26,87 @@ type Scheduler struct {
 
 func New(db *pgxpool.Pool, streakSvc *streak.Service, pushSvc *push.Service, notifSvc *notification.Service, userSvc *user.Service) *Scheduler {
 	return &Scheduler{db: db, streakSvc: streakSvc, pushSvc: pushSvc, notifSvc: notifSvc, userSvc: userSvc}
+}
+
+// DispatchAnnouncements promotes due scheduled announcements to sent and fans
+// out notification/email channels. The conditional UPDATE is the delivery
+// claim: concurrent cron runs cannot claim the same announcement twice.
+func (s *Scheduler) DispatchAnnouncements(ctx context.Context) error {
+	rows, err := s.db.Query(ctx, `SELECT id, title, body, cta_label, cta_url, delivery_types, audience
+		FROM announcements WHERE status='scheduled' AND (scheduled_at IS NULL OR scheduled_at<=now())
+		ORDER BY COALESCE(scheduled_at,created_at) LIMIT 25`)
+	if err != nil {
+		return err
+	}
+	type due struct {
+		id, title, body, audience string
+		ctaLabel, ctaURL          *string
+		channels                  []string
+	}
+	items := []due{}
+	for rows.Next() {
+		var a due
+		if err := rows.Scan(&a.id, &a.title, &a.body, &a.ctaLabel, &a.ctaURL, &a.channels, &a.audience); err != nil {
+			rows.Close()
+			return err
+		}
+		items = append(items, a)
+	}
+	rows.Close()
+	for _, a := range items {
+		tag, err := s.db.Exec(ctx, `UPDATE announcements SET status='sent',sent_at=now() WHERE id=$1 AND status='scheduled'`, a.id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			continue
+		}
+		recipients, err := s.announcementRecipients(ctx, a.id, a.audience)
+		if err != nil {
+			return err
+		}
+		for _, recipient := range recipients {
+			for _, channel := range a.channels {
+				switch channel {
+				case "in_app_notification":
+					s.notifSvc.Emit(ctx, recipient.id, "announcement", a.title, a.body, notification.WithIcon("notifications"), notification.WithColor("indigo"), notification.WithReference(a.id))
+				case "email":
+					cta := ""
+					if a.ctaLabel != nil && a.ctaURL != nil {
+						cta = fmt.Sprintf(`<p><a href="%s">%s</a></p>`, html.EscapeString(*a.ctaURL), html.EscapeString(*a.ctaLabel))
+					}
+					body := fmt.Sprintf(`<h1>%s</h1><p>%s</p>%s`, html.EscapeString(a.title), html.EscapeString(a.body), cta)
+					if err := s.notifSvc.SendEmail(ctx, recipient.email, a.title, body, "announcement:"+a.id); err != nil {
+						log.Printf("[announcement] email %s: %v", a.id, err)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+type announcementRecipient struct{ id, email string }
+
+func (s *Scheduler) announcementRecipients(ctx context.Context, announcementID, audience string) ([]announcementRecipient, error) {
+	rows, err := s.db.Query(ctx, `SELECT u.id,u.email FROM users u LEFT JOIN institutions i ON i.id=u.institution_id
+		WHERE u.status='active' AND u.deleted_at IS NULL AND (
+		 $2='all' OR ($2='students' AND u.role='student') OR ($2='teachers' AND u.role='teacher') OR
+		 ($2='institution' AND EXISTS(SELECT 1 FROM announcement_institutions ai WHERE ai.announcement_id=$1 AND ai.institution_id=u.institution_id)) OR
+		 ($2='country' AND lower(COALESCE(i.onboarding_country,'')) IN ('india','in')))`, announcementID, audience)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	list := []announcementRecipient{}
+	for rows.Next() {
+		var r announcementRecipient
+		if err := rows.Scan(&r.id, &r.email); err != nil {
+			return nil, err
+		}
+		list = append(list, r)
+	}
+	return list, rows.Err()
 }
 
 // ExpirePoints runs nightly. Marks points older than institution/config expiry.

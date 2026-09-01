@@ -8,9 +8,11 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 
 	"github.com/qwish/backend/internal/httpx"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -33,6 +35,44 @@ type Handler struct {
 
 func NewHandler(db *pgxpool.Pool, cfg *config.Config, notif *notification.Service) *Handler {
 	return &Handler{db: db, cfg: cfg, notif: notif, invite: supabase.NewInviteClient(db, cfg)}
+}
+
+func validContentURL(raw *string) bool {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return true
+	}
+	u, err := url.Parse(strings.TrimSpace(*raw))
+	if err != nil {
+		return false
+	}
+	if u.IsAbs() {
+		return u.Scheme == "https" && u.User == nil && u.Host != ""
+	}
+	if u.Host != "" || u.User != nil {
+		return false
+	}
+	return strings.HasPrefix(u.Path, "/") && !strings.HasPrefix(u.Path, "//")
+}
+
+func allIn(values []string, allowed map[string]bool) bool {
+	if len(values) == 0 {
+		return false
+	}
+	for _, value := range values {
+		if !allowed[value] {
+			return false
+		}
+	}
+	return true
+}
+
+func validUUIDs(values []string) bool {
+	for _, value := range values {
+		if _, err := uuid.Parse(value); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // GET /api/v1/admin/overview
@@ -923,23 +963,47 @@ func (h *Handler) UpdatePointEconomy(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/admin/announcements
 func (h *Handler) CreateAnnouncement(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Title         string     `json:"title"`
-		Body          string     `json:"body"`
-		CTALabel      *string    `json:"cta_label"`
-		CTAURL        *string    `json:"cta_url"`
-		DeliveryTypes []string   `json:"delivery_types"`
-		Audience      string     `json:"audience"`
-		InstitutionID *string    `json:"institution_id"`
-		ScheduledAt   *time.Time `json:"scheduled_at"`
+		Title          string     `json:"title"`
+		Body           string     `json:"body"`
+		CTALabel       *string    `json:"cta_label"`
+		CTAURL         *string    `json:"cta_url"`
+		DeliveryTypes  []string   `json:"delivery_types"`
+		Audience       string     `json:"audience"`
+		InstitutionID  *string    `json:"institution_id"`
+		InstitutionIDs []string   `json:"institution_ids"`
+		ScheduledAt    *time.Time `json:"scheduled_at"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Title == "" || req.Body == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.Body) == "" {
 		middleware.BadRequest(w, "title and body are required")
+		return
+	}
+	if len(req.Title) > 80 || len(req.Body) > 600 || !validContentURL(req.CTAURL) ||
+		!allIn(req.DeliveryTypes, map[string]bool{"in_app_banner": true, "in_app_notification": true, "email": true}) ||
+		!map[string]bool{"all": true, "students": true, "teachers": true, "institution": true, "country": true}[req.Audience] {
+		middleware.BadRequest(w, "invalid announcement fields")
+		return
+	}
+	if req.Audience == "institution" {
+		if len(req.InstitutionIDs) == 0 && req.InstitutionID != nil {
+			req.InstitutionIDs = []string{*req.InstitutionID}
+		}
+		if len(req.InstitutionIDs) == 0 || !validUUIDs(req.InstitutionIDs) {
+			middleware.BadRequest(w, "institution targets are required")
+			return
+		}
+		req.InstitutionID = &req.InstitutionIDs[0]
+	} else {
+		req.InstitutionID = nil
+		req.InstitutionIDs = nil
+	}
+	if req.ScheduledAt != nil && req.ScheduledAt.Before(time.Now()) {
+		middleware.BadRequest(w, "scheduled_at must be in the future")
 		return
 	}
 	adminID := middleware.GetAdminID(r)
 	role := middleware.GetRole(r)
 
-	status := "draft"
+	status := "scheduled"
 	// Moderators can publish in-app directly; email requires super_admin approval
 	hasEmail := false
 	for _, dt := range req.DeliveryTypes {
@@ -948,19 +1012,38 @@ func (h *Handler) CreateAnnouncement(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	if role == "super_admin" && !hasEmail {
-		status = "scheduled"
+	if role != "super_admin" && hasEmail {
+		status = "draft"
 	}
-	_ = hasEmail
 
-	deliveryJSON, _ := json.Marshal(req.DeliveryTypes)
+	tx, err := h.db.Begin(r.Context())
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer tx.Rollback(r.Context())
 	var id string
-	h.db.QueryRow(r.Context(),
+	err = tx.QueryRow(r.Context(),
 		`INSERT INTO announcements (title, body, cta_label, cta_url, delivery_types, audience, institution_id, status, scheduled_at, created_by)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-		req.Title, req.Body, req.CTALabel, req.CTAURL, deliveryJSON, req.Audience, req.InstitutionID, status, req.ScheduledAt, nullableAdmin(adminID),
+		strings.TrimSpace(req.Title), strings.TrimSpace(req.Body), req.CTALabel, req.CTAURL, req.DeliveryTypes, req.Audience, req.InstitutionID, status, req.ScheduledAt, nullableAdmin(adminID),
 	).Scan(&id)
-	middleware.JSON(w, http.StatusCreated, map[string]string{"id": id, "status": status})
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	for _, instID := range req.InstitutionIDs {
+		if _, err = tx.Exec(r.Context(), `INSERT INTO announcement_institutions(announcement_id,institution_id) VALUES($1,$2)`, id, instID); err != nil {
+			middleware.BadRequest(w, "invalid institution target")
+			return
+		}
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	logAudit(r.Context(), h.db, adminID, "create_announcement", "announcement", id, status)
+	middleware.JSON(w, http.StatusCreated, map[string]interface{}{"id": id, "title": strings.TrimSpace(req.Title), "body": strings.TrimSpace(req.Body), "cta_label": req.CTALabel, "cta_url": req.CTAURL, "delivery_types": req.DeliveryTypes, "audience": req.Audience, "institution_ids": req.InstitutionIDs, "status": status, "scheduled_at": req.ScheduledAt, "sent_at": nil, "sent_by": "", "reach": 0})
 }
 
 // GET /api/v1/admin/audit-log
@@ -1355,7 +1438,9 @@ func (h *Handler) ListAnnouncements(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Query(r.Context(),
 		`SELECT a.id, a.title, a.body, a.cta_label, a.cta_url, a.delivery_types, a.audience,
 		        a.status, a.scheduled_at, a.sent_at, a.created_at,
-		        COALESCE(ac.name,''), COALESCE(a.estimated_reach, 0)
+		        COALESCE(ac.name,''),
+		        COALESCE((SELECT COUNT(*) FROM content_delivery_events e WHERE e.content_kind='announcement' AND e.content_id=a.id AND e.event_type='impression'),0),
+		        COALESCE((SELECT array_agg(ai.institution_id::text) FROM announcement_institutions ai WHERE ai.announcement_id=a.id), ARRAY[]::text[])
 		 FROM announcements a
 		 LEFT JOIN admin_accounts ac ON ac.id = a.created_by
 		 WHERE `+where+
@@ -1369,25 +1454,26 @@ func (h *Handler) ListAnnouncements(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type ann struct {
-		ID            string          `json:"id"`
-		Title         string          `json:"title"`
-		Body          string          `json:"body"`
-		CTALabel      *string         `json:"cta_label,omitempty"`
-		CTAURL        *string         `json:"cta_url,omitempty"`
-		DeliveryTypes json.RawMessage `json:"delivery_types"`
-		Audience      string          `json:"audience"`
-		Status        string          `json:"status"`
-		ScheduledAt   *time.Time      `json:"scheduled_at,omitempty"`
-		SentAt        *time.Time      `json:"sent_at,omitempty"`
-		CreatedAt     time.Time       `json:"created_at"`
-		SentBy        string          `json:"sent_by"`
-		Reach         int             `json:"reach"`
+		ID             string     `json:"id"`
+		Title          string     `json:"title"`
+		Body           string     `json:"body"`
+		CTALabel       *string    `json:"cta_label,omitempty"`
+		CTAURL         *string    `json:"cta_url,omitempty"`
+		DeliveryTypes  []string   `json:"delivery_types"`
+		Audience       string     `json:"audience"`
+		Status         string     `json:"status"`
+		ScheduledAt    *time.Time `json:"scheduled_at,omitempty"`
+		SentAt         *time.Time `json:"sent_at,omitempty"`
+		CreatedAt      time.Time  `json:"created_at"`
+		SentBy         string     `json:"sent_by"`
+		Reach          int        `json:"reach"`
+		InstitutionIDs []string   `json:"institution_ids"`
 	}
 	var items []ann
 	for rows.Next() {
 		var a ann
 		rows.Scan(&a.ID, &a.Title, &a.Body, &a.CTALabel, &a.CTAURL, &a.DeliveryTypes, &a.Audience,
-			&a.Status, &a.ScheduledAt, &a.SentAt, &a.CreatedAt, &a.SentBy, &a.Reach)
+			&a.Status, &a.ScheduledAt, &a.SentAt, &a.CreatedAt, &a.SentBy, &a.Reach, &a.InstitutionIDs)
 		items = append(items, a)
 	}
 	if items == nil {
@@ -1399,6 +1485,10 @@ func (h *Handler) ListAnnouncements(w http.ResponseWriter, r *http.Request) {
 // PATCH /api/v1/admin/announcements/:announcementId/retract
 func (h *Handler) RetractAnnouncement(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "announcementId")
+	if _, err := uuid.Parse(id); err != nil {
+		middleware.BadRequest(w, "invalid announcement id")
+		return
+	}
 	tag, err := h.db.Exec(r.Context(),
 		`UPDATE announcements SET status='retracted' WHERE id=$1 AND status IN ('scheduled','sent')`, id)
 	if err != nil {
@@ -1411,6 +1501,26 @@ func (h *Handler) RetractAnnouncement(w http.ResponseWriter, r *http.Request) {
 	}
 	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "retract_announcement", "announcement", id, "")
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "announcement retracted"})
+}
+
+// POST /api/v1/admin/announcements/:announcementId/publish
+func (h *Handler) PublishAnnouncement(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "announcementId")
+	if _, err := uuid.Parse(id); err != nil {
+		middleware.BadRequest(w, "invalid announcement id")
+		return
+	}
+	tag, err := h.db.Exec(r.Context(), `UPDATE announcements SET status='scheduled' WHERE id=$1 AND status='draft'`, id)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		middleware.NotFound(w, "draft announcement")
+		return
+	}
+	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "publish_announcement", "announcement", id, "")
+	middleware.JSON(w, http.StatusOK, map[string]string{"status": "scheduled", "message": "announcement queued"})
 }
 
 // GET /api/v1/admin/promos
@@ -1444,7 +1554,9 @@ func (h *Handler) ListPromos(w http.ResponseWriter, r *http.Request) {
 	// the note on the response type.
 	rows, err := h.db.Query(r.Context(),
 		`SELECT p.id, p.type, p.title, p.body, p.cta_label, p.cta_url, p.audience, p.status,
-		        p.starts_at, p.ends_at, p.created_at, COALESCE(ac.name,'')
+		        p.starts_at, p.ends_at, p.created_at, COALESCE(ac.name,''),
+		        COALESCE((SELECT COUNT(*) FROM content_delivery_events e WHERE e.content_kind='promo' AND e.content_id=p.id AND e.event_type='impression'),0),
+		        COALESCE((SELECT array_agg(pi.institution_id::text) FROM promo_institutions pi WHERE pi.promo_id=p.id), ARRAY[]::text[])
 		 FROM promotional_content p
 		 LEFT JOIN admin_accounts ac ON ac.id = p.created_by
 		 WHERE `+where+
@@ -1461,24 +1573,26 @@ func (h *Handler) ListPromos(w http.ResponseWriter, r *http.Request) {
 	// hardcoded zero dressed as a metric is worse than an absent one. The
 	// console treats it as unavailable.
 	type promo struct {
-		ID        string     `json:"id"`
-		Type      string     `json:"placement"`
-		Title     string     `json:"title"`
-		Body      *string    `json:"body,omitempty"`
-		CTALabel  *string    `json:"cta_label,omitempty"`
-		CTAURL    *string    `json:"cta_url,omitempty"`
-		Audience  string     `json:"target"`
-		Status    string     `json:"status"`
-		StartsAt  *time.Time `json:"start_date,omitempty"`
-		EndsAt    *time.Time `json:"end_date,omitempty"`
-		CreatedAt time.Time  `json:"created_at"`
-		CreatedBy string     `json:"created_by"`
+		ID             string     `json:"id"`
+		Type           string     `json:"placement"`
+		Title          string     `json:"title"`
+		Body           *string    `json:"body,omitempty"`
+		CTALabel       *string    `json:"cta_label,omitempty"`
+		CTAURL         *string    `json:"cta_url,omitempty"`
+		Audience       string     `json:"target"`
+		Status         string     `json:"status"`
+		StartsAt       *time.Time `json:"start_date,omitempty"`
+		EndsAt         *time.Time `json:"end_date,omitempty"`
+		CreatedAt      time.Time  `json:"created_at"`
+		CreatedBy      string     `json:"created_by"`
+		Impressions    int64      `json:"impressions"`
+		InstitutionIDs []string   `json:"institution_ids"`
 	}
 	var promos []promo
 	for rows.Next() {
 		var p promo
 		rows.Scan(&p.ID, &p.Type, &p.Title, &p.Body, &p.CTALabel, &p.CTAURL, &p.Audience, &p.Status,
-			&p.StartsAt, &p.EndsAt, &p.CreatedAt, &p.CreatedBy)
+			&p.StartsAt, &p.EndsAt, &p.CreatedAt, &p.CreatedBy, &p.Impressions, &p.InstitutionIDs)
 		promos = append(promos, p)
 	}
 	if promos == nil {
@@ -1490,47 +1604,122 @@ func (h *Handler) ListPromos(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/admin/promos
 func (h *Handler) CreatePromo(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Title     string     `json:"title"`
-		Body      *string    `json:"body"`
-		CTALabel  *string    `json:"cta_label"`
-		CTAURL    *string    `json:"cta_url"`
-		Placement string     `json:"placement"`
-		Target    string     `json:"target"`
-		StartDate *time.Time `json:"start_date"`
-		EndDate   *time.Time `json:"end_date"`
+		Title          string     `json:"title"`
+		Body           *string    `json:"body"`
+		CTALabel       *string    `json:"cta_label"`
+		CTAURL         *string    `json:"cta_url"`
+		Placement      string     `json:"placement"`
+		Target         string     `json:"target"`
+		StartDate      *time.Time `json:"start_date"`
+		EndDate        *time.Time `json:"end_date"`
+		InstitutionIDs []string   `json:"institution_ids"`
+		Status         string     `json:"status"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Title == "" || req.Placement == "" || req.Target == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Title) == "" || req.Placement == "" || req.Target == "" {
 		middleware.BadRequest(w, "title, placement, and target are required")
 		return
 	}
+	if len(req.Title) > 80 || (req.Body != nil && len(*req.Body) > 600) || !validContentURL(req.CTAURL) ||
+		!map[string]bool{"home_banner": true, "quiz_browser_banner": true, "splash_interstitial": true, "achievement_prompt": true}[req.Placement] ||
+		!map[string]bool{"all": true, "students": true, "institution": true, "lapsed": true}[req.Target] {
+		middleware.BadRequest(w, "invalid promo fields")
+		return
+	}
+	if req.Status == "" {
+		req.Status = "active"
+	}
+	if req.Status != "active" && req.Status != "draft" {
+		middleware.BadRequest(w, "status must be active or draft")
+		return
+	}
+	if req.StartDate != nil && req.EndDate != nil && !req.EndDate.After(*req.StartDate) {
+		middleware.BadRequest(w, "end_date must be after start_date")
+		return
+	}
+	var instID *string
+	if req.Target == "institution" {
+		if len(req.InstitutionIDs) == 0 || !validUUIDs(req.InstitutionIDs) {
+			middleware.BadRequest(w, "institution targets are required")
+			return
+		}
+		instID = &req.InstitutionIDs[0]
+	} else {
+		req.InstitutionIDs = nil
+	}
 	adminID := middleware.GetAdminID(r)
+	tx, err := h.db.Begin(r.Context())
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if req.Status == "active" && req.Placement == "home_banner" && (req.StartDate == nil || !req.StartDate.After(time.Now())) {
+		if _, err = tx.Exec(r.Context(), `UPDATE promotional_content SET status='inactive' WHERE type='home_banner' AND status='active'`); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+	}
 	var id string
-	err := h.db.QueryRow(r.Context(),
-		`INSERT INTO promotional_content (title, body, cta_label, cta_url, type, audience, starts_at, ends_at, created_by)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-		req.Title, req.Body, req.CTALabel, req.CTAURL, req.Placement, req.Target, req.StartDate, req.EndDate, nullableAdmin(adminID),
+	err = tx.QueryRow(r.Context(),
+		`INSERT INTO promotional_content (title, body, cta_label, cta_url, type, audience, institution_id, status, starts_at, ends_at, created_by)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+		strings.TrimSpace(req.Title), req.Body, req.CTALabel, req.CTAURL, req.Placement, req.Target, instID, req.Status, req.StartDate, req.EndDate, nullableAdmin(adminID),
 	).Scan(&id)
 	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
+	for _, targetID := range req.InstitutionIDs {
+		if _, err = tx.Exec(r.Context(), `INSERT INTO promo_institutions(promo_id,institution_id) VALUES($1,$2)`, id, targetID); err != nil {
+			middleware.BadRequest(w, "invalid institution target")
+			return
+		}
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		middleware.InternalError(w)
+		return
+	}
 	logAudit(r.Context(), h.db, adminID, "create_promo", "promo", id, "")
-	middleware.JSON(w, http.StatusCreated, map[string]string{"id": id})
+	middleware.JSON(w, http.StatusCreated, map[string]interface{}{"id": id, "title": strings.TrimSpace(req.Title), "body": req.Body, "cta_label": req.CTALabel, "cta_url": req.CTAURL, "placement": req.Placement, "target": req.Target, "status": req.Status, "start_date": req.StartDate, "end_date": req.EndDate, "institution_ids": req.InstitutionIDs, "impressions": 0, "created_by": ""})
 }
 
 // PATCH /api/v1/admin/promos/:promoId
 func (h *Handler) UpdatePromoStatus(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "promoId")
+	if _, err := uuid.Parse(id); err != nil {
+		middleware.BadRequest(w, "invalid promo id")
+		return
+	}
 	var req struct {
 		Status string `json:"status"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Status == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.Status != "active" && req.Status != "inactive" && req.Status != "draft") {
 		middleware.BadRequest(w, "status is required")
 		return
 	}
-	tag, err := h.db.Exec(r.Context(),
-		`UPDATE promotional_content SET status=$1 WHERE id=$2`, req.Status, id)
+	tx, err := h.db.Begin(r.Context())
 	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	var placement string
+	if err = tx.QueryRow(r.Context(), `SELECT type FROM promotional_content WHERE id=$1 FOR UPDATE`, id).Scan(&placement); err != nil {
+		middleware.NotFound(w, "promo")
+		return
+	}
+	if req.Status == "active" && placement == "home_banner" {
+		if _, err = tx.Exec(r.Context(), `UPDATE promotional_content SET status='inactive' WHERE type='home_banner' AND status='active' AND id<>$1`, id); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+	}
+	tag, err := tx.Exec(r.Context(), `UPDATE promotional_content SET status=$1 WHERE id=$2`, req.Status, id)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
 		middleware.InternalError(w)
 		return
 	}
@@ -1545,6 +1734,10 @@ func (h *Handler) UpdatePromoStatus(w http.ResponseWriter, r *http.Request) {
 // DELETE /api/v1/admin/promos/:promoId
 func (h *Handler) DeletePromo(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "promoId")
+	if _, err := uuid.Parse(id); err != nil {
+		middleware.BadRequest(w, "invalid promo id")
+		return
+	}
 	tag, err := h.db.Exec(r.Context(), `DELETE FROM promotional_content WHERE id=$1`, id)
 	if err != nil {
 		middleware.InternalError(w)

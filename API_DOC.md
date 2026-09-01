@@ -936,6 +936,32 @@ Returns a list of up to 5 personalized quiz recommendations (quizzes in the user
 
 ---
 
+## GET `/users/me/content`
+**Auth required:** Yes
+
+Returns active, currently scheduled promos and in-app announcements that match
+the authenticated user's role and institution. Audience filtering is enforced
+by the server. Items dismissed by this user are omitted.
+
+Each item contains `id`, `kind` (`promo` or `announcement`), `placement`,
+`title`, and optional `body`, `cta_label`, `cta_url`, `starts_at`, `ends_at`.
+
+---
+
+## POST `/users/me/content/{kind}/{contentId}/events`
+**Auth required:** Yes
+
+Records an idempotent unique delivery event for the authenticated user.
+
+```json
+{ "event": "impression" }
+```
+
+`event` must be `impression`, `click`, or `dismiss`. `kind` must be `promo` or
+`announcement`. Returns `204`; clients may safely retry.
+
+---
+
 ## GET `/users/me/quiz-pick`
 **Auth required:** Yes
 
@@ -2691,7 +2717,8 @@ Array of config entries with `key`, `value`, `description`, `updated_at`.
 `status` (`draft`, `scheduled`, `sent`, `retracted`), `page`, `limit`
 
 ### Response `200` (paginated)
-Array with `id`, `title`, `body`, `delivery_types`, `audience`, `status`, `scheduled_at`, `sent_at`, `created_at`.
+Array with `id`, `title`, `body`, `delivery_types`, `audience`, `institution_ids`,
+`status`, `scheduled_at`, `sent_at`, `created_at`, and unique learner `reach`.
 
 ---
 
@@ -2722,18 +2749,32 @@ Retracts a `scheduled` or `sent` announcement. Has no effect on `draft`.
   "body":           "We've added new question types!",
   "cta_label":      "Learn More",
   "cta_url":        "https://...",
-  "delivery_types": ["in_app"],
+  "delivery_types": ["in_app_banner", "in_app_notification"],
   "audience":       "all",
-  "institution_id": null,
+  "institution_ids": [],
   "scheduled_at":   "2024-04-01T09:00:00Z"
 }
 ```
 
-`title` and `body` are required. `delivery_types` can include `in_app` and/or `email`.
+`title` and `body` are required. `delivery_types` can include `in_app_banner`,
+`in_app_notification`, and/or `email`. Audience is `all`, `students`, `teachers`,
+`institution`, or `country`. Institution targeting requires `institution_ids`.
+Moderators' email announcements are created as drafts pending approval.
 
 ### Response `201`
 ```json
 { "id": "uuid", "status": "scheduled" }
+```
+
+---
+
+## POST `/admin/announcements/{announcementId}/publish`
+**Roles:** super_admin
+
+Approves a draft and queues it for the five-minute announcement dispatcher.
+
+```json
+{ "status": "scheduled", "message": "announcement queued" }
 ```
 
 ---
@@ -2840,7 +2881,9 @@ own account.
 `status` (`draft`, `active`, `inactive`), `page`, `limit`
 
 ### Response `200` (paginated)
-Array with `id`, `placement`, `title`, `body`, `cta_label`, `cta_url`, `target`, `status`, `start_date`, `end_date`, `created_at`.
+Array with `id`, `placement`, `title`, `body`, `cta_label`, `cta_url`, `target`,
+`institution_ids`, `status`, `start_date`, `end_date`, `created_at`, and unique
+learner `impressions`.
 
 ---
 
@@ -2856,17 +2899,20 @@ Array with `id`, `placement`, `title`, `body`, `cta_label`, `cta_url`, `target`,
   "cta_url":    "https://...",
   "placement":  "home_banner",
   "target":     "all",
+  "status":     "active",
+  "institution_ids": [],
   "start_date": "2024-06-01T00:00:00Z",
   "end_date":   "2024-06-30T23:59:59Z"
 }
 ```
 
-`title`, `placement`, and `target` are required. `placement` must be one of `home_banner`, `quiz_browser_banner`, `splash_interstitial`, `achievement_prompt`.
+`title`, `placement`, and `target` are required. `placement` must be one of
+`home_banner`, `quiz_browser_banner`, `splash_interstitial`, `achievement_prompt`.
+Target is `all`, `students`, `institution`, or `lapsed`; institution targeting
+requires `institution_ids`. A future `start_date` is displayed as scheduled.
 
 ### Response `201`
-```json
-{ "id": "uuid" }
-```
+Returns the complete created promo object so the console can render it without a reload.
 
 ---
 

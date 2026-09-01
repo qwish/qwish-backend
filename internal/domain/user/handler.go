@@ -412,6 +412,42 @@ func (h *Handler) GetMyRecommendations(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, recs)
 }
 
+// GET /api/v1/users/me/content
+func (h *Handler) GetMyAppContent(w http.ResponseWriter, r *http.Request) {
+	items, err := h.svc.GetAppContent(r.Context(), middleware.GetUserID(r), middleware.GetRole(r), middleware.GetInstitutionID(r))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, items)
+}
+
+// POST /api/v1/users/me/content/{kind}/{contentId}/events
+func (h *Handler) RecordMyContentEvent(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Event string `json:"event"`
+	}
+	contentID := chi.URLParam(r, "contentId")
+	if _, err := uuid.Parse(contentID); err != nil {
+		middleware.BadRequest(w, "invalid content or event")
+		return
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.BadRequest(w, "event is required")
+		return
+	}
+	err := h.svc.RecordContentEvent(r.Context(), middleware.GetUserID(r), chi.URLParam(r, "kind"), contentID, req.Event)
+	if errors.Is(err, ErrInvalidContentEvent) {
+		middleware.BadRequest(w, "invalid content or event")
+		return
+	}
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // GET /api/v1/users/me/quiz-pick?exclude_id=<optional-current-quiz>
 func (h *Handler) PickMyQuiz(w http.ResponseWriter, r *http.Request) {
 	if middleware.GetRole(r) != "student" {

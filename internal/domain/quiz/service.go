@@ -44,6 +44,9 @@ type Quiz struct {
 	// Peer stats over completed attempts; nil when nobody has finished the quiz.
 	AvgScorePct *float64 `json:"avg_score_pct,omitempty"`
 	AvgSeconds  *float64 `json:"avg_seconds,omitempty"`
+	// HasPlayed is derived from the authenticated learner's completed attempts.
+	// It is never accepted from a client write.
+	HasPlayed bool `json:"has_played"`
 }
 
 type Question struct {
@@ -131,16 +134,21 @@ const attemptStatsSelect = `SELECT COUNT(DISTINCT qa.user_id) AS taker_count,
 
 // studentListSelect is the SELECT/FROM prefix of the student quiz list query.
 // Shared with the profiling endpoint so profiled plans match production SQL.
-const studentListSelect = `SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
+func studentListSelect(userArg int) string {
+	return fmt.Sprintf(`SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status,
 		        LEAST(q.question_count, COALESCE(q.question_limit, q.question_count)) AS question_count,
 		        st.taker_count, q.ends_at, q.published_at, q.group_id, q.domain, q.subdomain, q.created_at,
-		        st.avg_score_pct, st.avg_seconds
+		        st.avg_score_pct, st.avg_seconds,
+		        EXISTS (SELECT 1 FROM quiz_attempts mine
+		                WHERE mine.quiz_id = q.id AND mine.user_id = $%d
+		                  AND mine.status = 'completed') AS has_played
 		 FROM quizzes q
 		 JOIN users u ON u.id = q.created_by
 		 LEFT JOIN institutions i ON i.id = u.institution_id
-		 LEFT JOIN LATERAL (` + attemptStatsSelect + `) st ON TRUE
-		 WHERE `
+		 LEFT JOIN LATERAL (`+attemptStatsSelect+`) st ON TRUE
+		 WHERE `, userArg)
+}
 
 // studentListWhere builds the WHERE clause and its args for the student quiz
 // list. Extracted so ListForStudent and the profiling endpoint always run the
@@ -200,15 +208,16 @@ func (s *Service) ListForStudentFiltered(ctx context.Context, institutionID, qui
 		baseWhere += fmt.Sprintf(` AND q.published_at < $%d`, len(args)+1)
 		args = append(args, *publishedBefore)
 	}
-	argN := len(args) + 1
-
 	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quizzes q WHERE `+baseWhere, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
+	userArgN := len(args) + 1
+	args = append(args, userID)
+	argN := len(args) + 1
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(ctx,
-		studentListSelect+baseWhere+
+		studentListSelect(userArgN)+baseWhere+
 			fmt.Sprintf(` ORDER BY q.published_at DESC LIMIT $%d OFFSET $%d`, argN, argN+1),
 		args...)
 	if err != nil {
@@ -990,7 +999,7 @@ func (s *Service) scanQuizRows(rows interface {
 		var q Quiz
 		rows.Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName, &q.Title, &q.Description,
 			&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.Domain, &q.Subdomain, &q.CreatedAt,
-			&q.AvgScorePct, &q.AvgSeconds)
+			&q.AvgScorePct, &q.AvgSeconds, &q.HasPlayed)
 		quizzes = append(quizzes, q)
 	}
 	if quizzes == nil {

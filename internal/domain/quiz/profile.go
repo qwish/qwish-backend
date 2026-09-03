@@ -102,6 +102,9 @@ func findSeqScans(node map[string]interface{}) []string {
 // institutionID and userID are optional; scenarios needing them are skipped
 // when empty, since a bogus UUID would profile an empty result set.
 func (s *Service) ProfileStudentList(ctx context.Context, institutionID, userID, search string, limit, offset int, includePlans bool) ProfileResult {
+	if userID == "" {
+		userID = SystemUserID
+	}
 	if limit <= 0 {
 		limit = 20
 	}
@@ -130,14 +133,15 @@ func (s *Service) ProfileStudentList(ctx context.Context, institutionID, userID,
 	res := ProfileResult{RanAt: time.Now().UTC(), IncludePlans: includePlans}
 	for _, sc := range scenarios {
 		where, args := studentListWhere(sc.inst, "", sc.saved, sc.srch, userID)
-		argN := len(args) + 1
-
 		res.Cases = append(res.Cases,
 			s.explain(ctx, sc.name+" — COUNT", `SELECT COUNT(*) FROM quizzes q WHERE `+where, args, includePlans))
 
-		listArgs := append(append([]interface{}{}, args...), limit, offset)
+		userArgN := len(args) + 1
+		listArgs := append(append([]interface{}{}, args...), userID)
+		argN := len(listArgs) + 1
+		listArgs = append(listArgs, limit, offset)
 		res.Cases = append(res.Cases, s.explain(ctx, sc.name+" — LIST",
-			studentListSelect+where+fmt.Sprintf(` ORDER BY q.published_at DESC LIMIT $%d OFFSET $%d`, argN, argN+1),
+			studentListSelect(userArgN)+where+fmt.Sprintf(` ORDER BY q.published_at DESC LIMIT $%d OFFSET $%d`, argN, argN+1),
 			listArgs, includePlans))
 	}
 	return res

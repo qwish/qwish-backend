@@ -174,14 +174,23 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 	// top_10 depends on a rank the database has to compute, so it is added by
 	// the statement below rather than in Go.
 	streakBadges := []string{}
+	if current >= 3 {
+		streakBadges = append(streakBadges, "warming_up")
+	}
 	if current >= 7 {
 		streakBadges = append(streakBadges, "on_a_roll")
+	}
+	if current >= 14 {
+		streakBadges = append(streakBadges, "locked_in")
 	}
 	if current >= 30 {
 		streakBadges = append(streakBadges, "unstoppable")
 	}
+	if current >= 60 {
+		streakBadges = append(streakBadges, "iron_will")
+	}
 
-	// Both updates, the rank lookup, and every badge insert in one statement.
+	// Both updates and every streak badge insert happen in one statement.
 	// This was up to six sequential round trips inside the transaction; none of
 	// them depended on another's result, so they chain as CTEs instead.
 	if _, err := tx.Exec(ctx,
@@ -195,16 +204,9 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 		   UPDATE users
 		      SET current_streak=$2, longest_streak=$3, last_completed_date=$4, updated_at=now()
 		    WHERE id=$1
-		 ), rank AS (
-		   SELECT COUNT(*) + 1 AS r FROM users
-		    WHERE institution_id = (SELECT institution_id FROM users WHERE id=$1)
-		      AND total_points > (SELECT total_points FROM users WHERE id=$1)
-		      AND status='active'
 		 )
 		 INSERT INTO badges (user_id, badge_type)
 		 SELECT $1, bt FROM unnest($8::text[]) AS bt
-		 UNION ALL
-		 SELECT $1, 'top_10' FROM rank WHERE r <= 10
 		 ON CONFLICT DO NOTHING`,
 		userID, current, longest, todayDate, m7, m15, m30, streakBadges,
 	); err != nil {

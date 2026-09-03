@@ -105,6 +105,16 @@ func (h *Handler) GetMyBadges(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, badges)
 }
 
+// POST /api/v1/users/me/scorecard-shares
+func (h *Handler) RecordMyScorecardShare(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserID(r)
+	if err := h.svc.RecordScorecardShare(r.Context(), userID); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]bool{"recorded": true})
+}
+
 // GET /api/v1/users/me/attempts
 func (h *Handler) GetMyAttempts(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.GetUserID(r)

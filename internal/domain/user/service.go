@@ -73,9 +73,16 @@ type Stats struct {
 }
 
 type Badge struct {
-	BadgeType string    `json:"badge_type"`
-	EarnedAt  time.Time `json:"earned_at"`
-	Earned    bool      `json:"earned"`
+	BadgeType   string     `json:"badge_type"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Category    string     `json:"category"`
+	Rarity      string     `json:"rarity"`
+	Icon        string     `json:"icon"`
+	Current     int64      `json:"current"`
+	Target      int64      `json:"target"`
+	EarnedAt    *time.Time `json:"earned_at,omitempty"`
+	Earned      bool       `json:"earned"`
 }
 
 type AttemptSummary struct {
@@ -174,36 +181,205 @@ func (s *Service) GetStats(ctx context.Context, userID string) (*Stats, error) {
 	return st, nil
 }
 
-var allBadgeTypes = []string{
-	"first_quiz", "on_a_roll", "unstoppable", "top_10",
-	"perfect_score", "speed_demon", "sharp_mind", "explorer",
+type achievementSpec struct {
+	id, name, description, category, rarity, icon string
+	target                                        int64
+}
+
+var achievementSpecs = []achievementSpec{
+	{"welcome_aboard", "Welcome Aboard", "Complete onboarding", "getting_started", "Common", "👋", 1},
+	{"profile_ready", "Profile Ready", "Complete 100% of required profile fields", "getting_started", "Common", "✨", 1},
+	{"first_quiz", "First Sprint", "Complete your very first assessment", "getting_started", "Common", "🚀", 1},
+	{"score_unlocked", "Score Unlocked", "Receive your first Qwish Score", "getting_started", "Common", "🔓", 1},
+	{"first_steps", "First Steps", "Complete 3 quizzes", "getting_started", "Common", "👣", 3},
+	{"getting_serious", "Getting Serious", "Complete 10 quizzes", "getting_started", "Common", "🎯", 10},
+	{"quiz_machine", "Quiz Machine", "Complete 25 quizzes", "quiz_challenge", "Rare", "⚙️", 25},
+	{"half_century", "Half Century", "Complete 50 quizzes", "quiz_challenge", "Rare", "50", 50},
+	{"century", "Century", "Attempt 100 quizzes in total", "quiz_challenge", "Epic", "💯", 100},
+	{"quiz_storm", "Quiz Storm", "Complete 5 quizzes in one day", "quiz_challenge", "Rare", "🌪️", 5},
+	{"marathon_mind", "Marathon Mind", "Complete 10 quizzes in one day", "quiz_challenge", "Epic", "🏃", 10},
+	{"warming_up", "Warming Up", "Maintain a 3-day streak", "streak", "Common", "🔥", 3},
+	{"on_a_roll", "On a Roll", "Maintain a 7-day study streak", "streak", "Rare", "🔥", 7},
+	{"locked_in", "Locked In", "Maintain a 14-day streak", "streak", "Rare", "🔒", 14},
+	{"unstoppable", "Unstoppable", "Reach a 30-day streak. Championship territory.", "streak", "Epic", "⚡", 30},
+	{"iron_will", "Iron Will", "Reach a 60-day streak", "streak", "Legendary", "🛡️", 60},
+	{"sharp_mind", "Sharp Mind", "Score 90% or above on any quiz", "performance", "Common", "🧠", 1},
+	{"perfect_score", "Perfect Score", "Score 100% on any assessment", "performance", "Epic", "⭐", 1},
+	{"triple_threat", "Triple Threat", "Score 90%+ on 3 consecutive quizzes", "performance", "Epic", "🎯", 3},
+	{"hot_streak", "Hot Streak", "Answer 10 questions correctly in a row", "performance", "Rare", "🔥", 10},
+	{"explorer", "Explorer", "Attempt quizzes in 3 different domains", "mastery", "Common", "🗺️", 3},
+	{"jack_of_all_trades", "Jack of All Trades", "Attempt quizzes in 5 different domains", "mastery", "Rare", "🧩", 5},
+	{"try_everything", "Try Everything", "Attempt every active question type on the platform", "mastery", "Epic", "🎮", 1},
+	{"crowd_pleaser", "Crowd Pleaser", "Share your Qwish scorecard 3 times", "social", "Rare", "📣", 3},
+	{"on_the_board", "On the Board", "Appear on your institution leaderboard", "ranking", "Common", "📍", 1},
+	{"top_10", "Top 10", "Break into the Top 10 of your institution", "ranking", "Epic", "🏆", 1},
+	{"number_one", "Number One", "Reach #1 in your institution leaderboard", "ranking", "Legendary", "👑", 1},
+	{"close_call", "Close Call", "Miss a perfect score by exactly one question", "secret", "Rare", "😮", 1},
 }
 
 func (s *Service) GetBadges(ctx context.Context, userID string) ([]Badge, error) {
-	rows, err := s.db.Query(ctx,
-		`SELECT badge_type, earned_at FROM badges WHERE user_id = $1`, userID)
+	// Every value below is calculated from authenticated, server-owned records.
+	// There is deliberately no API that accepts current/target/progress values.
+	current := map[string]int64{}
+	var quizzes, bestDay, longest, domains, questionTypes, activeTypes, shares int64
+	var profileReady, any90, perfect, closeCall bool
+	err := s.db.QueryRow(ctx, `WITH mine AS MATERIALIZED (
+	    SELECT id, quiz_id, score_pct, total_correct, total_questions, completed_at
+	      FROM quiz_attempts WHERE user_id=$1 AND status='completed'
+	  ) SELECT
+	  (SELECT COUNT(*) FROM mine),
+	  COALESCE((SELECT MAX(n) FROM (SELECT COUNT(*) n FROM mine GROUP BY completed_at::date) d),0),
+	  COALESCE((SELECT longest_streak FROM users WHERE id=$1),0),
+	  (SELECT COUNT(DISTINCT q.domain) FROM mine a JOIN quizzes q ON q.id=a.quiz_id WHERE q.domain IS NOT NULL),
+	  (SELECT COUNT(DISTINCT qu.type) FROM question_responses r JOIN mine a ON a.id=r.attempt_id JOIN questions qu ON qu.id=r.question_id),
+	  (SELECT COUNT(DISTINCT qu.type) FROM questions qu JOIN quizzes q ON q.id=qu.quiz_id WHERE q.status='published' AND q.deleted_at IS NULL),
+	  (SELECT COUNT(*) FROM scorecard_share_days WHERE user_id=$1),
+	  COALESCE((SELECT full_name<>'' AND display_name<>'' AND email<>'' AND domain IS NOT NULL AND domain<>'' FROM users WHERE id=$1),false),
+	  COALESCE((SELECT bool_or(score_pct>=90) FROM mine),false),
+	  COALESCE((SELECT bool_or(score_pct=100) FROM mine),false),
+	  COALESCE((SELECT bool_or(total_questions>0 AND total_correct=total_questions-1) FROM mine),false)`, userID).
+		Scan(&quizzes, &bestDay, &longest, &domains, &questionTypes, &activeTypes, &shares, &profileReady, &any90, &perfect, &closeCall)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	for _, id := range []string{"first_quiz", "score_unlocked", "first_steps", "getting_serious", "quiz_machine", "half_century", "century"} {
+		current[id] = quizzes
+	}
+	current["welcome_aboard"] = 1
+	if profileReady {
+		current["profile_ready"] = 1
+	}
+	current["quiz_storm"] = bestDay
+	current["marathon_mind"] = bestDay
+	for _, id := range []string{"warming_up", "on_a_roll", "locked_in", "unstoppable", "iron_will"} {
+		current[id] = longest
+	}
+	current["explorer"] = domains
+	current["jack_of_all_trades"] = domains
+	current["crowd_pleaser"] = shares
+	if activeTypes > 0 {
+		current["try_everything"] = questionTypes
+	}
+
+	if any90 {
+		current["sharp_mind"] = 1
+	}
+	if perfect {
+		current["perfect_score"] = 1
+	}
+	if closeCall {
+		current["close_call"] = 1
+	}
+
+	// PostgreSQL reduces the full history to two integers, avoiding an
+	// unbounded answer stream and allocations in the API process.
+	var bestScoreRun, bestCorrectRun int64
+	err = s.db.QueryRow(ctx, `WITH
+	 scores AS (SELECT score_pct>=90 good, row_number() OVER (ORDER BY completed_at,id) rn FROM quiz_attempts WHERE user_id=$1 AND status='completed'),
+	 score_groups AS (SELECT good, rn-row_number() OVER (PARTITION BY good ORDER BY rn) grp FROM scores),
+	 answers AS (SELECT COALESCE(r.is_correct,false) good, row_number() OVER (ORDER BY a.completed_at,a.id,r.submitted_at,r.id) rn FROM quiz_attempts a JOIN question_responses r ON r.attempt_id=a.id WHERE a.user_id=$1 AND a.status='completed'),
+	 answer_groups AS (SELECT good, rn-row_number() OVER (PARTITION BY good ORDER BY rn) grp FROM answers)
+	 SELECT COALESCE((SELECT MAX(n) FROM (SELECT COUNT(*) n FROM score_groups WHERE good GROUP BY grp) x),0),
+	        COALESCE((SELECT MAX(n) FROM (SELECT COUNT(*) n FROM answer_groups WHERE good GROUP BY grp) x),0)`, userID).Scan(&bestScoreRun, &bestCorrectRun)
+	if err != nil {
+		return nil, err
+	}
+	current["triple_threat"] = bestScoreRun
+	current["hot_streak"] = bestCorrectRun
+
+	// Rank uses the incrementally maintained score and eligibility rules from
+	// the leaderboard endpoint; it never scans answer history or trusts a client.
+	var rank int64
+	_ = s.db.QueryRow(ctx, `WITH me AS (
+	 SELECT u.institution_id,u.role,COALESCE(ls.qwish_score,100) score,COALESCE(ls.completed_quizzes,0) completed
+	 FROM users u LEFT JOIN leaderboard_scores ls ON ls.user_id=u.id WHERE u.id=$1
+	) SELECT CASE WHEN institution_id IS NULL OR role<>'student' OR completed<5 THEN 0 ELSE
+	 (SELECT COUNT(*)+1 FROM users x LEFT JOIN leaderboard_scores xs ON xs.user_id=x.id
+	   WHERE x.institution_id=me.institution_id AND x.status='active' AND x.role='student'
+	     AND COALESCE(xs.qwish_score,100)>me.score) END FROM me`, userID).Scan(&rank)
+	if rank > 0 {
+		current["on_the_board"] = 1
+	}
+	if rank > 0 && rank <= 10 {
+		current["top_10"] = 1
+	}
+	if rank == 1 {
+		current["number_one"] = 1
+	}
 
 	earned := map[string]time.Time{}
-	for rows.Next() {
-		var bt string
-		var ea time.Time
-		rows.Scan(&bt, &ea)
-		earned[bt] = ea
+	earnedRows, err := s.db.Query(ctx, `SELECT badge_type,earned_at FROM badges WHERE user_id=$1`, userID)
+	if err != nil {
+		return nil, err
 	}
+	for earnedRows.Next() {
+		var id string
+		var at time.Time
+		if err := earnedRows.Scan(&id, &at); err != nil {
+			earnedRows.Close()
+			return nil, err
+		}
+		earned[id] = at
+	}
+	if err := earnedRows.Err(); err != nil {
+		earnedRows.Close()
+		return nil, err
+	}
+	earnedRows.Close()
 
-	result := make([]Badge, 0, len(allBadgeTypes))
-	for _, bt := range allBadgeTypes {
-		if ea, ok := earned[bt]; ok {
-			result = append(result, Badge{BadgeType: bt, EarnedAt: ea, Earned: true})
-		} else {
-			result = append(result, Badge{BadgeType: bt, Earned: false})
+	var newlyEarned []string
+	for _, spec := range achievementSpecs {
+		target := spec.target
+		if spec.id == "try_everything" && activeTypes > 0 {
+			target = activeTypes
+		}
+		if current[spec.id] >= target && earned[spec.id].IsZero() {
+			newlyEarned = append(newlyEarned, spec.id)
 		}
 	}
+	if len(newlyEarned) > 0 {
+		rows, insertErr := s.db.Query(ctx, `INSERT INTO badges(user_id,badge_type) SELECT $1,x FROM unnest($2::text[]) x ON CONFLICT DO NOTHING RETURNING badge_type,earned_at`, userID, newlyEarned)
+		err = insertErr
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			var at time.Time
+			if err := rows.Scan(&id, &at); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			earned[id] = at
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	result := make([]Badge, 0, len(achievementSpecs))
+	for _, spec := range achievementSpecs {
+		target := spec.target
+		if spec.id == "try_everything" && activeTypes > 0 {
+			target = activeTypes
+		}
+		at, ok := earned[spec.id]
+		var atp *time.Time
+		if ok {
+			v := at
+			atp = &v
+		}
+		result = append(result, Badge{BadgeType: spec.id, Name: spec.name, Description: spec.description, Category: spec.category, Rarity: spec.rarity, Icon: spec.icon, Current: current[spec.id], Target: target, EarnedAt: atp, Earned: ok})
+	}
 	return result, nil
+}
+
+// RecordScorecardShare credits at most one share per server day. Replays and
+// forged client counters cannot advance it more than once in that period.
+func (s *Service) RecordScorecardShare(ctx context.Context, userID string) error {
+	_, err := s.db.Exec(ctx, `INSERT INTO scorecard_share_days(user_id) VALUES($1) ON CONFLICT DO NOTHING`, userID)
+	return err
 }
 
 func (s *Service) GetAttempts(ctx context.Context, userID string, page, limit int) ([]AttemptSummary, int, error) {

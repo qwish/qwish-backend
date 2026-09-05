@@ -224,7 +224,8 @@ func (s *Service) ListForStudentFiltered(ctx context.Context, institutionID, qui
 		return nil, 0, err
 	}
 	defer rows.Close()
-	return s.scanQuizRows(rows), total, nil
+	quizzes, err := s.scanQuizRows(rows)
+	return quizzes, total, err
 }
 
 func (s *Service) GetByID(ctx context.Context, quizID string) (*Quiz, error) {
@@ -824,14 +825,15 @@ func (s *Service) ListForTeacher(ctx context.Context, teacherID, statusFilter st
 		`SELECT q.id, q.institution_id, q.created_by, '' as teacher, '' as institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
 		        0 AS taker_count, q.ends_at, q.published_at, q.group_id, q.domain, q.subdomain, q.created_at,
-		        NULL::float8, NULL::float8
+		        NULL::float8, NULL::float8, false AS has_played
 		 FROM quizzes q WHERE `+where+fmt.Sprintf(` ORDER BY q.created_at DESC LIMIT $%d OFFSET $%d`, n-1, n),
 		args...)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer rows.Close()
-	return s.scanQuizRows(rows), total, nil
+	quizzes, err := s.scanQuizRows(rows)
+	return quizzes, total, err
 }
 
 // InstitutionQuiz is a Quiz as an institution admin sees it: the admin list is
@@ -993,17 +995,19 @@ func (s *Service) scanQuizRows(rows interface {
 	Next() bool
 	Scan(...interface{}) error
 	Close()
-}) []Quiz {
+}) ([]Quiz, error) {
 	var quizzes []Quiz
 	for rows.Next() {
 		var q Quiz
-		rows.Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName, &q.Title, &q.Description,
+		if err := rows.Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName, &q.Title, &q.Description,
 			&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.Domain, &q.Subdomain, &q.CreatedAt,
-			&q.AvgScorePct, &q.AvgSeconds, &q.HasPlayed)
+			&q.AvgScorePct, &q.AvgSeconds, &q.HasPlayed); err != nil {
+			return nil, fmt.Errorf("scan quiz row: %w", err)
+		}
 		quizzes = append(quizzes, q)
 	}
 	if quizzes == nil {
 		quizzes = []Quiz{}
 	}
-	return quizzes
+	return quizzes, nil
 }

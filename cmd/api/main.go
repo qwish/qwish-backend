@@ -18,6 +18,7 @@ import (
 	"github.com/qwish/backend/internal/domain/auth"
 	"github.com/qwish/backend/internal/domain/avatar"
 	"github.com/qwish/backend/internal/domain/contact"
+	"github.com/qwish/backend/internal/domain/curriculum"
 	"github.com/qwish/backend/internal/domain/demo"
 	"github.com/qwish/backend/internal/domain/editrequest"
 	"github.com/qwish/backend/internal/domain/enrollment"
@@ -92,6 +93,7 @@ func main() {
 	enrollmentSvc := enrollment.NewService(pool)
 	institutionH := institution.NewHandler(pool, notifSvc, enrollmentSvc, cfg.AppURL, cfg.TeacherURL)
 	teacherH := teacher.NewHandler(pool)
+	curriculumH := curriculum.NewHandler(curriculum.NewService(pool))
 	adminH := admin.NewHandler(pool, cfg, notifSvc)
 	metricsH := metrics.NewHandler(pool, admin.MetricsScopeResolver(pool))
 	instMetricsH := metrics.NewHandler(pool, institution.MetricsScopeResolver())
@@ -538,6 +540,7 @@ func main() {
 				// ---- Teacher routes ----
 				r.Route("/teacher", func(r chi.Router) {
 					r.Use(mw.RequireRole("teacher"))
+					curriculumH.TeacherRoutes(r)
 					r.Get("/overview", teacherH.Overview)
 					r.Get("/quizzes/taxonomy", quizH.GetTaxonomy)
 					r.Get("/quizzes", quizH.TeacherList)
@@ -598,6 +601,7 @@ func main() {
 				// ---- Institution Admin routes ----
 				r.Route("/institution", func(r chi.Router) {
 					r.Use(mw.RequireRole("institution_admin"))
+					curriculumH.InstitutionRoutes(r)
 					r.Get("/overview", institutionH.Overview)
 					r.Get("/students", institutionH.ListStudents)
 					r.Post("/students", enrollmentInstH.CreateStudent)

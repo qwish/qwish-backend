@@ -482,6 +482,9 @@ type FollowUpOutcome struct {
 	AfterCorrect   int        `json:"after_correct"`
 	AfterTotal     int        `json:"after_total"`
 	AfterStudents  int        `json:"after_students"`
+	ReviewStatus   string     `json:"review_status"`
+	ReviewNote     *string    `json:"review_note"`
+	ReviewedAt     *time.Time `json:"reviewed_at"`
 }
 
 func (h *Handler) FollowUpOutcomes(w http.ResponseWriter, r *http.Request) {
@@ -495,7 +498,8 @@ func (h *Handler) FollowUpOutcomes(w http.ResponseWriter, r *http.Request) {
 		       COUNT(DISTINCT le.user_id) FILTER (WHERE le.occurred_at<a.created_at),
 		       COUNT(le.id) FILTER (WHERE le.occurred_at>=a.created_at AND le.is_correct),
 		       COUNT(le.id) FILTER (WHERE le.occurred_at>=a.created_at),
-		       COUNT(DISTINCT le.user_id) FILTER (WHERE le.occurred_at>=a.created_at)
+		       COUNT(DISTINCT le.user_id) FILTER (WHERE le.occurred_at>=a.created_at),
+		       a.follow_up_review_status,a.follow_up_note,a.follow_up_reviewed_at
 		FROM learning_assignments a
 		JOIN groups g ON g.id=a.group_id AND g.institution_id=a.institution_id
 		JOIN group_teachers gt ON gt.group_id=a.group_id AND gt.user_id=$1
@@ -516,7 +520,7 @@ func (h *Handler) FollowUpOutcomes(w http.ResponseWriter, r *http.Request) {
 	result := []FollowUpOutcome{}
 	for rows.Next() {
 		var item FollowUpOutcome
-		if err := rows.Scan(&item.AssignmentID, &item.QuizID, &item.QuizTitle, &item.GroupID, &item.GroupName, &item.ConceptID, &item.ConceptCode, &item.ConceptTitle, &item.Status, &item.CreatedAt, &item.DueAt, &item.Recipients, &item.Submitted, &item.BeforeCorrect, &item.BeforeTotal, &item.BeforeStudents, &item.AfterCorrect, &item.AfterTotal, &item.AfterStudents); err != nil {
+		if err := rows.Scan(&item.AssignmentID, &item.QuizID, &item.QuizTitle, &item.GroupID, &item.GroupName, &item.ConceptID, &item.ConceptCode, &item.ConceptTitle, &item.Status, &item.CreatedAt, &item.DueAt, &item.Recipients, &item.Submitted, &item.BeforeCorrect, &item.BeforeTotal, &item.BeforeStudents, &item.AfterCorrect, &item.AfterTotal, &item.AfterStudents, &item.ReviewStatus, &item.ReviewNote, &item.ReviewedAt); err != nil {
 			middleware.InternalError(w)
 			return
 		}
@@ -527,6 +531,41 @@ func (h *Handler) FollowUpOutcomes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	middleware.JSON(w, http.StatusOK, result)
+}
+
+type followUpReviewInput struct {
+	Status string `json:"status"`
+	Note   string `json:"note"`
+}
+
+func (h *Handler) ReviewFollowUp(w http.ResponseWriter, r *http.Request) {
+	var in followUpReviewInput
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&in) != nil || (in.Status != "continue_support" && in.Status != "resolved") {
+		middleware.BadRequest(w, "status must be continue_support or resolved")
+		return
+	}
+	in.Note = strings.TrimSpace(in.Note)
+	if len(in.Note) > 2000 {
+		middleware.BadRequest(w, "note must be 2000 characters or fewer")
+		return
+	}
+	result, err := h.db.Exec(r.Context(), `UPDATE learning_assignments a
+		SET follow_up_review_status=$1,follow_up_note=NULLIF($2,''),follow_up_reviewed_by=$3,follow_up_reviewed_at=now(),
+		    status=CASE WHEN $1='resolved' THEN 'closed' ELSE 'published' END
+		WHERE a.id=$4 AND a.institution_id=$5 AND a.purpose='follow_up' AND a.source_concept_id IS NOT NULL
+		AND EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id=a.group_id AND gt.user_id=$3)`,
+		in.Status, in.Note, middleware.GetUserID(r), chi.URLParam(r, "assignmentId"), middleware.GetInstitutionID(r))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if result.RowsAffected() == 0 {
+		middleware.NotFound(w, "follow-up assignment")
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]string{"status": in.Status})
 }
 
 func (h *Handler) CloseAssignment(w http.ResponseWriter, r *http.Request) {

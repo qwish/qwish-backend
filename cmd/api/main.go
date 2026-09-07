@@ -566,6 +566,7 @@ func main() {
 					r.Post("/assignments", learningH.CreateAssignment)
 					r.Get("/assignments", learningH.ListAssignments)
 					r.Get("/follow-up-outcomes", learningH.FollowUpOutcomes)
+					r.Patch("/follow-up-outcomes/{assignmentId}/review", learningH.ReviewFollowUp)
 					r.Patch("/assignments/{assignmentId}/close", learningH.CloseAssignment)
 					r.Get("/quizzes/{quizId}/questions", quizH.TeacherGetQuestions)
 					r.Post("/quizzes/{quizId}/questions", quizH.TeacherAddQuestion)

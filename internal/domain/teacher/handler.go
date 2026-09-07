@@ -34,6 +34,7 @@ func (h *Handler) hasGroupAssignments(r *http.Request, teacherID string) bool {
 // GET /api/v1/teacher/overview
 func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 	teacherID := middleware.GetUserID(r)
+	instID := middleware.GetInstitutionID(r)
 
 	var drafts, pending, published, totalAttempts int
 	var avgScore float64
@@ -78,10 +79,36 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		recent = append(recent, rr)
 	}
 
+	type recentQuiz struct {
+		ID        string    `json:"id"`
+		Title     string    `json:"title"`
+		Status    string    `json:"status"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	recentQuizzes := []recentQuiz{}
+	quizRows, err := h.db.Query(r.Context(), `SELECT id,title,status,updated_at FROM quizzes
+		WHERE created_by=$1 AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 5`, teacherID)
+	if err == nil {
+		defer quizRows.Close()
+		for quizRows.Next() {
+			var item recentQuiz
+			if quizRows.Scan(&item.ID, &item.Title, &item.Status, &item.UpdatedAt) == nil {
+				recentQuizzes = append(recentQuizzes, item)
+			}
+		}
+	}
+
+	var weeklyAssignments, weeklyCompletions, weeklyPublished int
+	h.db.QueryRow(r.Context(), `SELECT
+		(SELECT COUNT(*) FROM learning_assignments WHERE created_by=$1 AND created_at >= date_trunc('week',now())),
+		(SELECT COUNT(*) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id WHERE q.created_by=$1 AND qa.status='completed' AND qa.completed_at >= date_trunc('week',now())),
+		(SELECT COUNT(*) FROM quizzes WHERE created_by=$1 AND published_at >= date_trunc('week',now()) AND deleted_at IS NULL)`, teacherID,
+	).Scan(&weeklyAssignments, &weeklyCompletions, &weeklyPublished)
+
 	var openTopicRequests int
 	h.db.QueryRow(r.Context(),
-		`SELECT COUNT(*) FROM topic_requests WHERE status='pending' AND (assigned_to=$1 OR assigned_to IS NULL)`,
-		teacherID).Scan(&openTopicRequests)
+		`SELECT COUNT(*) FROM topic_requests WHERE institution_id=$1 AND status='pending' AND (assigned_to=$2 OR assigned_to IS NULL)`,
+		instID, teacherID).Scan(&openTopicRequests)
 
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"drafts":              drafts,
@@ -91,6 +118,12 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		"average_score":       avgScore,
 		"open_topic_requests": openTopicRequests,
 		"recent_attempts":     recent,
+		"recent_quizzes":      recentQuizzes,
+		"weekly_progress": map[string]int{
+			"assignments_created":   weeklyAssignments,
+			"student_completions":   weeklyCompletions,
+			"assessments_published": weeklyPublished,
+		},
 	})
 }
 

@@ -260,6 +260,62 @@ func (h *Handler) InstitutionSummary(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, result)
 }
 
+// TeacherClassSummary returns concept evidence only for students in classes
+// assigned to the authenticated teacher. A supplied class_id narrows that
+// scope; it never expands it.
+func (h *Handler) TeacherClassSummary(w http.ResponseWriter, r *http.Request) {
+	classID := strings.TrimSpace(r.URL.Query().Get("class_id"))
+	rows, err := h.db.Query(r.Context(), `WITH per_student AS (
+		SELECT le.user_id,le.concept_id,c.code,c.title,
+		       COUNT(*) FILTER(WHERE le.is_correct) AS correct_count,
+		       COUNT(*) FILTER(WHERE NOT le.is_correct) AS error_count,
+		       COUNT(DISTINCT le.question_id) AS distinct_questions,
+		       MAX(le.occurred_at) AS latest_evidence_at
+		FROM learning_evidence le
+		JOIN curriculum_concepts c ON c.id=le.concept_id
+		WHERE le.institution_id=$1
+		  AND EXISTS (
+		    SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id
+		    WHERE gs.user_id=le.user_id AND gt.user_id=$2 AND ($3='' OR gs.group_id::text=$3)
+		  )
+		GROUP BY le.user_id,le.concept_id,c.code,c.title
+	)
+	SELECT concept_id,code,title,COUNT(*) AS students_assessed,
+	       SUM(correct_count),SUM(error_count),SUM(distinct_questions),
+	       COUNT(*) FILTER(WHERE distinct_questions>=2 AND error_count>correct_count) AS students_needing_support,
+	       MAX(latest_evidence_at)
+	FROM per_student
+	GROUP BY concept_id,code,title
+	ORDER BY students_needing_support DESC,error_count DESC,latest_evidence_at DESC
+	LIMIT 100`, middleware.GetInstitutionID(r), middleware.GetUserID(r), classID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+	result := []map[string]interface{}{}
+	for rows.Next() {
+		var conceptID, code, title string
+		var students, correct, errors, questions, needsSupport int
+		var latest interface{}
+		if err := rows.Scan(&conceptID, &code, &title, &students, &correct, &errors, &questions, &needsSupport, &latest); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+		result = append(result, map[string]interface{}{
+			"concept_id": conceptID, "concept_code": code, "concept_title": title,
+			"students_assessed": students, "correct_evidence": correct, "error_evidence": errors,
+			"distinct_questions": questions, "students_needing_support": needsSupport,
+			"latest_evidence_at": latest,
+		})
+	}
+	if rows.Err() != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, result)
+}
+
 func (h *Handler) StudentAssignments(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Query(r.Context(), `SELECT a.id,a.quiz_id,q.title,a.purpose,a.due_at,ar.status,ar.attempt_id
 		FROM learning_assignment_recipients ar JOIN learning_assignments a ON a.id=ar.assignment_id JOIN quizzes q ON q.id=a.quiz_id

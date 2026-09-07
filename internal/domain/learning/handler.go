@@ -463,54 +463,84 @@ func (h *Handler) CreateAssignment(w http.ResponseWriter, r *http.Request) {
 }
 
 type FollowUpOutcome struct {
-	AssignmentID   string     `json:"assignment_id"`
-	QuizID         string     `json:"quiz_id"`
-	QuizTitle      string     `json:"quiz_title"`
-	GroupID        string     `json:"group_id"`
-	GroupName      string     `json:"group_name"`
-	ConceptID      string     `json:"concept_id"`
-	ConceptCode    string     `json:"concept_code"`
-	ConceptTitle   string     `json:"concept_title"`
-	Status         string     `json:"status"`
-	CreatedAt      time.Time  `json:"created_at"`
-	DueAt          *time.Time `json:"due_at"`
-	Recipients     int        `json:"recipients"`
-	Submitted      int        `json:"submitted"`
-	BeforeCorrect  int        `json:"before_correct"`
-	BeforeTotal    int        `json:"before_total"`
-	BeforeStudents int        `json:"before_students"`
-	AfterCorrect   int        `json:"after_correct"`
-	AfterTotal     int        `json:"after_total"`
-	AfterStudents  int        `json:"after_students"`
-	ReviewStatus   string     `json:"review_status"`
-	ReviewNote     *string    `json:"review_note"`
-	ReviewedAt     *time.Time `json:"reviewed_at"`
+	AssignmentID       string     `json:"assignment_id"`
+	QuizID             string     `json:"quiz_id"`
+	QuizTitle          string     `json:"quiz_title"`
+	GroupID            string     `json:"group_id"`
+	GroupName          string     `json:"group_name"`
+	ConceptID          string     `json:"concept_id"`
+	ConceptCode        string     `json:"concept_code"`
+	ConceptTitle       string     `json:"concept_title"`
+	Status             string     `json:"status"`
+	CreatedAt          time.Time  `json:"created_at"`
+	DueAt              *time.Time `json:"due_at"`
+	Recipients         int        `json:"recipients"`
+	Submitted          int        `json:"submitted"`
+	BeforeCorrect      int        `json:"before_correct"`
+	BeforeTotal        int        `json:"before_total"`
+	BeforeStudents     int        `json:"before_students"`
+	BeforeQuestions    int        `json:"before_questions"`
+	AfterCorrect       int        `json:"after_correct"`
+	AfterTotal         int        `json:"after_total"`
+	AfterStudents      int        `json:"after_students"`
+	AfterQuestions     int        `json:"after_questions"`
+	ComparableStudents int        `json:"comparable_students"`
+	ComparisonStatus   string     `json:"comparison_status"`
+	ComparisonEndsAt   time.Time  `json:"comparison_ends_at"`
+	ReviewStatus       string     `json:"review_status"`
+	ReviewNote         *string    `json:"review_note"`
+	ReviewedAt         *time.Time `json:"reviewed_at"`
 }
 
 func (h *Handler) FollowUpOutcomes(w http.ResponseWriter, r *http.Request) {
 	groupID := strings.TrimSpace(r.URL.Query().Get("class_id"))
 	rows, err := h.db.Query(r.Context(), `
+		WITH scoped AS (
+		  SELECT a.*,LEAST(
+		    a.created_at+interval '90 days',
+		    COALESCE(LEAD(a.created_at) OVER (PARTITION BY a.group_id,a.source_concept_id ORDER BY a.created_at),a.created_at+interval '90 days')
+		  ) AS comparison_ends_at
+		  FROM learning_assignments a
+		  WHERE a.institution_id=$2 AND a.purpose='follow_up' AND a.source_concept_id IS NOT NULL
+		), evidence AS (
+		  SELECT a.id AS assignment_id,ar.student_id,le.id,le.question_id,le.is_correct,le.occurred_at
+		  FROM scoped a
+		  JOIN learning_assignment_recipients ar ON ar.assignment_id=a.id
+		  LEFT JOIN learning_evidence le ON le.institution_id=a.institution_id
+		    AND le.user_id=ar.student_id AND le.concept_id=a.source_concept_id
+		    AND le.occurred_at>=a.created_at-interval '90 days' AND le.occurred_at<a.comparison_ends_at
+		), paired AS (
+		  SELECT assignment_id,student_id
+		  FROM evidence e JOIN scoped a ON a.id=e.assignment_id
+		  GROUP BY assignment_id,student_id,a.created_at
+		  HAVING COUNT(e.id) FILTER (WHERE e.occurred_at<a.created_at)>0
+		     AND COUNT(e.id) FILTER (WHERE e.occurred_at>=a.created_at)>0
+		)
 		SELECT a.id,a.quiz_id,q.title,a.group_id,g.name,c.id,c.code,c.title,a.status,a.created_at,a.due_at,
 		       COUNT(DISTINCT ar.student_id),
 		       COUNT(DISTINCT ar.student_id) FILTER (WHERE ar.status='submitted'),
-		       COUNT(le.id) FILTER (WHERE le.occurred_at<a.created_at AND le.is_correct),
-		       COUNT(le.id) FILTER (WHERE le.occurred_at<a.created_at),
-		       COUNT(DISTINCT le.user_id) FILTER (WHERE le.occurred_at<a.created_at),
-		       COUNT(le.id) FILTER (WHERE le.occurred_at>=a.created_at AND le.is_correct),
-		       COUNT(le.id) FILTER (WHERE le.occurred_at>=a.created_at),
-		       COUNT(DISTINCT le.user_id) FILTER (WHERE le.occurred_at>=a.created_at),
+		       COUNT(e.id) FILTER (WHERE e.occurred_at<a.created_at AND e.is_correct),
+		       COUNT(e.id) FILTER (WHERE e.occurred_at<a.created_at),
+		       COUNT(DISTINCT e.student_id) FILTER (WHERE e.occurred_at<a.created_at),
+		       COUNT(DISTINCT e.question_id) FILTER (WHERE e.occurred_at<a.created_at),
+		       COUNT(e.id) FILTER (WHERE e.occurred_at>=a.created_at AND e.is_correct),
+		       COUNT(e.id) FILTER (WHERE e.occurred_at>=a.created_at),
+		       COUNT(DISTINCT e.student_id) FILTER (WHERE e.occurred_at>=a.created_at),
+		       COUNT(DISTINCT e.question_id) FILTER (WHERE e.occurred_at>=a.created_at),
+		       COUNT(DISTINCT p.student_id),a.comparison_ends_at,
 		       a.follow_up_review_status,a.follow_up_note,a.follow_up_reviewed_at
-		FROM learning_assignments a
+		FROM scoped a
 		JOIN groups g ON g.id=a.group_id AND g.institution_id=a.institution_id
 		JOIN group_teachers gt ON gt.group_id=a.group_id AND gt.user_id=$1
 		JOIN quizzes q ON q.id=a.quiz_id
 		JOIN curriculum_concepts c ON c.id=a.source_concept_id
 		LEFT JOIN learning_assignment_recipients ar ON ar.assignment_id=a.id
-		LEFT JOIN learning_evidence le ON le.institution_id=a.institution_id
-		  AND le.user_id=ar.student_id AND le.concept_id=a.source_concept_id
-		  AND le.occurred_at>=a.created_at-interval '90 days'
-		WHERE a.institution_id=$2 AND a.purpose='follow_up' AND ($3='' OR a.group_id::text=$3)
-		GROUP BY a.id,q.title,g.name,c.id,c.code,c.title
+		LEFT JOIN evidence e ON e.assignment_id=a.id AND e.student_id=ar.student_id
+		LEFT JOIN paired p ON p.assignment_id=a.id AND p.student_id=ar.student_id
+		WHERE ($3='' OR a.group_id::text=$3)
+		GROUP BY a.id,a.quiz_id,a.group_id,a.status,a.created_at,a.due_at,a.comparison_ends_at,
+		         a.follow_up_review_status,a.follow_up_note,a.follow_up_reviewed_at,
+		         q.title,g.name,c.id,c.code,c.title
 		ORDER BY a.created_at DESC LIMIT 100`, middleware.GetUserID(r), middleware.GetInstitutionID(r), groupID)
 	if err != nil {
 		middleware.InternalError(w)
@@ -520,9 +550,17 @@ func (h *Handler) FollowUpOutcomes(w http.ResponseWriter, r *http.Request) {
 	result := []FollowUpOutcome{}
 	for rows.Next() {
 		var item FollowUpOutcome
-		if err := rows.Scan(&item.AssignmentID, &item.QuizID, &item.QuizTitle, &item.GroupID, &item.GroupName, &item.ConceptID, &item.ConceptCode, &item.ConceptTitle, &item.Status, &item.CreatedAt, &item.DueAt, &item.Recipients, &item.Submitted, &item.BeforeCorrect, &item.BeforeTotal, &item.BeforeStudents, &item.AfterCorrect, &item.AfterTotal, &item.AfterStudents, &item.ReviewStatus, &item.ReviewNote, &item.ReviewedAt); err != nil {
+		if err := rows.Scan(&item.AssignmentID, &item.QuizID, &item.QuizTitle, &item.GroupID, &item.GroupName, &item.ConceptID, &item.ConceptCode, &item.ConceptTitle, &item.Status, &item.CreatedAt, &item.DueAt, &item.Recipients, &item.Submitted, &item.BeforeCorrect, &item.BeforeTotal, &item.BeforeStudents, &item.BeforeQuestions, &item.AfterCorrect, &item.AfterTotal, &item.AfterStudents, &item.AfterQuestions, &item.ComparableStudents, &item.ComparisonEndsAt, &item.ReviewStatus, &item.ReviewNote, &item.ReviewedAt); err != nil {
 			middleware.InternalError(w)
 			return
+		}
+		item.ComparisonStatus = "comparable"
+		if item.AfterTotal == 0 {
+			item.ComparisonStatus = "awaiting_after_evidence"
+		} else if item.ComparableStudents < 3 {
+			item.ComparisonStatus = "insufficient_student_overlap"
+		} else if item.BeforeQuestions < 2 || item.AfterQuestions < 2 {
+			item.ComparisonStatus = "insufficient_question_variety"
 		}
 		result = append(result, item)
 	}

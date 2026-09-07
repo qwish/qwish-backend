@@ -344,10 +344,11 @@ func (h *Handler) StudentAssignments(w http.ResponseWriter, r *http.Request) {
 }
 
 type assignmentInput struct {
-	GroupID string  `json:"group_id"`
-	QuizID  string  `json:"quiz_id"`
-	Purpose string  `json:"purpose"`
-	DueAt   *string `json:"due_at"`
+	GroupID   string  `json:"group_id"`
+	QuizID    string  `json:"quiz_id"`
+	Purpose   string  `json:"purpose"`
+	DueAt     *string `json:"due_at"`
+	ConceptID *string `json:"concept_id"`
 }
 
 type TeacherAssignment struct {
@@ -423,6 +424,10 @@ func (h *Handler) CreateAssignment(w http.ResponseWriter, r *http.Request) {
 		}
 		dueAt = parsed
 	}
+	conceptID := ""
+	if in.ConceptID != nil {
+		conceptID = strings.TrimSpace(*in.ConceptID)
+	}
 	tx, err := h.db.Begin(r.Context())
 	if err != nil {
 		middleware.InternalError(w)
@@ -430,8 +435,17 @@ func (h *Handler) CreateAssignment(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	var id string
-	err = tx.QueryRow(r.Context(), `INSERT INTO learning_assignments(institution_id,group_id,quiz_id,purpose,due_at,created_by)
-		SELECT $1,g.id,q.id,$3,$4,$5 FROM groups g JOIN quizzes q ON q.id=$2 WHERE g.id=$6 AND g.institution_id=$1 AND q.created_by=$5 AND q.status='published' AND EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id=g.id AND gt.user_id=$5) RETURNING id`, middleware.GetInstitutionID(r), in.QuizID, in.Purpose, dueAt, middleware.GetUserID(r), in.GroupID).Scan(&id)
+	err = tx.QueryRow(r.Context(), `INSERT INTO learning_assignments(institution_id,group_id,quiz_id,purpose,due_at,created_by,source_concept_id)
+		SELECT $1,g.id,q.id,$3,$4,$5,NULLIF($7,'')::uuid
+		FROM groups g JOIN quizzes q ON q.id=$2
+		WHERE g.id=$6 AND g.institution_id=$1 AND q.created_by=$5 AND q.status='published'
+		AND EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id=g.id AND gt.user_id=$5)
+		AND ($7='' OR EXISTS(
+			SELECT 1 FROM curriculum_concepts c
+			JOIN curriculum_chapters ch ON ch.id=c.chapter_id
+			JOIN curriculum_versions cv ON cv.id=ch.version_id
+			WHERE c.id::text=$7 AND cv.institution_id=$1
+		)) RETURNING id`, middleware.GetInstitutionID(r), in.QuizID, in.Purpose, dueAt, middleware.GetUserID(r), in.GroupID, conceptID).Scan(&id)
 	if err != nil {
 		middleware.BadRequest(w, "quiz or class is unavailable to this teacher")
 		return
@@ -446,6 +460,73 @@ func (h *Handler) CreateAssignment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	middleware.JSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
+type FollowUpOutcome struct {
+	AssignmentID   string     `json:"assignment_id"`
+	QuizID         string     `json:"quiz_id"`
+	QuizTitle      string     `json:"quiz_title"`
+	GroupID        string     `json:"group_id"`
+	GroupName      string     `json:"group_name"`
+	ConceptID      string     `json:"concept_id"`
+	ConceptCode    string     `json:"concept_code"`
+	ConceptTitle   string     `json:"concept_title"`
+	Status         string     `json:"status"`
+	CreatedAt      time.Time  `json:"created_at"`
+	DueAt          *time.Time `json:"due_at"`
+	Recipients     int        `json:"recipients"`
+	Submitted      int        `json:"submitted"`
+	BeforeCorrect  int        `json:"before_correct"`
+	BeforeTotal    int        `json:"before_total"`
+	BeforeStudents int        `json:"before_students"`
+	AfterCorrect   int        `json:"after_correct"`
+	AfterTotal     int        `json:"after_total"`
+	AfterStudents  int        `json:"after_students"`
+}
+
+func (h *Handler) FollowUpOutcomes(w http.ResponseWriter, r *http.Request) {
+	groupID := strings.TrimSpace(r.URL.Query().Get("class_id"))
+	rows, err := h.db.Query(r.Context(), `
+		SELECT a.id,a.quiz_id,q.title,a.group_id,g.name,c.id,c.code,c.title,a.status,a.created_at,a.due_at,
+		       COUNT(DISTINCT ar.student_id),
+		       COUNT(DISTINCT ar.student_id) FILTER (WHERE ar.status='submitted'),
+		       COUNT(le.id) FILTER (WHERE le.occurred_at<a.created_at AND le.is_correct),
+		       COUNT(le.id) FILTER (WHERE le.occurred_at<a.created_at),
+		       COUNT(DISTINCT le.user_id) FILTER (WHERE le.occurred_at<a.created_at),
+		       COUNT(le.id) FILTER (WHERE le.occurred_at>=a.created_at AND le.is_correct),
+		       COUNT(le.id) FILTER (WHERE le.occurred_at>=a.created_at),
+		       COUNT(DISTINCT le.user_id) FILTER (WHERE le.occurred_at>=a.created_at)
+		FROM learning_assignments a
+		JOIN groups g ON g.id=a.group_id AND g.institution_id=a.institution_id
+		JOIN group_teachers gt ON gt.group_id=a.group_id AND gt.user_id=$1
+		JOIN quizzes q ON q.id=a.quiz_id
+		JOIN curriculum_concepts c ON c.id=a.source_concept_id
+		LEFT JOIN learning_assignment_recipients ar ON ar.assignment_id=a.id
+		LEFT JOIN learning_evidence le ON le.institution_id=a.institution_id
+		  AND le.user_id=ar.student_id AND le.concept_id=a.source_concept_id
+		  AND le.occurred_at>=a.created_at-interval '90 days'
+		WHERE a.institution_id=$2 AND a.purpose='follow_up' AND ($3='' OR a.group_id::text=$3)
+		GROUP BY a.id,q.title,g.name,c.id,c.code,c.title
+		ORDER BY a.created_at DESC LIMIT 100`, middleware.GetUserID(r), middleware.GetInstitutionID(r), groupID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+	result := []FollowUpOutcome{}
+	for rows.Next() {
+		var item FollowUpOutcome
+		if err := rows.Scan(&item.AssignmentID, &item.QuizID, &item.QuizTitle, &item.GroupID, &item.GroupName, &item.ConceptID, &item.ConceptCode, &item.ConceptTitle, &item.Status, &item.CreatedAt, &item.DueAt, &item.Recipients, &item.Submitted, &item.BeforeCorrect, &item.BeforeTotal, &item.BeforeStudents, &item.AfterCorrect, &item.AfterTotal, &item.AfterStudents); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+		result = append(result, item)
+	}
+	if rows.Err() != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, result)
 }
 
 func (h *Handler) CloseAssignment(w http.ResponseWriter, r *http.Request) {

@@ -20,14 +20,19 @@ func NewHandler(db *pgxpool.Pool) *Handler {
 }
 
 type TopicRequest struct {
-	ID          string     `json:"id"`
-	StudentID   string     `json:"student_id"`
-	Topic       string     `json:"topic"`
-	Subject     *string    `json:"subject,omitempty"`
-	Description *string    `json:"description,omitempty"`
-	Status      string     `json:"status"`
-	AssignedTo  *string    `json:"assigned_to,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
+	ID          string    `json:"id"`
+	StudentID   string    `json:"student_id"`
+	Topic       string    `json:"topic"`
+	Subject     *string   `json:"subject,omitempty"`
+	Description *string   `json:"description,omitempty"`
+	Status      string    `json:"status"`
+	AssignedTo  *string   `json:"assigned_to,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type updateRequest struct {
+	Status     string  `json:"status"`
+	AssignedTo *string `json:"assigned_to"`
 }
 
 // POST /api/v1/topic-requests
@@ -130,22 +135,71 @@ func (h *Handler) TeacherList(w http.ResponseWriter, r *http.Request) {
 
 // PATCH /api/v1/teacher/topic-requests/:requestId
 func (h *Handler) TeacherUpdate(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Status     string  `json:"status"`
-		AssignedTo *string `json:"assigned_to"`
-	}
+	var req updateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request")
 		return
 	}
+	if req.Status != "" && req.Status != "pending" && req.Status != "in_progress" && req.Status != "done" {
+		middleware.BadRequest(w, "invalid status")
+		return
+	}
+	teacherID := middleware.GetUserID(r)
+	if req.AssignedTo != nil && *req.AssignedTo != "" && *req.AssignedTo != teacherID {
+		middleware.Forbidden(w)
+		return
+	}
 	reqID := chi.URLParam(r, "requestId")
-	h.db.Exec(r.Context(),
-		`UPDATE topic_requests SET status=CASE WHEN $1 != '' THEN $1 ELSE status END, assigned_to=$2 WHERE id=$3`,
-		req.Status, req.AssignedTo, reqID)
+	result, err := h.db.Exec(r.Context(),
+		`UPDATE topic_requests
+		 SET status=CASE WHEN $1 != '' THEN $1 ELSE status END,
+		     assigned_to=CASE
+		       WHEN $2::text IS NOT NULL THEN NULLIF($2, '')::uuid
+		       WHEN $1 != '' AND assigned_to IS NULL THEN $5::uuid
+		       ELSE assigned_to
+		     END
+		 WHERE id=$3 AND institution_id=$4 AND (assigned_to IS NULL OR assigned_to=$5)`,
+		req.Status, req.AssignedTo, reqID, middleware.GetInstitutionID(r), teacherID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if result.RowsAffected() == 0 {
+		middleware.NotFound(w, "topic request")
+		return
+	}
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "updated"})
 }
 
 // PATCH /api/v1/institution/topic-requests/:requestId
 func (h *Handler) InstitutionUpdate(w http.ResponseWriter, r *http.Request) {
-	h.TeacherUpdate(w, r) // same logic
+	var req updateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid request")
+		return
+	}
+	if req.Status != "" && req.Status != "pending" && req.Status != "in_progress" && req.Status != "done" {
+		middleware.BadRequest(w, "invalid status")
+		return
+	}
+	reqID := chi.URLParam(r, "requestId")
+	result, err := h.db.Exec(r.Context(),
+		`UPDATE topic_requests
+		 SET status=CASE WHEN $1 != '' THEN $1 ELSE status END,
+		     assigned_to=CASE WHEN $2::text IS NULL THEN assigned_to ELSE NULLIF($2, '')::uuid END
+		 WHERE id=$3 AND institution_id=$4
+		   AND ($2::text IS NULL OR $2='' OR EXISTS (
+		     SELECT 1 FROM users u
+		     WHERE u.id=$2::uuid AND u.institution_id=$4 AND u.role='teacher' AND u.status='active'
+		   ))`,
+		req.Status, req.AssignedTo, reqID, middleware.GetInstitutionID(r))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if result.RowsAffected() == 0 {
+		middleware.NotFound(w, "topic request")
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "updated"})
 }

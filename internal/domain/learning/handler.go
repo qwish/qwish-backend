@@ -289,6 +289,62 @@ type assignmentInput struct {
 	DueAt   *string `json:"due_at"`
 }
 
+type TeacherAssignment struct {
+	ID             string     `json:"id"`
+	GroupID        string     `json:"group_id"`
+	GroupName      string     `json:"group_name"`
+	QuizID         string     `json:"quiz_id"`
+	QuizTitle      string     `json:"quiz_title"`
+	Purpose        string     `json:"purpose"`
+	Status         string     `json:"status"`
+	DueAt          *time.Time `json:"due_at"`
+	AssignedCount  int        `json:"assigned_count"`
+	StartedCount   int        `json:"started_count"`
+	SubmittedCount int        `json:"submitted_count"`
+	OverdueCount   int        `json:"overdue_count"`
+	ExcusedCount   int        `json:"excused_count"`
+	CreatedAt      time.Time  `json:"created_at"`
+}
+
+func (h *Handler) ListAssignments(w http.ResponseWriter, r *http.Request) {
+	groupID := strings.TrimSpace(r.URL.Query().Get("group_id"))
+	rows, err := h.db.Query(r.Context(), `
+		SELECT a.id,a.group_id,g.name,a.quiz_id,q.title,a.purpose,a.status,a.due_at,
+		       COUNT(ar.student_id),
+		       COUNT(*) FILTER (WHERE ar.status='started'),
+		       COUNT(*) FILTER (WHERE ar.status='submitted'),
+		       COUNT(*) FILTER (WHERE ar.status='overdue' OR (ar.status='assigned' AND a.due_at < now())),
+		       COUNT(*) FILTER (WHERE ar.status='excused'),a.created_at
+		FROM learning_assignments a
+		JOIN groups g ON g.id=a.group_id AND g.institution_id=a.institution_id
+		JOIN group_teachers gt ON gt.group_id=a.group_id AND gt.user_id=$1
+		JOIN quizzes q ON q.id=a.quiz_id
+		LEFT JOIN learning_assignment_recipients ar ON ar.assignment_id=a.id
+		WHERE a.institution_id=$2 AND ($3='' OR a.group_id::text=$3)
+		GROUP BY a.id,g.name,q.title
+		ORDER BY CASE WHEN a.status='published' THEN 0 ELSE 1 END,a.due_at NULLS LAST,a.created_at DESC
+		LIMIT 200`, middleware.GetUserID(r), middleware.GetInstitutionID(r), groupID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+	list := []TeacherAssignment{}
+	for rows.Next() {
+		var item TeacherAssignment
+		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupName, &item.QuizID, &item.QuizTitle, &item.Purpose, &item.Status, &item.DueAt, &item.AssignedCount, &item.StartedCount, &item.SubmittedCount, &item.OverdueCount, &item.ExcusedCount, &item.CreatedAt); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+		list = append(list, item)
+	}
+	if rows.Err() != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, list)
+}
+
 func (h *Handler) CreateAssignment(w http.ResponseWriter, r *http.Request) {
 	var in assignmentInput
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
@@ -306,19 +362,45 @@ func (h *Handler) CreateAssignment(w http.ResponseWriter, r *http.Request) {
 		}
 		dueAt = parsed
 	}
+	tx, err := h.db.Begin(r.Context())
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer tx.Rollback(r.Context())
 	var id string
-	err := h.db.QueryRow(r.Context(), `INSERT INTO learning_assignments(institution_id,group_id,quiz_id,purpose,due_at,created_by)
+	err = tx.QueryRow(r.Context(), `INSERT INTO learning_assignments(institution_id,group_id,quiz_id,purpose,due_at,created_by)
 		SELECT $1,g.id,q.id,$3,$4,$5 FROM groups g JOIN quizzes q ON q.id=$2 WHERE g.id=$6 AND g.institution_id=$1 AND q.created_by=$5 AND q.status='published' AND EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id=g.id AND gt.user_id=$5) RETURNING id`, middleware.GetInstitutionID(r), in.QuizID, in.Purpose, dueAt, middleware.GetUserID(r), in.GroupID).Scan(&id)
 	if err != nil {
 		middleware.BadRequest(w, "quiz or class is unavailable to this teacher")
 		return
 	}
-	_, err = h.db.Exec(r.Context(), `INSERT INTO learning_assignment_recipients(assignment_id,student_id) SELECT $1,gs.user_id FROM group_students gs WHERE gs.group_id=$2 ON CONFLICT DO NOTHING`, id, in.GroupID)
+	_, err = tx.Exec(r.Context(), `INSERT INTO learning_assignment_recipients(assignment_id,student_id) SELECT $1,gs.user_id FROM group_students gs WHERE gs.group_id=$2 ON CONFLICT DO NOTHING`, id, in.GroupID)
 	if err != nil {
-		middleware.BadRequest(w, "could not assign recipients")
+		middleware.InternalError(w)
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		middleware.InternalError(w)
 		return
 	}
 	middleware.JSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
+func (h *Handler) CloseAssignment(w http.ResponseWriter, r *http.Request) {
+	result, err := h.db.Exec(r.Context(), `UPDATE learning_assignments a SET status='closed'
+		WHERE a.id=$1 AND a.institution_id=$2 AND a.status='published'
+		AND EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id=a.group_id AND gt.user_id=$3)`,
+		chi.URLParam(r, "assignmentId"), middleware.GetInstitutionID(r), middleware.GetUserID(r))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if result.RowsAffected() == 0 {
+		middleware.NotFound(w, "assignment")
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]string{"status": "closed"})
 }
 
 type reviewInput struct {

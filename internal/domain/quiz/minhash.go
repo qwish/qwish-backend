@@ -77,18 +77,19 @@ func jaccardPrompt(a, b string) float64 {
 	return float64(intersection) / float64(union)
 }
 
-func findNearDuplicate(ctx context.Context, db *pgxpool.Pool, prompt, excludeID string) (bool, error) {
+func findNearDuplicate(ctx context.Context, db *pgxpool.Pool, quizID, prompt, excludeID string) (bool, error) {
 	b := minhashBands(prompt)
 	rows, err := db.Query(ctx, `
 		WITH candidates AS (
 		  SELECT q.id,q.prompt FROM question_lsh_buckets l JOIN questions q ON q.id=l.question_id
 		   WHERE (l.band,l.bucket) IN ((0,$1),(1,$2),(2,$3),(3,$4))
+		     AND q.quiz_id=$7
 		  UNION
 		  SELECT q.id,q.prompt FROM questions q
-		   WHERE similarity(q.prompt,$6)>=0.45
+		   WHERE similarity(q.prompt,$6)>=0.45 AND q.quiz_id=$7
 		)
 		SELECT DISTINCT id,prompt FROM candidates
-		WHERE ($5='' OR id<>$5::uuid) LIMIT 100`, b[0], b[1], b[2], b[3], excludeID, prompt)
+		WHERE ($5='' OR id<>$5::uuid) LIMIT 100`, b[0], b[1], b[2], b[3], excludeID, prompt, quizID)
 	if err != nil {
 		return false, err
 	}

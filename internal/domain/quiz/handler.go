@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -178,6 +179,37 @@ func (h *Handler) TeacherList(w http.ResponseWriter, r *http.Request) {
 	middleware.JSONWithMeta(w, http.StatusOK, quizzes, &middleware.Meta{Page: page, Limit: limit, Total: total})
 }
 
+func (h *Handler) TeacherListFavorites(w http.ResponseWriter, r *http.Request) {
+	ids, err := h.svc.ListTeacherFavorites(r.Context(), middleware.GetUserID(r))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string][]string{"quiz_ids": ids})
+}
+
+func (h *Handler) TeacherFavorite(w http.ResponseWriter, r *http.Request) {
+	if err := h.svc.SetTeacherFavorite(r.Context(), middleware.GetUserID(r), chi.URLParam(r, "quizId"), true); errors.Is(err, pgx.ErrNoRows) {
+		middleware.NotFound(w, "assessment")
+		return
+	} else if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]bool{"favorite": true})
+}
+
+func (h *Handler) TeacherUnfavorite(w http.ResponseWriter, r *http.Request) {
+	if err := h.svc.SetTeacherFavorite(r.Context(), middleware.GetUserID(r), chi.URLParam(r, "quizId"), false); errors.Is(err, pgx.ErrNoRows) {
+		middleware.NotFound(w, "assessment")
+		return
+	} else if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]bool{"favorite": false})
+}
+
 // POST /api/v1/teacher/quizzes
 func (h *Handler) TeacherCreate(w http.ResponseWriter, r *http.Request) {
 	var req CreateQuizReq
@@ -191,6 +223,40 @@ func (h *Handler) TeacherCreate(w http.ResponseWriter, r *http.Request) {
 	quiz, err := h.svc.Create(r.Context(), req, middleware.GetUserID(r), middleware.GetInstitutionID(r))
 	if err == ErrInvalidTaxonomy {
 		middleware.BadRequest(w, "invalid domain or subdomain")
+		return
+	}
+	if err == ErrInvalidTeacherGroup {
+		middleware.Error(w, http.StatusForbidden, "CLASS_NOT_ASSIGNED", err.Error())
+		return
+	}
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusCreated, quiz)
+}
+
+// POST /api/v1/teacher/quizzes/:quizId/duplicate
+func (h *Handler) TeacherDuplicate(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 2048)
+	var req DuplicateQuizReq
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid duplicate request")
+		return
+	}
+	quiz, err := h.svc.Duplicate(r.Context(), chi.URLParam(r, "quizId"), middleware.GetUserID(r), req)
+	if errors.Is(err, pgx.ErrNoRows) {
+		middleware.NotFound(w, "assessment")
+		return
+	}
+	if errors.Is(err, ErrInvalidTeacherGroup) {
+		middleware.Error(w, http.StatusForbidden, "CLASS_NOT_ASSIGNED", err.Error())
+		return
+	}
+	if errors.Is(err, ErrDuplicateTitleTooLong) {
+		middleware.BadRequest(w, err.Error())
 		return
 	}
 	if err != nil {
@@ -271,6 +337,10 @@ func (h *Handler) TeacherUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.Update(r.Context(), chi.URLParam(r, "quizId"), middleware.GetUserID(r), req); err != nil {
 		if err == ErrInvalidTaxonomy {
 			middleware.BadRequest(w, "invalid domain or subdomain")
+			return
+		}
+		if err == ErrInvalidTeacherGroup {
+			middleware.Error(w, http.StatusForbidden, "CLASS_NOT_ASSIGNED", err.Error())
 			return
 		}
 		middleware.InternalError(w)

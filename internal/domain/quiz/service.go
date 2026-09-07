@@ -73,6 +73,10 @@ type CreateQuizReq struct {
 	Subdomain   *string    `json:"subdomain"`
 }
 
+type DuplicateQuizReq struct {
+	Title string `json:"title"`
+}
+
 type AddQuestionReq struct {
 	Position         int             `json:"position"`
 	Type             string          `json:"type"`
@@ -315,6 +319,9 @@ func (s *Service) Create(ctx context.Context, req CreateQuizReq, userID, institu
 	if err := s.validateTaxonomy(ctx, req.Domain, req.Subdomain); err != nil {
 		return nil, err
 	}
+	if err := validateTeacherGroup(ctx, s.db, req.GroupID, userID, institutionID); err != nil {
+		return nil, err
+	}
 	q := &Quiz{}
 	err := s.db.QueryRow(ctx,
 		`INSERT INTO quizzes (institution_id, created_by, title, description, type, visibility, group_id, ends_at, domain, subdomain)
@@ -324,6 +331,128 @@ func (s *Service) Create(ctx context.Context, req CreateQuizReq, userID, institu
 	).Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.Title, &q.Description, &q.Type,
 		&q.Visibility, &q.Status, &q.QuestionCount, &q.EndsAt, &q.GroupID, &q.Domain, &q.Subdomain, &q.CreatedAt)
 	return q, err
+}
+
+var ErrInvalidTeacherGroup = fmt.Errorf("class is not assigned to this teacher")
+var ErrDuplicateTitleTooLong = fmt.Errorf("duplicate title must be 160 characters or fewer")
+
+type rowQuerier interface {
+	QueryRow(context.Context, string, ...interface{}) pgx.Row
+}
+
+func validateTeacherGroup(ctx context.Context, db rowQuerier, groupID *string, teacherID, institutionID string) error {
+	if groupID == nil || *groupID == "" {
+		return nil
+	}
+	var allowed bool
+	err := db.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM groups g JOIN group_teachers gt ON gt.group_id=g.id
+		WHERE g.id=$1 AND gt.user_id=$2 AND g.institution_id=$3 AND g.archived_at IS NULL
+	)`, *groupID, teacherID, institutionID).Scan(&allowed)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return ErrInvalidTeacherGroup
+	}
+	return nil
+}
+
+// Duplicate creates an independent draft owned by the requesting teacher.
+// Source ownership is checked in the same transaction as the copy so a client
+// cannot use this endpoint to read or clone another teacher's answer key.
+func (s *Service) Duplicate(ctx context.Context, sourceID, teacherID string, req DuplicateQuizReq) (*Quiz, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var source Quiz
+	if err = tx.QueryRow(ctx, `SELECT institution_id,title,description,type,visibility,group_id,domain,subdomain
+		FROM quizzes WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL FOR SHARE`, sourceID, teacherID).
+		Scan(&source.InstitutionID, &source.Title, &source.Description, &source.Type, &source.Visibility, &source.GroupID, &source.Domain, &source.Subdomain); err != nil {
+		return nil, err
+	}
+	title := req.Title
+	if title == "" {
+		title = source.Title + " (copy)"
+	}
+	if len(title) > 160 {
+		return nil, ErrDuplicateTitleTooLong
+	}
+	if source.GroupID != nil {
+		var institutionID string
+		if source.InstitutionID != nil {
+			institutionID = *source.InstitutionID
+		}
+		if err = validateTeacherGroup(ctx, tx, source.GroupID, teacherID, institutionID); err != nil {
+			return nil, err
+		}
+	}
+
+	var duplicateID string
+	if err = tx.QueryRow(ctx, `INSERT INTO quizzes
+		(institution_id,created_by,title,description,type,visibility,status,group_id,domain,subdomain,question_count)
+		VALUES($1,$2,$3,$4,$5,$6,'draft',$7,$8,$9,0) RETURNING id`, source.InstitutionID, teacherID,
+		title, source.Description, source.Type, source.Visibility, source.GroupID, source.Domain, source.Subdomain).Scan(&duplicateID); err != nil {
+		return nil, err
+	}
+
+	rows, err := tx.Query(ctx, `SELECT id,position,type,prompt,media_url,options,correct_answer,time_limit_seconds,clues
+		FROM questions WHERE quiz_id=$1 ORDER BY position`, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	var questions []Question
+	for rows.Next() {
+		var q Question
+		if err = rows.Scan(&q.ID, &q.Position, &q.Type, &q.Prompt, &q.MediaURL, &q.Options, &q.CorrectAnswer, &q.TimeLimitSeconds, &q.Clues); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		questions = append(questions, q)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	newQuestions := make([]Question, 0, len(questions))
+	for _, sourceQuestion := range questions {
+		var newID string
+		if err = tx.QueryRow(ctx, `INSERT INTO questions
+			(quiz_id,position,type,prompt,media_url,options,correct_answer,time_limit_seconds,clues)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, duplicateID, sourceQuestion.Position,
+			sourceQuestion.Type, sourceQuestion.Prompt, sourceQuestion.MediaURL, sourceQuestion.Options,
+			sourceQuestion.CorrectAnswer, sourceQuestion.TimeLimitSeconds, sourceQuestion.Clues).Scan(&newID); err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO question_concepts(question_id,concept_id,weight,mapped_by)
+			SELECT $1,concept_id,weight,$2 FROM question_concepts WHERE question_id=$3`, newID, teacherID, sourceQuestion.ID); err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO question_misconception_options(question_id,option_id,misconception_id,reviewed_by)
+			SELECT $1,new_opt.id,map.misconception_id,$2
+			FROM question_misconception_options map
+			JOIN question_options old_opt ON old_opt.id=map.option_id
+			JOIN question_options new_opt ON new_opt.question_id=$1 AND new_opt.label=old_opt.label
+			WHERE map.question_id=$3`, newID, teacherID, sourceQuestion.ID); err != nil {
+			return nil, err
+		}
+		newQuestions = append(newQuestions, Question{ID: newID, Prompt: sourceQuestion.Prompt})
+	}
+	if _, err = tx.Exec(ctx, `UPDATE quizzes SET question_count=$1 WHERE id=$2`, len(questions), duplicateID); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	for _, question := range newQuestions {
+		storeMinhash(ctx, s.db, question.ID, question.Prompt)
+	}
+	return s.GetByID(ctx, duplicateID)
 }
 
 // CreateForAdmin creates and publishes a Qwish-authored quiz in a single
@@ -538,6 +667,15 @@ func (s *Service) Update(ctx context.Context, quizID, ownerID string, req Create
 	if err := s.validateTaxonomy(ctx, req.Domain, req.Subdomain); err != nil {
 		return err
 	}
+	if req.GroupID != nil {
+		var institutionID string
+		if err := s.db.QueryRow(ctx, `SELECT COALESCE(institution_id::text,'') FROM quizzes WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL`, quizID, ownerID).Scan(&institutionID); err != nil {
+			return err
+		}
+		if err := validateTeacherGroup(ctx, s.db, req.GroupID, ownerID, institutionID); err != nil {
+			return err
+		}
+	}
 	_, err := s.db.Exec(ctx,
 		`UPDATE quizzes SET title=$1, description=$2, group_id=$3, ends_at=$4, domain=$5, subdomain=$6, updated_at=now()
 		 WHERE id=$7 AND created_by=$8 AND status='draft' AND deleted_at IS NULL`,
@@ -605,7 +743,7 @@ func (s *Service) AddQuestion(ctx context.Context, quizID, ownerID string, req A
 	if check == 0 {
 		return nil, fmt.Errorf("not found or forbidden")
 	}
-	if duplicate, err := findNearDuplicate(ctx, s.db, req.Prompt, ""); err != nil {
+	if duplicate, err := findNearDuplicate(ctx, s.db, quizID, req.Prompt, ""); err != nil {
 		return nil, err
 	} else if duplicate {
 		return nil, ErrDuplicateQuestion
@@ -642,7 +780,7 @@ func (s *Service) UpdateQuestion(ctx context.Context, quizID, questionID, ownerI
 	if check == 0 {
 		return fmt.Errorf("forbidden")
 	}
-	if duplicate, err := findNearDuplicate(ctx, s.db, req.Prompt, questionID); err != nil {
+	if duplicate, err := findNearDuplicate(ctx, s.db, quizID, req.Prompt, questionID); err != nil {
 		return err
 	} else if duplicate {
 		return ErrDuplicateQuestion
@@ -861,6 +999,61 @@ func (s *Service) ListForTeacher(ctx context.Context, teacherID, statusFilter st
 	defer rows.Close()
 	quizzes, err := s.scanQuizRows(rows)
 	return quizzes, total, err
+}
+
+func (s *Service) ListTeacherFavorites(ctx context.Context, teacherID string) ([]string, error) {
+	rows, err := s.db.Query(ctx, `SELECT f.quiz_id FROM teacher_quiz_favorites f
+		JOIN quizzes q ON q.id=f.quiz_id
+		WHERE f.user_id=$1 AND q.created_by=$1 AND q.deleted_at IS NULL ORDER BY f.created_at DESC`, teacherID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (s *Service) SetTeacherFavorite(ctx context.Context, teacherID, quizID string, favorite bool) error {
+	if favorite {
+		tag, err := s.db.Exec(ctx, `INSERT INTO teacher_quiz_favorites(user_id,quiz_id)
+			SELECT $1,q.id FROM quizzes q WHERE q.id=$2 AND q.created_by=$1 AND q.deleted_at IS NULL
+			ON CONFLICT(user_id,quiz_id) DO NOTHING`, teacherID, quizID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			var exists bool
+			if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quizzes WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL)`, quizID, teacherID).Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				return pgx.ErrNoRows
+			}
+		}
+		return nil
+	}
+	tag, err := s.db.Exec(ctx, `DELETE FROM teacher_quiz_favorites f USING quizzes q
+		WHERE f.quiz_id=q.id AND f.user_id=$1 AND f.quiz_id=$2 AND q.created_by=$1`, teacherID, quizID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		var exists bool
+		if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quizzes WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL)`, quizID, teacherID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return pgx.ErrNoRows
+		}
+	}
+	return nil
 }
 
 // InstitutionQuiz is a Quiz as an institution admin sees it: the admin list is

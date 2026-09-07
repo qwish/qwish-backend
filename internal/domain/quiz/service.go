@@ -773,9 +773,13 @@ func (s *Service) GetQuestions(ctx context.Context, quizID string) ([]Question, 
 
 func (s *Service) GetQuestionsForStudent(ctx context.Context, quizID string) ([]QuestionForStudent, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT id, quiz_id, position, type, prompt, media_url, options, time_limit_seconds,
-		        jsonb_array_length(COALESCE(clues, '[]'::jsonb))
-		 FROM questions WHERE quiz_id=$1 ORDER BY position`, quizID)
+		`SELECT q.id, q.quiz_id, q.position, q.type, q.prompt, q.media_url, q.options,
+		        COALESCE((SELECT jsonb_agg(jsonb_build_object('id',qo.id,'label',qo.label) ORDER BY qo.position)
+		                  FROM question_options qo WHERE qo.question_id=q.id AND qo.active), '[]'::jsonb),
+		        EXISTS (SELECT 1 FROM question_concepts qc WHERE qc.question_id=q.id), q.revision,
+		        (SELECT qv.id FROM question_versions qv WHERE qv.question_id=q.id AND qv.revision=q.revision),
+		        q.time_limit_seconds, jsonb_array_length(COALESCE(q.clues, '[]'::jsonb))
+		 FROM questions q WHERE q.quiz_id=$1 ORDER BY q.position`, quizID)
 	if err != nil {
 		return nil, err
 	}
@@ -784,7 +788,7 @@ func (s *Service) GetQuestionsForStudent(ctx context.Context, quizID string) ([]
 	for rows.Next() {
 		var q QuestionForStudent
 		rows.Scan(&q.ID, &q.QuizID, &q.Position, &q.Type, &q.Prompt, &q.MediaURL,
-			&q.Options, &q.TimeLimitSeconds, &q.ClueCount)
+			&q.Options, &q.OptionChoices, &q.CollectConfidence, &q.Revision, &q.VersionID, &q.TimeLimitSeconds, &q.ClueCount)
 		questions = append(questions, q)
 	}
 	if questions == nil {
@@ -798,15 +802,19 @@ func (s *Service) GetQuestionsForStudent(ctx context.Context, quizID string) ([]
 // hints exist; each one must be fetched from the clue-reveal endpoint, which
 // is what makes the clue penalty enforceable.
 type QuestionForStudent struct {
-	ID               string          `json:"id"`
-	QuizID           string          `json:"quiz_id"`
-	Position         int             `json:"position"`
-	Type             string          `json:"type"`
-	Prompt           string          `json:"prompt"`
-	MediaURL         *string         `json:"media_url,omitempty"`
-	Options          json.RawMessage `json:"options"`
-	TimeLimitSeconds int             `json:"time_limit_seconds"`
-	ClueCount        int             `json:"clue_count"`
+	ID                string          `json:"id"`
+	QuizID            string          `json:"quiz_id"`
+	Position          int             `json:"position"`
+	Type              string          `json:"type"`
+	Prompt            string          `json:"prompt"`
+	MediaURL          *string         `json:"media_url,omitempty"`
+	Options           json.RawMessage `json:"options"`
+	OptionChoices     json.RawMessage `json:"option_choices"`
+	CollectConfidence bool            `json:"collect_confidence"`
+	Revision          int             `json:"question_revision"`
+	VersionID         string          `json:"question_version_id"`
+	TimeLimitSeconds  int             `json:"time_limit_seconds"`
+	ClueCount         int             `json:"clue_count"`
 }
 
 func (s *Service) ListForTeacher(ctx context.Context, teacherID, statusFilter string, page, limit int) ([]Quiz, int, error) {

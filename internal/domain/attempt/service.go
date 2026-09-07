@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/domain/quiz"
@@ -38,6 +39,7 @@ type AnswerReq struct {
 	QuestionID      string          `json:"question_id"`
 	Answer          json.RawMessage `json:"answer"`
 	ConfidenceLevel string          `json:"confidence_level"`
+	OptionID        *string         `json:"option_id"`
 
 	// TimeTakenMs, CluesUsed and ComboLevel used to arrive from the client and
 	// were fed straight into scoring — all three are now derived server-side and
@@ -147,9 +149,13 @@ func (s *Service) Start(ctx context.Context, userID, quizID string) (*StartAttem
 	if shuffle || questionLimit != nil {
 		order = "random()"
 	}
-	query := `SELECT id, quiz_id, position, type, prompt, media_url, options, time_limit_seconds,
-		        jsonb_array_length(COALESCE(clues, '[]'::jsonb))
-		 FROM questions WHERE quiz_id=$1 ORDER BY ` + order
+	query := `SELECT q.id, q.quiz_id, q.position, q.type, q.prompt, q.media_url, q.options,
+		        COALESCE((SELECT jsonb_agg(jsonb_build_object('id',qo.id,'label',qo.label) ORDER BY qo.position)
+		                  FROM question_options qo WHERE qo.question_id=q.id AND qo.active), '[]'::jsonb),
+		        EXISTS (SELECT 1 FROM question_concepts qc WHERE qc.question_id=q.id), q.revision,
+		        (SELECT qv.id FROM question_versions qv WHERE qv.question_id=q.id AND qv.revision=q.revision),
+		        q.time_limit_seconds, jsonb_array_length(COALESCE(q.clues, '[]'::jsonb))
+		 FROM questions q WHERE q.quiz_id=$1 ORDER BY ` + order
 	args := []interface{}{quizID}
 	if limit > 0 {
 		query += " LIMIT $2"
@@ -163,7 +169,7 @@ func (s *Service) Start(ctx context.Context, userID, quizID string) (*StartAttem
 	for rows.Next() {
 		var question quiz.QuestionForStudent
 		if err := rows.Scan(&question.ID, &question.QuizID, &question.Position, &question.Type, &question.Prompt, &question.MediaURL,
-			&question.Options, &question.TimeLimitSeconds, &question.ClueCount); err != nil {
+			&question.Options, &question.OptionChoices, &question.CollectConfidence, &question.Revision, &question.VersionID, &question.TimeLimitSeconds, &question.ClueCount); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -195,14 +201,18 @@ func (s *Service) Start(ctx context.Context, userID, quizID string) (*StartAttem
 
 	for i, question := range questions {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO quiz_attempt_questions (attempt_id, question_id, position) VALUES ($1,$2,$3)`,
-			attemptID, question.ID, i+1); err != nil {
+			`INSERT INTO quiz_attempt_questions (attempt_id, question_id, position, question_revision, question_version_id) VALUES ($1,$2,$3,$4,$5)`,
+			attemptID, question.ID, i+1, question.Revision, question.VersionID); err != nil {
 			return nil, err
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	// Link an assigned diagnostic/practice attempt without trusting an assignment
+	// identifier from the client; the server resolves it by quiz and student.
+	s.db.Exec(ctx, `UPDATE learning_assignment_recipients ar SET status='started',attempt_id=$1
+		FROM learning_assignments a WHERE ar.assignment_id=a.id AND ar.student_id=$2 AND a.quiz_id=$3 AND ar.status='assigned'`, attemptID, userID, quizID)
 
 	// Update last_active_at after the attempt transaction has committed.
 	s.db.Exec(ctx, `UPDATE users SET last_active_at=now() WHERE id=$1`, userID)
@@ -239,6 +249,9 @@ func clampReplayMs(ms int) int {
 }
 
 func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, req AnswerReq, elapsedOverride *int) (*AnswerResp, error) {
+	if req.ConfidenceLevel != "" && req.ConfidenceLevel != "not_sure" && req.ConfidenceLevel != "pretty_sure" && req.ConfidenceLevel != "very_confident" {
+		return nil, fmt.Errorf("invalid confidence level")
+	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -289,6 +302,16 @@ func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, re
 	if err != nil {
 		return nil, fmt.Errorf("question not found")
 	}
+	if req.OptionID != nil {
+		var label string
+		if err := tx.QueryRow(ctx,
+			`SELECT label FROM question_options WHERE id=$1 AND question_id=$2 AND active`,
+			*req.OptionID, req.QuestionID).Scan(&label); err != nil {
+			return nil, fmt.Errorf("option not found")
+		}
+		encoded, _ := json.Marshal(label)
+		req.Answer = encoded
+	}
 
 	// Clues actually handed out by the server, not what the client claims.
 	var cluesUsed int
@@ -320,16 +343,31 @@ func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, re
 	// Insert, never update. The response below reveals the correct answer, so
 	// allowing a second write would let a wrong answer be replaced with the
 	// right one for full points.
-	ct, err := tx.Exec(ctx,
-		`INSERT INTO question_responses (attempt_id, question_id, answer, is_correct, time_taken_ms, clues_used, confidence_level, combo_level, points_earned)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-		 ON CONFLICT (attempt_id, question_id) DO NOTHING`,
-		attemptID, req.QuestionID, req.Answer, isCorrect, timeTakenMs, cluesUsed, confidence, comboLevel, pts)
+	var responseID string
+	err = tx.QueryRow(ctx,
+		`INSERT INTO question_responses (attempt_id, question_id, answer, is_correct, time_taken_ms, clues_used, confidence_level, combo_level, points_earned, option_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		 ON CONFLICT (attempt_id, question_id) DO NOTHING RETURNING id`,
+		attemptID, req.QuestionID, req.Answer, isCorrect, timeTakenMs, cluesUsed, confidence, comboLevel, pts, req.OptionID).Scan(&responseID)
+	if err == pgx.ErrNoRows {
+		return nil, fmt.Errorf("question already answered")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to save response: %w", err)
 	}
-	if ct.RowsAffected() == 0 {
-		return nil, fmt.Errorf("question already answered")
+	_, err = tx.Exec(ctx, `
+		INSERT INTO learning_evidence
+		  (response_id,institution_id,user_id,attempt_id,question_id,question_revision,question_version_id,concept_id,option_id,misconception_id,is_correct,confidence_level,clues_used,occurred_at)
+		SELECT $1,e.institution_id,$2,$3,$4,aq.question_revision,aq.question_version_id,qc.concept_id,$5,qmo.misconception_id,$6,$7,$8,now()
+		FROM enrollments e
+		JOIN question_concepts qc ON qc.question_id=$4
+		JOIN quiz_attempt_questions aq ON aq.attempt_id=$3 AND aq.question_id=$4
+		LEFT JOIN question_misconception_options qmo ON qmo.question_id=$4 AND qmo.option_id=$5
+		WHERE e.user_id=$2 AND e.status IN ('active','suspended')
+		ON CONFLICT (response_id,concept_id) DO NOTHING`,
+		responseID, userID, attemptID, req.QuestionID, req.OptionID, isCorrect, confidence, cluesUsed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to record learning evidence: %w", err)
 	}
 
 	if _, err = tx.Exec(ctx,
@@ -341,6 +379,8 @@ func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, re
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit answer: %w", err)
 	}
+	s.db.Exec(ctx, `UPDATE learning_assignment_recipients SET status='submitted',submitted_at=now()
+		WHERE attempt_id=$1 AND student_id=$2`, attemptID, userID)
 
 	return &AnswerResp{
 		IsCorrect:     isCorrect,
@@ -493,10 +533,12 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 
 	// Load all question responses with time_taken_ms and time_limit_seconds
 	rows, err := tx.Query(ctx,
-		`SELECT qr.question_id, q.type, q.correct_answer, qr.answer, qr.confidence_level, qr.clues_used, qr.combo_level, qr.points_earned,
-		        q.position, q.prompt, qr.is_correct, qr.time_taken_ms, q.time_limit_seconds, q.difficulty
+		`SELECT qr.question_id, qv.type, qv.correct_answer, qr.answer, qr.confidence_level, qr.clues_used, qr.combo_level, qr.points_earned,
+		        q.position, qv.prompt, qr.is_correct, qr.time_taken_ms, qv.time_limit_seconds, q.difficulty
 		 FROM question_responses qr
 		 JOIN questions q ON q.id = qr.question_id
+		 JOIN quiz_attempt_questions aq ON aq.attempt_id=qr.attempt_id AND aq.question_id=qr.question_id
+		 JOIN question_versions qv ON qv.id=aq.question_version_id
 		 WHERE qr.attempt_id=$1
 		 ORDER BY q.position`, attemptID)
 	if err != nil {

@@ -24,6 +24,7 @@ import (
 	"github.com/qwish/backend/internal/domain/enrollment"
 	"github.com/qwish/backend/internal/domain/institution"
 	"github.com/qwish/backend/internal/domain/leaderboard"
+	"github.com/qwish/backend/internal/domain/learning"
 	"github.com/qwish/backend/internal/domain/metrics"
 	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/domain/offline"
@@ -94,6 +95,7 @@ func main() {
 	institutionH := institution.NewHandler(pool, notifSvc, enrollmentSvc, cfg.AppURL, cfg.TeacherURL)
 	teacherH := teacher.NewHandler(pool)
 	curriculumH := curriculum.NewHandler(curriculum.NewService(pool))
+	learningH := learning.NewHandler(pool)
 	adminH := admin.NewHandler(pool, cfg, notifSvc)
 	metricsH := metrics.NewHandler(pool, admin.MetricsScopeResolver(pool))
 	instMetricsH := metrics.NewHandler(pool, institution.MetricsScopeResolver())
@@ -277,7 +279,10 @@ func main() {
 					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
 				})
 				r.Post("/dispatch-announcements", func(w http.ResponseWriter, r *http.Request) {
-					if err := sched.DispatchAnnouncements(r.Context()); err != nil { mw.InternalError(w); return }
+					if err := sched.DispatchAnnouncements(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
 					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
 				})
 			})
@@ -471,6 +476,8 @@ func main() {
 				r.Get("/users/me/insights/weekly", userH.GetMyWeeklyInsights)
 				r.With(mw.RequireUserRecord()).Get("/users/me/insights/breakdown", userH.GetMyInsightsBreakdown)
 				r.Get("/users/me/insights/trend", userH.GetMyScoreTrend)
+				r.Get("/users/me/learning-summary", learningH.StudentSummary)
+				r.Get("/users/me/assignments", learningH.StudentAssignments)
 
 				// Offline mode: prefetch practice pack + sync offline results
 				r.Get("/offline/pack", offlineH.GetPack)
@@ -550,11 +557,17 @@ func main() {
 					r.Post("/quizzes/{quizId}/publish", quizH.TeacherPublish)
 					r.Post("/quizzes/{quizId}/unpublish", quizH.TeacherUnpublish)
 					r.Get("/quizzes/{quizId}/results", quizH.TeacherResults)
+					r.Get("/quizzes/{quizId}/response-insights", learningH.QuizInsights)
+					r.Post("/assignments", learningH.CreateAssignment)
 					r.Get("/quizzes/{quizId}/questions", quizH.TeacherGetQuestions)
 					r.Post("/quizzes/{quizId}/questions", quizH.TeacherAddQuestion)
 					r.Patch("/quizzes/{quizId}/questions/order", quizH.TeacherReorderQuestions)
 					r.Patch("/quizzes/{quizId}/questions/{questionId}", quizH.TeacherUpdateQuestion)
 					r.Delete("/quizzes/{quizId}/questions/{questionId}", quizH.TeacherDeleteQuestion)
+					r.Put("/questions/{questionId}/learning-map", learningH.MapQuestion)
+					r.Get("/questions/{questionId}/learning-map", learningH.GetQuestionMap)
+					r.Post("/misconceptions", learningH.CreateMisconception)
+					r.Put("/students/{studentId}/misconceptions/{misconceptionId}/review", learningH.Review)
 					r.Get("/students", teacherH.ListStudents)
 					r.Get("/students/{userId}", teacherH.GetStudent)
 					r.Get("/classes", teacherH.ListClasses)
@@ -603,6 +616,7 @@ func main() {
 					r.Use(mw.RequireRole("institution_admin"))
 					curriculumH.InstitutionRoutes(r)
 					r.Get("/overview", institutionH.Overview)
+					r.Get("/learning-summary", learningH.InstitutionSummary)
 					r.Get("/students", institutionH.ListStudents)
 					r.Post("/students", enrollmentInstH.CreateStudent)
 					// Enrollment-addressed routes stay off /students/... so they

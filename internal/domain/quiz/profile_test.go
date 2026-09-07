@@ -47,6 +47,17 @@ func TestStudentListWherePlaceholders(t *testing.T) {
 	}
 }
 
+func TestStudentListWhereScoped(t *testing.T) {
+	public, publicArgs := studentListWhereScoped("inst-1", "public", "", "", "", "user-1")
+	if len(publicArgs) != 0 || public == "" || !regexp.MustCompile(`q\.visibility = 'public'`).MatchString(public) {
+		t.Fatalf("public scope must be tenant-independent: %s %#v", public, publicArgs)
+	}
+	institution, institutionArgs := studentListWhereScoped("inst-1", "institution", "", "", "", "user-1")
+	if len(institutionArgs) != 1 || !regexp.MustCompile(`q\.institution_id = \$1`).MatchString(institution) || !regexp.MustCompile(`q\.visibility = 'institution'`).MatchString(institution) {
+		t.Fatalf("institution scope must stay tenant-bound: %s %#v", institution, institutionArgs)
+	}
+}
+
 func TestFindSeqScans(t *testing.T) {
 	// Shape mirrors EXPLAIN FORMAT JSON: nested "Plans" arrays.
 	raw := `{"Node Type":"Limit","Plans":[

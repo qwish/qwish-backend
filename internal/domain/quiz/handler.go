@@ -43,7 +43,12 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			*target = &parsed
 		}
 	}
-	quizzes, total, err := h.svc.ListForStudentFiltered(r.Context(), instID, q.Get("type"), q.Get("saved"), q.Get("search"), q.Get("domain"), q.Get("subdomain"), publishedAfter, publishedBefore, userID, page, limit)
+	scope := q.Get("scope")
+	if scope != "" && scope != "public" && scope != "institution" {
+		middleware.BadRequest(w, "scope must be public or institution")
+		return
+	}
+	quizzes, total, err := h.svc.ListForStudentFilteredScope(r.Context(), instID, scope, q.Get("type"), q.Get("saved"), q.Get("search"), q.Get("domain"), q.Get("subdomain"), publishedAfter, publishedBefore, userID, page, limit)
 	if err != nil {
 		middleware.InternalError(w)
 		return

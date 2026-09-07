@@ -155,9 +155,21 @@ func studentListSelect(userArg int) string {
 // same SQL — a profiler that drifts from the real query is worse than none.
 // Invariant: the next free placeholder is always $(len(args)+1).
 func studentListWhere(institutionID, quizType, saved, search, userID string) (string, []interface{}) {
+	return studentListWhereScoped(institutionID, "", quizType, saved, search, userID)
+}
+
+// studentListWhereScoped keeps the tenant boundary server-side while allowing
+// learners to choose the source of assessments. scope is intentionally a
+// small enum: institution-owned school work or globally published content.
+func studentListWhereScoped(institutionID, scope, quizType, saved, search, userID string) (string, []interface{}) {
 	var baseWhere string
 	var args []interface{}
-	if institutionID != "" {
+	if scope == "public" {
+		baseWhere = `q.visibility = 'public' AND q.status = 'published' AND q.deleted_at IS NULL AND (q.starts_at IS NULL OR q.starts_at <= now()) AND (q.ends_at IS NULL OR q.ends_at > now())`
+	} else if scope == "institution" && institutionID != "" {
+		baseWhere = `q.institution_id = $1 AND q.visibility = 'institution' AND q.status = 'published' AND q.deleted_at IS NULL AND (q.starts_at IS NULL OR q.starts_at <= now()) AND (q.ends_at IS NULL OR q.ends_at > now())`
+		args = []interface{}{institutionID}
+	} else if institutionID != "" {
 		baseWhere = `(q.institution_id = $1 OR q.visibility = 'public') AND q.status = 'published' AND q.deleted_at IS NULL AND (q.starts_at IS NULL OR q.starts_at <= now()) AND (q.ends_at IS NULL OR q.ends_at > now())`
 		args = []interface{}{institutionID}
 	} else {
@@ -188,10 +200,18 @@ func (s *Service) ListForStudent(ctx context.Context, institutionID, quizType, s
 }
 
 func (s *Service) ListForStudentFiltered(ctx context.Context, institutionID, quizType, saved, search, domain, subdomain string, publishedAfter, publishedBefore *time.Time, userID string, page, limit int) ([]Quiz, int, error) {
+	return s.listForStudentFilteredScope(ctx, institutionID, "", quizType, saved, search, domain, subdomain, publishedAfter, publishedBefore, userID, page, limit)
+}
+
+func (s *Service) ListForStudentFilteredScope(ctx context.Context, institutionID, scope, quizType, saved, search, domain, subdomain string, publishedAfter, publishedBefore *time.Time, userID string, page, limit int) ([]Quiz, int, error) {
+	return s.listForStudentFilteredScope(ctx, institutionID, scope, quizType, saved, search, domain, subdomain, publishedAfter, publishedBefore, userID, page, limit)
+}
+
+func (s *Service) listForStudentFilteredScope(ctx context.Context, institutionID, scope, quizType, saved, search, domain, subdomain string, publishedAfter, publishedBefore *time.Time, userID string, page, limit int) ([]Quiz, int, error) {
 	offset := (page - 1) * limit
 	var total int
 
-	baseWhere, args := studentListWhere(institutionID, quizType, saved, search, userID)
+	baseWhere, args := studentListWhereScoped(institutionID, scope, quizType, saved, search, userID)
 	if domain != "" {
 		baseWhere += fmt.Sprintf(` AND q.domain = $%d`, len(args)+1)
 		args = append(args, domain)
@@ -663,11 +683,10 @@ func (s *Service) Publish(ctx context.Context, quizID, ownerID string) (string, 
 	s.db.QueryRow(ctx, `SELECT visibility FROM quizzes WHERE id=$1`, quizID).Scan(&visibility)
 
 	var newStatus string
-	if visibility == "public" {
-		newStatus = "pending_approval"
-	} else {
-		newStatus = "published"
-	}
+	// Teachers explicitly choose public visibility at authoring time. Once the
+	// quiz passes the same question-count/ownership checks as school content,
+	// publish it into the global catalogue for every learner.
+	newStatus = "published"
 
 	_, err := s.db.Exec(ctx,
 		`UPDATE quizzes SET status=$1, published_at=CASE WHEN $1='published' THEN now() ELSE NULL END, updated_at=now()

@@ -173,6 +173,7 @@ func (h *Handler) GetQuestionMap(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) QuizInsights(w http.ResponseWriter, r *http.Request) {
 	quizID := chi.URLParam(r, "quizId")
+	classID := strings.TrimSpace(r.URL.Query().Get("class_id"))
 	rows, err := h.db.Query(r.Context(), `
 		SELECT le.user_id,u.display_name,le.concept_id,c.code,c.title,le.misconception_id,m.title,
 		 COUNT(*) FILTER (WHERE NOT le.is_correct),COUNT(DISTINCT le.question_id) FILTER (WHERE NOT le.is_correct),
@@ -185,8 +186,12 @@ func (h *Handler) QuizInsights(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN misconceptions m ON m.id=le.misconception_id JOIN quiz_attempts qa ON qa.id=le.attempt_id
 		JOIN quizzes q ON q.id=qa.quiz_id
 		WHERE q.id=$1 AND q.created_by=$2 AND le.institution_id=$3
+		  AND ($4='' OR (
+		    EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id::text=$4 AND gt.user_id=$2)
+		    AND EXISTS(SELECT 1 FROM group_students gs WHERE gs.group_id::text=$4 AND gs.user_id=le.user_id)
+		  ))
 		GROUP BY le.user_id,u.display_name,le.concept_id,c.code,c.title,le.misconception_id,m.title
-		ORDER BY MAX(le.occurred_at) DESC LIMIT 500`, quizID, middleware.GetUserID(r), middleware.GetInstitutionID(r))
+		ORDER BY MAX(le.occurred_at) DESC LIMIT 500`, quizID, middleware.GetUserID(r), middleware.GetInstitutionID(r), classID)
 	if err != nil {
 		middleware.BadRequest(w, "quiz insights unavailable")
 		return

@@ -1152,16 +1152,17 @@ func (s *Service) SubmitReport(ctx context.Context, reporterID, quizID string, q
 	return err
 }
 
-func (s *Service) GetTeacherResults(ctx context.Context, quizID, teacherID string) (map[string]interface{}, error) {
+func (s *Service) GetTeacherResults(ctx context.Context, quizID, teacherID, classID string) (map[string]interface{}, error) {
 	var check int
-	s.db.QueryRow(ctx, `SELECT 1 FROM quizzes WHERE id=$1 AND created_by=$2`, quizID, teacherID).Scan(&check)
+	s.db.QueryRow(ctx, `SELECT 1 FROM quizzes q WHERE q.id=$1 AND q.created_by=$2
+		AND ($3='' OR EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id::text=$3 AND gt.user_id=$2))`, quizID, teacherID, classID).Scan(&check)
 	if check == 0 {
 		return nil, fmt.Errorf("not found or forbidden")
 	}
-	return s.getResults(ctx, quizID)
+	return s.getResults(ctx, quizID, classID)
 }
 
-func (s *Service) getResults(ctx context.Context, quizID string) (map[string]interface{}, error) {
+func (s *Service) getResults(ctx context.Context, quizID, classID string) (map[string]interface{}, error) {
 	// One pass over quiz_attempts for the completed count, the average score and
 	// the started count — they were three separate round trips scanning the same
 	// rows twice. question_count comes along as a scalar subquery.
@@ -1172,7 +1173,8 @@ func (s *Service) getResults(ctx context.Context, quizID string) (map[string]int
 		        COALESCE(AVG(score_pct) FILTER (WHERE status='completed'), 0),
 		        COUNT(*),
 		        COALESCE((SELECT question_count FROM quizzes WHERE id=$1), 0)
-		 FROM quiz_attempts WHERE quiz_id=$1`, quizID,
+		 FROM quiz_attempts qa WHERE quiz_id=$1
+		 AND ($2='' OR EXISTS(SELECT 1 FROM group_students gs WHERE gs.group_id::text=$2 AND gs.user_id=qa.user_id))`, quizID, classID,
 	).Scan(&totalAttempts, &avgScore, &started, &questionCount)
 
 	completionRate := 0.0
@@ -1191,9 +1193,10 @@ func (s *Service) getResults(ctx context.Context, quizID string) (map[string]int
 	 FROM questions q
 	 LEFT JOIN question_responses qr ON qr.question_id=q.id
 	 LEFT JOIN quiz_attempts qa ON qa.id=qr.attempt_id AND qa.quiz_id=$1 AND qa.status='completed'
+	   AND ($3='' OR EXISTS(SELECT 1 FROM group_students gs WHERE gs.group_id::text=$3 AND gs.user_id=qa.user_id))
 	 WHERE q.quiz_id=$1
 	 GROUP BY q.id, q.position, q.prompt
-	 ORDER BY q.position`, quizID, totalAttempts)
+	 ORDER BY q.position`, quizID, totalAttempts, classID)
 	defer rows.Close()
 
 	type distractor struct {
@@ -1204,7 +1207,8 @@ func (s *Service) getResults(ctx context.Context, quizID string) (map[string]int
 	dRows, dErr := s.db.Query(ctx, `SELECT qr.question_id,qr.answer::text,COUNT(*)
 		FROM question_responses qr JOIN quiz_attempts qa ON qa.id=qr.attempt_id
 		WHERE qa.quiz_id=$1 AND qa.status='completed' AND NOT COALESCE(qr.is_correct,false) AND qr.answer IS NOT NULL
-		GROUP BY qr.question_id,qr.answer ORDER BY COUNT(*) DESC`, quizID)
+		  AND ($2='' OR EXISTS(SELECT 1 FROM group_students gs WHERE gs.group_id::text=$2 AND gs.user_id=qa.user_id))
+		GROUP BY qr.question_id,qr.answer ORDER BY COUNT(*) DESC`, quizID, classID)
 	if dErr == nil {
 		defer dRows.Close()
 		for dRows.Next() {

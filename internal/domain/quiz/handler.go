@@ -459,7 +459,7 @@ func (h *Handler) TeacherReorderQuestions(w http.ResponseWriter, r *http.Request
 
 // GET /api/v1/teacher/quizzes/:quizId/results
 func (h *Handler) TeacherResults(w http.ResponseWriter, r *http.Request) {
-	results, err := h.svc.GetTeacherResults(r.Context(), chi.URLParam(r, "quizId"), middleware.GetUserID(r))
+	results, err := h.svc.GetTeacherResults(r.Context(), chi.URLParam(r, "quizId"), middleware.GetUserID(r), r.URL.Query().Get("class_id"))
 	if err != nil {
 		middleware.NotFound(w, "quiz")
 		return

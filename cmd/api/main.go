@@ -22,6 +22,7 @@ import (
 	"github.com/qwish/backend/internal/domain/demo"
 	"github.com/qwish/backend/internal/domain/editrequest"
 	"github.com/qwish/backend/internal/domain/enrollment"
+	"github.com/qwish/backend/internal/domain/featureonboarding"
 	"github.com/qwish/backend/internal/domain/institution"
 	"github.com/qwish/backend/internal/domain/leaderboard"
 	"github.com/qwish/backend/internal/domain/learning"
@@ -96,6 +97,7 @@ func main() {
 	teacherH := teacher.NewHandler(pool)
 	curriculumH := curriculum.NewHandler(curriculum.NewService(pool))
 	learningH := learning.NewHandler(pool)
+	featureOnboardingH := featureonboarding.NewHandler(pool)
 	adminH := admin.NewHandler(pool, cfg, notifSvc)
 	metricsH := metrics.NewHandler(pool, admin.MetricsScopeResolver(pool))
 	instMetricsH := metrics.NewHandler(pool, institution.MetricsScopeResolver())
@@ -549,6 +551,8 @@ func main() {
 					r.Use(mw.RequireRole("teacher"))
 					curriculumH.TeacherRoutes(r)
 					r.Get("/overview", teacherH.Overview)
+					r.Get("/feature-onboarding", featureOnboardingH.List)
+					r.Put("/feature-onboarding/{featureKey}", featureOnboardingH.Update)
 					r.Get("/quizzes/taxonomy", quizH.GetTaxonomy)
 					r.Get("/quizzes/favorites", quizH.TeacherListFavorites)
 					r.Get("/quizzes", quizH.TeacherList)

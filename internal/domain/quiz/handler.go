@@ -171,7 +171,7 @@ func (h *Handler) TeacherList(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > 50 {
 		limit = 20
 	}
-	quizzes, total, err := h.svc.ListForTeacher(r.Context(), userID, q.Get("status"), page, limit)
+	quizzes, total, err := h.svc.ListForTeacher(r.Context(), userID, q.Get("status"), q.Get("class_id"), page, limit)
 	if err != nil {
 		middleware.InternalError(w)
 		return

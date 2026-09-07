@@ -453,7 +453,16 @@ func (h *Handler) QuizAnalyticsReport(w http.ResponseWriter, r *http.Request) {
 
 	args := []interface{}{teacherID}
 	dateClause := ""
+	quizClause := ""
 	n := 2
+	if classID := q.Get("class_id"); classID != "" {
+		quizClause += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM group_teachers gt WHERE gt.group_id=$%d::uuid AND gt.user_id=$1)
+			AND (q.group_id=$%d::uuid OR EXISTS (SELECT 1 FROM learning_assignments la WHERE la.quiz_id=q.id AND la.group_id=$%d::uuid))`, n, n, n)
+		dateClause += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM group_students gs WHERE gs.group_id=$%d::uuid AND gs.user_id=qa.user_id)`, n)
+		args = append(args, classID)
+		n++
+	}
+	filterArgsLen := len(args)
 	if df := q.Get("date_from"); df != "" {
 		dateClause += fmt.Sprintf(" AND qa.started_at >= $%d", n)
 		args = append(args, df)
@@ -467,7 +476,7 @@ func (h *Handler) QuizAnalyticsReport(w http.ResponseWriter, r *http.Request) {
 
 	var total int
 	h.db.QueryRow(r.Context(),
-		`SELECT COUNT(*) FROM quizzes WHERE created_by=$1 AND deleted_at IS NULL`, teacherID).Scan(&total)
+		`SELECT COUNT(*) FROM quizzes q WHERE q.created_by=$1 AND q.deleted_at IS NULL`+quizClause, args[:filterArgsLen]...).Scan(&total)
 
 	args = append(args, limit, offset)
 	sql := `SELECT q.id, q.title,
@@ -478,7 +487,7 @@ func (h *Handler) QuizAnalyticsReport(w http.ResponseWriter, r *http.Request) {
 	        COUNT(*) FILTER (WHERE qa.status='completed' AND qa.score_pct < 60) AS low_band
 	 FROM quizzes q
 	 LEFT JOIN quiz_attempts qa ON qa.quiz_id=q.id` + dateClause + `
-	 WHERE q.created_by=$1 AND q.deleted_at IS NULL
+	 WHERE q.created_by=$1 AND q.deleted_at IS NULL` + quizClause + `
 	 GROUP BY q.id, q.title
 	 ORDER BY completed_count DESC, q.title
 	 LIMIT $` + strconv.Itoa(n) + ` OFFSET $` + strconv.Itoa(n+1)

@@ -974,16 +974,22 @@ type QuestionForStudent struct {
 	ClueCount         int             `json:"clue_count"`
 }
 
-func (s *Service) ListForTeacher(ctx context.Context, teacherID, statusFilter string, page, limit int) ([]Quiz, int, error) {
+func (s *Service) ListForTeacher(ctx context.Context, teacherID, statusFilter, classID string, page, limit int) ([]Quiz, int, error) {
 	offset := (page - 1) * limit
 	var total int
 	args := []interface{}{teacherID}
-	where := `created_by = $1 AND deleted_at IS NULL`
+	where := `q.created_by = $1 AND q.deleted_at IS NULL`
 	if statusFilter != "" {
-		where += ` AND status = $2`
+		where += ` AND q.status = $2`
 		args = append(args, statusFilter)
 	}
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quizzes WHERE `+where, args...).Scan(&total)
+	if classID != "" {
+		classArg := len(args) + 1
+		where += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM group_teachers gt WHERE gt.group_id=$%d::uuid AND gt.user_id=$1)
+			AND (q.group_id=$%d::uuid OR EXISTS (SELECT 1 FROM learning_assignments la WHERE la.quiz_id=q.id AND la.group_id=$%d::uuid))`, classArg, classArg, classArg)
+		args = append(args, classID)
+	}
+	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quizzes q WHERE `+where, args...).Scan(&total)
 	args = append(args, limit, offset)
 	n := len(args)
 	rows, err := s.db.Query(ctx,

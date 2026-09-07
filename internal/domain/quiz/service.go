@@ -1180,24 +1180,48 @@ func (s *Service) getResults(ctx context.Context, quizID string) (map[string]int
 		completionRate = float64(totalAttempts) / float64(started) * 100
 	}
 
-	// Per-question accuracy
+	// Per-question accuracy, omissions, and response time. Start from questions
+	// so a question with no responses remains visible instead of disappearing.
 	rows, _ := s.db.Query(ctx,
-		`SELECT qr.question_id, q.position, q.prompt,
-		        COUNT(*) as total,
-		        SUM(CASE WHEN qr.is_correct THEN 1 ELSE 0 END) as correct
-		 FROM question_responses qr
-		 JOIN questions q ON q.id = qr.question_id
-		 JOIN quiz_attempts qa ON qa.id = qr.attempt_id
-		 WHERE qa.quiz_id = $1 AND qa.status = 'completed'
-		 GROUP BY qr.question_id, q.position, q.prompt
-		 ORDER BY q.position`, quizID)
+		`SELECT q.id, q.position, q.prompt,
+		        COUNT(qa.id) as total,
+		        COUNT(qa.id) FILTER (WHERE qr.is_correct) as correct,
+		        GREATEST($2-COUNT(qa.id),0) AS omitted,
+		        COALESCE(AVG(qr.time_taken_ms) FILTER (WHERE qa.id IS NOT NULL),0)
+	 FROM questions q
+	 LEFT JOIN question_responses qr ON qr.question_id=q.id
+	 LEFT JOIN quiz_attempts qa ON qa.id=qr.attempt_id AND qa.quiz_id=$1 AND qa.status='completed'
+	 WHERE q.quiz_id=$1
+	 GROUP BY q.id, q.position, q.prompt
+	 ORDER BY q.position`, quizID, totalAttempts)
 	defer rows.Close()
+
+	type distractor struct {
+		Answer string `json:"answer"`
+		Count  int    `json:"count"`
+	}
+	distractors := map[string][]distractor{}
+	dRows, dErr := s.db.Query(ctx, `SELECT qr.question_id,qr.answer::text,COUNT(*)
+		FROM question_responses qr JOIN quiz_attempts qa ON qa.id=qr.attempt_id
+		WHERE qa.quiz_id=$1 AND qa.status='completed' AND NOT COALESCE(qr.is_correct,false) AND qr.answer IS NOT NULL
+		GROUP BY qr.question_id,qr.answer ORDER BY COUNT(*) DESC`, quizID)
+	if dErr == nil {
+		defer dRows.Close()
+		for dRows.Next() {
+			var questionID, answer string
+			var count int
+			if dRows.Scan(&questionID, &answer, &count) == nil {
+				distractors[questionID] = append(distractors[questionID], distractor{Answer: answer, Count: count})
+			}
+		}
+	}
 
 	var perQuestion []map[string]interface{}
 	for rows.Next() {
 		var qid, prompt string
-		var pos, total, correct int
-		rows.Scan(&qid, &pos, &prompt, &total, &correct)
+		var pos, total, correct, omitted int
+		var avgTimeMS float64
+		rows.Scan(&qid, &pos, &prompt, &total, &correct, &omitted, &avgTimeMS)
 		acc := 0.0
 		if total > 0 {
 			acc = float64(correct) / float64(total) * 100
@@ -1205,6 +1229,7 @@ func (s *Service) getResults(ctx context.Context, quizID string) (map[string]int
 		perQuestion = append(perQuestion, map[string]interface{}{
 			"question_id": qid, "position": pos, "prompt": prompt,
 			"total_responses": total, "correct_count": correct, "accuracy_pct": acc,
+			"omitted_count": omitted, "average_time_ms": avgTimeMS, "distractors": distractors[qid],
 		})
 	}
 

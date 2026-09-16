@@ -96,7 +96,7 @@ func main() {
 	institutionH := institution.NewHandler(pool, notifSvc, enrollmentSvc, cfg.AppURL, cfg.TeacherURL)
 	teacherH := teacher.NewHandler(pool)
 	curriculumH := curriculum.NewHandler(curriculum.NewService(pool))
-	learningH := learning.NewHandler(pool)
+	learningH := learning.NewHandler(pool, notifSvc)
 	featureOnboardingH := featureonboarding.NewHandler(pool)
 	adminH := admin.NewHandler(pool, cfg, notifSvc)
 	metricsH := metrics.NewHandler(pool, admin.MetricsScopeResolver(pool))
@@ -128,6 +128,19 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(mw.RequestLog)
 	r.Use(chimw.Recoverer)
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("X-Frame-Options", "DENY")
+			w.Header().Set("Referrer-Policy", "no-referrer")
+			w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+			w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+			if cfg.AppEnv == "production" {
+				w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+			}
+			next.ServeHTTP(w, req)
+		})
+	})
 	allowedOrigins := buildOriginSet(cfg.AllowedOrigins)
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -225,6 +238,13 @@ func main() {
 				})
 				r.Post("/abandon-stale-attempts", func(w http.ResponseWriter, r *http.Request) {
 					if err := sched.AbandonStaleAttempts(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
+				r.Post("/assignment-reminders", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.SendAssignmentReminders(r.Context()); err != nil {
 						mw.InternalError(w)
 						return
 					}
@@ -480,6 +500,7 @@ func main() {
 				r.Get("/users/me/insights/trend", userH.GetMyScoreTrend)
 				r.Get("/users/me/learning-summary", learningH.StudentSummary)
 				r.Get("/users/me/assignments", learningH.StudentAssignments)
+				r.With(mw.RequireRole("student")).Get("/users/me/curricula", learningH.StudentCurricula)
 
 				// Offline mode: prefetch practice pack + sync offline results
 				r.Get("/offline/pack", offlineH.GetPack)
@@ -530,6 +551,7 @@ func main() {
 					r.Post("/attempts/{attemptId}/complete", attemptH.Complete)
 				})
 				r.Get("/attempts/{attemptId}", attemptH.GetResult)
+				r.Get("/attempts/{attemptId}/session", attemptH.Resume)
 
 				// Leaderboard
 				r.With(mw.RateLimitByUser(120, time.Minute)).Get("/leaderboard", leaderboardH.Get)
@@ -567,6 +589,7 @@ func main() {
 					r.Get("/quizzes/{quizId}/results", quizH.TeacherResults)
 					r.Get("/quizzes/{quizId}/response-insights", learningH.QuizInsights)
 					r.Get("/learning-summary", learningH.TeacherClassSummary)
+					r.Get("/class-learning-matrix", learningH.TeacherClassMatrix)
 					r.Post("/assignments", learningH.CreateAssignment)
 					r.Get("/assignments", learningH.ListAssignments)
 					r.Get("/follow-up-outcomes", learningH.FollowUpOutcomes)
@@ -583,6 +606,9 @@ func main() {
 					r.Put("/students/{studentId}/misconceptions/{misconceptionId}/review", learningH.Review)
 					r.Get("/students", teacherH.ListStudents)
 					r.Get("/students/{userId}", teacherH.GetStudent)
+					r.Get("/students/{userId}/learning-evidence", teacherH.StudentLearningEvidence)
+					r.Get("/students/{userId}/support", teacherH.GetStudentSupport)
+					r.Put("/students/{userId}/support", teacherH.UpdateStudentSupport)
 					r.Get("/classes", teacherH.ListClasses)
 					// Roster writes, bounded to classes the teacher is assigned
 					// to. Identity fields stay institution-owned.

@@ -57,6 +57,7 @@ func (s *Service) Emit(ctx context.Context, userID, kind, title, body string, op
 	err := s.db.QueryRow(ctx,
 		`INSERT INTO user_notifications (user_id, kind, title, body, icon, color, reference)
 		 VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''))
+		 ON CONFLICT DO NOTHING
 		 RETURNING id, created_at`,
 		userID, kind, title, body, o.icon, o.color, o.reference).Scan(&notifID, &createdAt)
 
@@ -85,10 +86,16 @@ func (s *Service) Emit(ctx context.Context, userID, kind, title, body string, op
 		})
 	}
 
-	if s.push != nil {
+	// Push only when this call inserted the durable notification. In particular,
+	// an idempotent assignment reminder must not produce duplicate lock-screen
+	// pushes after ON CONFLICT DO NOTHING.
+	if err == nil && s.push != nil {
 		data := map[string]string{"kind": kind}
 		if o.reference != "" {
 			data["reference"] = o.reference
+		}
+		if kind == "assignment" {
+			data["deep_link"] = "qwish://assignments"
 		}
 		// Spawn so push latency never blocks the request that triggered Emit.
 		go s.push(context.Background(), userID, title, body, data)

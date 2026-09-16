@@ -1,6 +1,7 @@
 package teacher
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -11,6 +12,12 @@ import (
 
 	"github.com/qwish/backend/internal/middleware"
 )
+
+func (h *Handler) canSeeStudent(r *http.Request, teacherID, institutionID, studentID string) bool {
+	var allowed bool
+	err := h.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=$1 AND u.institution_id=$2 AND u.role='student' AND u.deleted_at IS NULL AND (NOT EXISTS(SELECT 1 FROM group_teachers WHERE user_id=$3) OR EXISTS(SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id WHERE gs.user_id=u.id AND gt.user_id=$3)))`, studentID, institutionID, teacherID).Scan(&allowed)
+	return err == nil && allowed
+}
 
 type Handler struct {
 	db *pgxpool.Pool
@@ -353,6 +360,84 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 		"quiz_history":   attempts,
 		"classes":        classes,
 	})
+}
+
+func (h *Handler) StudentLearningEvidence(w http.ResponseWriter, r *http.Request) {
+	teacherID, instID, studentID := middleware.GetUserID(r), middleware.GetInstitutionID(r), chi.URLParam(r, "userId")
+	if !h.canSeeStudent(r, teacherID, instID, studentID) {
+		middleware.NotFound(w, "student")
+		return
+	}
+	rows, err := h.db.Query(r.Context(), `SELECT le.concept_id,c.code,c.title,date_trunc('month',le.occurred_at),COUNT(*) FILTER(WHERE le.is_correct),COUNT(*) FILTER(WHERE NOT le.is_correct),COUNT(DISTINCT le.question_id) FROM learning_evidence le JOIN curriculum_concepts c ON c.id=le.concept_id WHERE le.institution_id=$1 AND le.user_id=$2 GROUP BY le.concept_id,c.code,c.title,date_trunc('month',le.occurred_at) ORDER BY date_trunc('month',le.occurred_at),c.title`, instID, studentID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+	out := []map[string]interface{}{}
+	for rows.Next() {
+		var id, code, title string
+		var period time.Time
+		var correct, errors, questions int
+		if rows.Scan(&id, &code, &title, &period, &correct, &errors, &questions) != nil {
+			middleware.InternalError(w)
+			return
+		}
+		out = append(out, map[string]interface{}{"concept_id": id, "concept_code": code, "concept_title": title, "period": period, "correct_count": correct, "error_count": errors, "distinct_questions": questions})
+	}
+	middleware.JSON(w, http.StatusOK, out)
+}
+
+func (h *Handler) GetStudentSupport(w http.ResponseWriter, r *http.Request) {
+	teacherID, instID, studentID := middleware.GetUserID(r), middleware.GetInstitutionID(r), chi.URLParam(r, "userId")
+	if !h.canSeeStudent(r, teacherID, instID, studentID) {
+		middleware.NotFound(w, "student")
+		return
+	}
+	var note, plan, status string
+	var reviewOn *time.Time
+	var updatedAt *time.Time
+	err := h.db.QueryRow(r.Context(), `SELECT note,plan,status,review_on,updated_at FROM teacher_student_support WHERE teacher_id=$1 AND student_id=$2`, teacherID, studentID).Scan(&note, &plan, &status, &reviewOn, &updatedAt)
+	if err != nil {
+		middleware.JSON(w, http.StatusOK, map[string]interface{}{"note": "", "plan": "", "status": "monitoring", "review_on": nil, "updated_at": nil})
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]interface{}{"note": note, "plan": plan, "status": status, "review_on": reviewOn, "updated_at": updatedAt})
+}
+
+func (h *Handler) UpdateStudentSupport(w http.ResponseWriter, r *http.Request) {
+	teacherID, instID, studentID := middleware.GetUserID(r), middleware.GetInstitutionID(r), chi.URLParam(r, "userId")
+	if !h.canSeeStudent(r, teacherID, instID, studentID) {
+		middleware.NotFound(w, "student")
+		return
+	}
+	var in struct {
+		Note     string  `json:"note"`
+		Plan     string  `json:"plan"`
+		Status   string  `json:"status"`
+		ReviewOn *string `json:"review_on"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&in) != nil || len(in.Note) > 4000 || len(in.Plan) > 4000 || (in.Status != "monitoring" && in.Status != "supporting" && in.Status != "resolved") {
+		middleware.BadRequest(w, "valid status and notes up to 4000 characters are required")
+		return
+	}
+	var review interface{}
+	if in.ReviewOn != nil && *in.ReviewOn != "" {
+		parsed, err := time.Parse("2006-01-02", *in.ReviewOn)
+		if err != nil {
+			middleware.BadRequest(w, "review_on must be YYYY-MM-DD")
+			return
+		}
+		review = parsed
+	}
+	_, err := h.db.Exec(r.Context(), `INSERT INTO teacher_student_support(teacher_id,student_id,institution_id,note,plan,status,review_on) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(teacher_id,student_id) DO UPDATE SET note=EXCLUDED.note,plan=EXCLUDED.plan,status=EXCLUDED.status,review_on=EXCLUDED.review_on,updated_at=now()`, teacherID, studentID, instID, in.Note, in.Plan, in.Status, review)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
 
 // ─── Classes (read-only group view) ──────────────────────────────────────────

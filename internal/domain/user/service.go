@@ -382,20 +382,20 @@ func (s *Service) RecordScorecardShare(ctx context.Context, userID string) error
 	return err
 }
 
-func (s *Service) GetAttempts(ctx context.Context, userID string, page, limit int) ([]AttemptSummary, int, error) {
+func (s *Service) GetAttempts(ctx context.Context, userID string, page, limit int, quizType string, since *time.Time) ([]AttemptSummary, int, error) {
 	offset := (page - 1) * limit
 	var total int
 	s.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM quiz_attempts WHERE user_id = $1 AND status = 'completed'`, userID,
+		`SELECT COUNT(*) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id WHERE qa.user_id=$1 AND qa.status='completed' AND ($2='' OR q.type=$2) AND ($3::timestamptz IS NULL OR qa.completed_at >= $3)`, userID, quizType, since,
 	).Scan(&total)
 
 	rows, err := s.db.Query(ctx,
 		`SELECT qa.id, qa.quiz_id, q.title, COALESCE(qa.score_pct,0), COALESCE(qa.points_delta,0), qa.status, qa.completed_at
 		 FROM quiz_attempts qa
 		 JOIN quizzes q ON q.id = qa.quiz_id
-		 WHERE qa.user_id = $1 AND qa.status = 'completed'
+		 WHERE qa.user_id=$1 AND qa.status='completed' AND ($2='' OR q.type=$2) AND ($3::timestamptz IS NULL OR qa.completed_at >= $3)
 		 ORDER BY qa.completed_at DESC
-		 LIMIT $2 OFFSET $3`, userID, limit, offset)
+		 LIMIT $4 OFFSET $5`, userID, quizType, since, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -413,15 +413,16 @@ func (s *Service) GetAttempts(ctx context.Context, userID string, page, limit in
 	return attempts, total, nil
 }
 
-func (s *Service) GetAttemptsAfter(ctx context.Context, userID string, at time.Time, id string, limit int) ([]AttemptSummary, int, error) {
+func (s *Service) GetAttemptsAfter(ctx context.Context, userID string, at time.Time, id string, limit int, quizType string, since *time.Time) ([]AttemptSummary, int, error) {
 	var total int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed'`, userID).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id WHERE qa.user_id=$1 AND qa.status='completed' AND ($2='' OR q.type=$2) AND ($3::timestamptz IS NULL OR qa.completed_at >= $3)`, userID, quizType, since).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	rows, err := s.db.Query(ctx, `SELECT qa.id,qa.quiz_id,q.title,COALESCE(qa.score_pct,0),COALESCE(qa.points_delta,0),qa.status,qa.completed_at
 		FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
 		WHERE qa.user_id=$1 AND qa.status='completed' AND (qa.completed_at,qa.id)<($2,$3::uuid)
-		ORDER BY qa.completed_at DESC,qa.id DESC LIMIT $4`, userID, at, id, limit)
+		AND ($4='' OR q.type=$4) AND ($5::timestamptz IS NULL OR qa.completed_at >= $5)
+		ORDER BY qa.completed_at DESC,qa.id DESC LIMIT $6`, userID, at, id, quizType, since, limit)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -850,11 +851,12 @@ type NotifPrefs struct {
 	PushWeeklyDigest    bool `json:"push_weekly_digest"`
 	PushStreakNudge     bool `json:"push_streak_nudge"`
 	PushStudyGroup      bool `json:"push_study_group"`
+	PushAssignments     bool `json:"push_assignments"`
 	EmailWeeklyInsights bool `json:"email_weekly_insights"`
 }
 
 func defaultNotifPrefs() *NotifPrefs {
-	return &NotifPrefs{true, true, true, true, true}
+	return &NotifPrefs{true, true, true, true, true, true}
 }
 
 // GetNotifPrefs returns the user's preferences, falling back to all-enabled
@@ -862,9 +864,9 @@ func defaultNotifPrefs() *NotifPrefs {
 func (s *Service) GetNotifPrefs(ctx context.Context, userID string) (*NotifPrefs, error) {
 	p := &NotifPrefs{}
 	err := s.db.QueryRow(ctx,
-		`SELECT push_rank_changes, push_weekly_digest, push_streak_nudge, push_study_group, email_weekly_insights
+		`SELECT push_rank_changes, push_weekly_digest, push_streak_nudge, push_study_group, push_assignments, email_weekly_insights
 		 FROM notification_preferences WHERE user_id=$1`, userID,
-	).Scan(&p.PushRankChanges, &p.PushWeeklyDigest, &p.PushStreakNudge, &p.PushStudyGroup, &p.EmailWeeklyInsights)
+	).Scan(&p.PushRankChanges, &p.PushWeeklyDigest, &p.PushStreakNudge, &p.PushStudyGroup, &p.PushAssignments, &p.EmailWeeklyInsights)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return defaultNotifPrefs(), nil
 	}
@@ -893,21 +895,25 @@ func (s *Service) UpdateNotifPrefs(ctx context.Context, userID string, in map[st
 	if v, ok := in["push_study_group"]; ok {
 		cur.PushStudyGroup = v
 	}
+	if v, ok := in["push_assignments"]; ok {
+		cur.PushAssignments = v
+	}
 	if v, ok := in["email_weekly_insights"]; ok {
 		cur.EmailWeeklyInsights = v
 	}
 	_, err = s.db.Exec(ctx,
 		`INSERT INTO notification_preferences
-		   (user_id, push_rank_changes, push_weekly_digest, push_streak_nudge, push_study_group, email_weekly_insights, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6, now())
+		   (user_id, push_rank_changes, push_weekly_digest, push_streak_nudge, push_study_group, push_assignments, email_weekly_insights, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7, now())
 		 ON CONFLICT (user_id) DO UPDATE SET
 		   push_rank_changes=EXCLUDED.push_rank_changes,
 		   push_weekly_digest=EXCLUDED.push_weekly_digest,
 		   push_streak_nudge=EXCLUDED.push_streak_nudge,
 		   push_study_group=EXCLUDED.push_study_group,
+		   push_assignments=EXCLUDED.push_assignments,
 		   email_weekly_insights=EXCLUDED.email_weekly_insights,
 		   updated_at=now()`,
-		userID, cur.PushRankChanges, cur.PushWeeklyDigest, cur.PushStreakNudge, cur.PushStudyGroup, cur.EmailWeeklyInsights)
+		userID, cur.PushRankChanges, cur.PushWeeklyDigest, cur.PushStreakNudge, cur.PushStudyGroup, cur.PushAssignments, cur.EmailWeeklyInsights)
 	if err != nil {
 		return nil, err
 	}

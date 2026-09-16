@@ -43,7 +43,7 @@ func Load() *Config {
 		log.Println("No .env file found, reading from environment")
 	}
 
-	return &Config{
+	cfg := &Config{
 		Port:                     getEnv("PORT", "8080"),
 		AppEnv:                   getEnv("APP_ENV", "development"),
 		DatabaseURL:              mustEnv("DATABASE_URL"),
@@ -73,6 +73,19 @@ func Load() *Config {
 		RecruiterTestLoginSecret: getEnv("RECRUITER_TEST_LOGIN_SECRET", ""),
 		RecruiterTestLoginEmail:  getEnv("RECRUITER_TEST_LOGIN_EMAIL", ""),
 	}
+	if cfg.AppEnv == "production" {
+		for key, value := range map[string]string{
+			"ALLOWED_ORIGINS":          cfg.AllowedOrigins,
+			"CRON_SECRET":              cfg.CronSecret,
+			"FCM_PROJECT_ID":           cfg.FCMProjectID,
+			"FCM_SERVICE_ACCOUNT_JSON": cfg.FCMCredentialsJSON,
+		} {
+			if value == "" || (key == "ALLOWED_ORIGINS" && value == "*") {
+				log.Fatalf("production requires a non-wildcard %s", key)
+			}
+		}
+	}
+	return cfg
 }
 
 func getEnv(key, fallback string) string {

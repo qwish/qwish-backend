@@ -12,7 +12,7 @@ import (
 // interface rather than the concrete type so the dependency stays one-way and
 // testable without a full attempt service.
 type Attempts interface {
-	Start(ctx context.Context, userID, quizID string) (*attempt.StartAttemptResp, error)
+	Start(ctx context.Context, userID, quizID, assignmentID string) (*attempt.StartAttemptResp, error)
 	ReplayAnswer(ctx context.Context, userID, attemptID string, req attempt.AnswerReq, elapsedMs int) (*attempt.AnswerResp, error)
 	Complete(ctx context.Context, userID, attemptID string) (*attempt.CompleteResp, error)
 }
@@ -81,7 +81,7 @@ func (s *Service) replay(ctx context.Context, userID, quizID string, responses [
 		return
 	}
 
-	started, err := s.attempts.Start(ctx, userID, quizID)
+	started, err := s.attempts.Start(ctx, userID, quizID, "")
 	if err != nil {
 		log.Printf("onboarding claim: start attempt for user %s: %v", userID, err)
 		return

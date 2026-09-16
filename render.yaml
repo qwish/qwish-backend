@@ -100,6 +100,7 @@ services:
       post() { curl -fsS --max-time 900 -X POST -H "X-Cron-Secret: $CRON_SECRET" "https://$API_HOST/api/v1/internal/cron/$1"; echo; };
       post close-expired-quizzes;
       post abandon-stale-attempts;
+      post assignment-reminders;
       '
     envVars: &cronEnv
       - key: API_HOST

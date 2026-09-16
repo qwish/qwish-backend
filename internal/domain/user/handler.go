@@ -126,6 +126,24 @@ func (h *Handler) GetMyAttempts(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > 50 {
 		limit = 20
 	}
+	quizType := strings.TrimSpace(r.URL.Query().Get("type"))
+	if quizType != "" && quizType != "knowledge_check" && quizType != "play_and_win" {
+		middleware.BadRequest(w, "invalid attempt type")
+		return
+	}
+	var since *time.Time
+	switch r.URL.Query().Get("period") {
+	case "", "all":
+	case "30d":
+		value := time.Now().AddDate(0, 0, -30)
+		since = &value
+	case "90d":
+		value := time.Now().AddDate(0, 0, -90)
+		since = &value
+	default:
+		middleware.BadRequest(w, "invalid attempt period")
+		return
+	}
 	var attempts []AttemptSummary
 	var total int
 	var err error
@@ -141,9 +159,9 @@ func (h *Handler) GetMyAttempts(w http.ResponseWriter, r *http.Request) {
 			middleware.BadRequest(w, "invalid cursor")
 			return
 		}
-		attempts, total, err = h.svc.GetAttemptsAfter(r.Context(), userID, at, parts[1], limit)
+		attempts, total, err = h.svc.GetAttemptsAfter(r.Context(), userID, at, parts[1], limit, quizType, since)
 	} else {
-		attempts, total, err = h.svc.GetAttempts(r.Context(), userID, page, limit)
+		attempts, total, err = h.svc.GetAttempts(r.Context(), userID, page, limit, quizType, since)
 	}
 	if err != nil {
 		middleware.InternalError(w)

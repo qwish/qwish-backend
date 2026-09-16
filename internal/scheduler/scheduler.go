@@ -532,16 +532,93 @@ func staleCutoff(now time.Time) time.Time { return now.Add(-staleAttemptAge) }
 // is why the abandonment metrics bucket on started_at.
 func (s *Scheduler) AbandonStaleAttempts(ctx context.Context) error {
 	log.Println("[cron] running abandon-stale-attempts")
-	tag, err := s.db.Exec(ctx,
-		`UPDATE quiz_attempts
-		    SET status = 'abandoned'
-		  WHERE status = 'in_progress'
-		    AND started_at < $1`, staleCutoff(time.Now()))
+	// Reset linked assignment recipients in the same statement. Previously the
+	// recipient kept pointing at an abandoned attempt forever, so every later
+	// Start call tried (and failed) to resume it.
+	tag, err := s.db.Exec(ctx, `WITH abandoned AS (
+		UPDATE quiz_attempts
+		   SET status='abandoned'
+		 WHERE status='in_progress' AND started_at < $1
+		 RETURNING id
+	), reset_recipients AS (
+		UPDATE learning_assignment_recipients ar
+		   SET attempt_id=NULL,
+		       status=CASE WHEN a.due_at IS NOT NULL AND a.due_at<=now() THEN 'overdue' ELSE 'assigned' END,
+		       attempts_started=GREATEST(0,ar.attempts_started-1)
+		  FROM learning_assignments a, abandoned x
+		 WHERE ar.assignment_id=a.id AND ar.attempt_id=x.id
+		 RETURNING ar.attempt_id
+	)
+	SELECT COUNT(*) FROM abandoned`, staleCutoff(time.Now()))
 	if err != nil {
 		log.Printf("[cron] abandon-stale-attempts failed: %v", err)
 		return err
 	}
 	log.Printf("[cron] abandon-stale-attempts done — %d attempts abandoned", tag.RowsAffected())
+	return nil
+}
+
+// SendAssignmentReminders emits idempotent in-app and push reminders for due
+// work. The partial unique index in migration 068 makes repeated or concurrent
+// cron runs safe; references are scoped to an assignment and reminder window.
+func (s *Scheduler) SendAssignmentReminders(ctx context.Context) error {
+	log.Println("[cron] running assignment-reminders")
+	if s.notifSvc == nil {
+		return nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT ar.student_id,a.id,q.title,a.due_at,
+		CASE
+		 WHEN a.due_at<=now() THEN 'overdue'
+		 WHEN a.due_at<=now()+interval '24 hours' THEN 'due_24h'
+		 ELSE 'incomplete'
+		END AS reminder
+		FROM learning_assignment_recipients ar
+		JOIN learning_assignments a ON a.id=ar.assignment_id
+		JOIN quizzes q ON q.id=a.quiz_id
+		LEFT JOIN notification_preferences np ON np.user_id=ar.student_id
+		WHERE a.status='published' AND ar.status IN ('assigned','started','overdue')
+		  AND (a.available_at IS NULL OR a.available_at<=now())
+		  AND COALESCE(np.push_assignments,true)
+		  AND (a.due_at<=now()+interval '24 hours'
+		       OR (a.due_at IS NULL AND a.created_at<=now()-interval '3 days'))`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type reminder struct {
+		userID, assignmentID, title, window string
+		dueAt                               *time.Time
+	}
+	items := []reminder{}
+	for rows.Next() {
+		var item reminder
+		if err := rows.Scan(&item.userID, &item.assignmentID, &item.title, &item.dueAt, &item.window); err != nil {
+			return err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range items {
+		title, body := "Assigned work is waiting", item.title+" is still incomplete."
+		if item.window == "overdue" {
+			title, body = "Assessment overdue", item.title+" is overdue. Open Qwish to finish it."
+		} else if item.window == "due_24h" && item.dueAt != nil {
+			title, body = "Assessment due soon", fmt.Sprintf("%s is due %s.", item.title, item.dueAt.Local().Format("2 Jan at 3:04 PM"))
+		}
+		// One undated reminder per week; due-window references are naturally
+		// stable and therefore sent once.
+		refWindow := item.window
+		if item.window == "incomplete" {
+			y, week := time.Now().ISOWeek()
+			refWindow = fmt.Sprintf("incomplete:%d-%02d", y, week)
+		}
+		s.notifSvc.Emit(ctx, item.userID, "assignment", title, body,
+			notification.WithIcon("assignment"), notification.WithColor("indigo"),
+			notification.WithReference("assignment:"+item.assignmentID+":"+refWindow))
+	}
+	log.Printf("[cron] assignment-reminders done (%d candidates)", len(items))
 	return nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -86,6 +87,10 @@ func (h *Handler) InstitutionList(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/v1/quizzes/:quizId
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
+	if !h.svc.CanView(r.Context(), chi.URLParam(r, "quizId"), middleware.GetUserID(r), middleware.GetInstitutionID(r), middleware.GetRole(r)) {
+		middleware.NotFound(w, "quiz")
+		return
+	}
 	quiz, err := h.svc.GetByID(r.Context(), chi.URLParam(r, "quizId"))
 	if err != nil {
 		middleware.NotFound(w, "quiz")
@@ -213,12 +218,25 @@ func (h *Handler) TeacherUnfavorite(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/teacher/quizzes
 func (h *Handler) TeacherCreate(w http.ResponseWriter, r *http.Request) {
 	var req CreateQuizReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Title == "" {
-		middleware.BadRequest(w, "title is required")
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil || strings.TrimSpace(req.Title) == "" || len(req.Title) > 160 ||
+		(req.Type != "knowledge_check" && req.Type != "play_and_win") {
+		middleware.BadRequest(w, "valid title and type are required")
 		return
 	}
+	req.Title = strings.TrimSpace(req.Title)
 	if req.Visibility == "" {
 		req.Visibility = "institution"
+	}
+	if req.Visibility != "institution" && req.Visibility != "public" {
+		middleware.BadRequest(w, "visibility must be institution or public")
+		return
+	}
+	if req.Visibility == "public" && (req.GroupID != nil || req.ConceptID != nil) {
+		middleware.BadRequest(w, "public quizzes cannot target a class or institution curriculum")
+		return
 	}
 	quiz, err := h.svc.Create(r.Context(), req, middleware.GetUserID(r), middleware.GetInstitutionID(r))
 	if err == ErrInvalidTaxonomy {
@@ -227,6 +245,10 @@ func (h *Handler) TeacherCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err == ErrInvalidTeacherGroup {
 		middleware.Error(w, http.StatusForbidden, "CLASS_NOT_ASSIGNED", err.Error())
+		return
+	}
+	if err == ErrInvalidCurriculumConcept {
+		middleware.BadRequest(w, err.Error())
 		return
 	}
 	if err != nil {
@@ -333,7 +355,20 @@ func (h *Handler) GetTaxonomy(w http.ResponseWriter, r *http.Request) {
 // PATCH /api/v1/teacher/quizzes/:quizId
 func (h *Handler) TeacherUpdate(w http.ResponseWriter, r *http.Request) {
 	var req CreateQuizReq
-	json.NewDecoder(r.Body).Decode(&req)
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil || strings.TrimSpace(req.Title) == "" || len(req.Title) > 160 ||
+		(req.Type != "knowledge_check" && req.Type != "play_and_win") ||
+		(req.Visibility != "institution" && req.Visibility != "public") {
+		middleware.BadRequest(w, "valid title, type and visibility are required")
+		return
+	}
+	req.Title = strings.TrimSpace(req.Title)
+	if req.Visibility == "public" && (req.GroupID != nil || req.ConceptID != nil) {
+		middleware.BadRequest(w, "public quizzes cannot target a class or institution curriculum")
+		return
+	}
 	if err := h.svc.Update(r.Context(), chi.URLParam(r, "quizId"), middleware.GetUserID(r), req); err != nil {
 		if err == ErrInvalidTaxonomy {
 			middleware.BadRequest(w, "invalid domain or subdomain")
@@ -341,6 +376,14 @@ func (h *Handler) TeacherUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		if err == ErrInvalidTeacherGroup {
 			middleware.Error(w, http.StatusForbidden, "CLASS_NOT_ASSIGNED", err.Error())
+			return
+		}
+		if err == ErrInvalidCurriculumConcept {
+			middleware.BadRequest(w, err.Error())
+			return
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			middleware.NotFound(w, "draft quiz")
 			return
 		}
 		middleware.InternalError(w)

@@ -20,8 +20,21 @@ func NewHandler(svc *Service) *Handler {
 func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 	quizID := chi.URLParam(r, "quizId")
 	userID := middleware.GetUserID(r)
+	var input struct {
+		AssignmentID string `json:"assignment_id"`
+	}
+	// A body is optional for ordinary catalogue quizzes. When present, reject
+	// malformed JSON rather than silently dropping assignment context.
+	if r.Body != nil && r.ContentLength != 0 {
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			middleware.BadRequest(w, "invalid attempt context")
+			return
+		}
+	}
 
-	resp, err := h.svc.Start(r.Context(), userID, quizID)
+	resp, err := h.svc.Start(r.Context(), userID, quizID, input.AssignmentID)
 	if err != nil {
 		middleware.BadRequest(w, err.Error())
 		return
@@ -88,6 +101,16 @@ func (h *Handler) GetResult(w http.ResponseWriter, r *http.Request) {
 	result, err := h.svc.GetResult(r.Context(), middleware.GetUserID(r), chi.URLParam(r, "attemptId"))
 	if err != nil {
 		middleware.NotFound(w, "attempt")
+		return
+	}
+	middleware.JSON(w, http.StatusOK, result)
+}
+
+// GET /api/v1/attempts/:attemptId/session
+func (h *Handler) Resume(w http.ResponseWriter, r *http.Request) {
+	result, err := h.svc.ResumeAttempt(r.Context(), middleware.GetUserID(r), chi.URLParam(r, "attemptId"))
+	if err != nil {
+		middleware.NotFound(w, "active attempt")
 		return
 	}
 	middleware.JSON(w, http.StatusOK, result)

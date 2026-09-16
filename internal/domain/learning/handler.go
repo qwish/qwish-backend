@@ -3,17 +3,25 @@ package learning
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/domain/curriculum"
+	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/middleware"
 )
 
-type Handler struct{ db *pgxpool.Pool }
+type Handler struct {
+	db    *pgxpool.Pool
+	notif *notification.Service
+}
 
-func NewHandler(db *pgxpool.Pool) *Handler { return &Handler{db: db} }
+func NewHandler(db *pgxpool.Pool, notif *notification.Service) *Handler {
+	return &Handler{db: db, notif: notif}
+}
 
 func insightStatus(mapped bool, distinctQuestions, highConfidenceErrors int) string {
 	if mapped && distinctQuestions >= 2 {
@@ -92,10 +100,16 @@ func (h *Handler) MapQuestion(w http.ResponseWriter, r *http.Request) {
 	err = tx.QueryRow(r.Context(), `SELECT EXISTS(
 		SELECT 1 FROM questions q JOIN quizzes z ON z.id=q.quiz_id
 		JOIN curriculum_concepts c ON c.id=$4 JOIN curriculum_chapters ch ON ch.id=c.chapter_id
-		JOIN curriculum_versions cv ON cv.id=ch.version_id JOIN curricula cu ON cu.id=cv.curriculum_id
-		WHERE q.id=$1 AND z.created_by=$2 AND cu.institution_id=$3)`, questionID, middleware.GetUserID(r), middleware.GetInstitutionID(r), in.ConceptID).Scan(&allowed)
+		JOIN curriculum_versions cv ON cv.id=ch.version_id AND cv.status='published'
+		JOIN curricula cu ON cu.id=cv.curriculum_id
+		JOIN class_curricula cc ON cc.version_id=cv.id AND cc.group_id=z.group_id AND cc.ended_at IS NULL
+		WHERE q.id=$1 AND z.created_by=$2 AND z.status IN ('draft','rejected') AND cu.institution_id=$3)`, questionID, middleware.GetUserID(r), middleware.GetInstitutionID(r), in.ConceptID).Scan(&allowed)
 	if err != nil || !allowed {
 		middleware.NotFound(w, "question or concept")
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `DELETE FROM question_concepts WHERE question_id=$1 AND mapped_by=$2`, questionID, middleware.GetUserID(r)); err != nil {
+		middleware.InternalError(w)
 		return
 	}
 	if _, err = tx.Exec(r.Context(), `INSERT INTO question_concepts(question_id,concept_id,weight,mapped_by) VALUES($1,$2,$3,$4)
@@ -321,10 +335,73 @@ func (h *Handler) TeacherClassSummary(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, result)
 }
 
+func (h *Handler) TeacherClassMatrix(w http.ResponseWriter, r *http.Request) {
+	classID := strings.TrimSpace(r.URL.Query().Get("class_id"))
+	if classID == "" {
+		middleware.BadRequest(w, "class_id is required")
+		return
+	}
+	rows, err := h.db.Query(r.Context(), `SELECT u.id,u.display_name,c.id,c.code,c.title,COUNT(*) FILTER(WHERE le.is_correct),COUNT(*) FILTER(WHERE NOT le.is_correct),COUNT(DISTINCT le.question_id),MAX(le.occurred_at) FROM group_teachers gt JOIN group_students gs ON gs.group_id=gt.group_id JOIN users u ON u.id=gs.user_id JOIN learning_evidence le ON le.user_id=u.id AND le.institution_id=$3 JOIN curriculum_concepts c ON c.id=le.concept_id WHERE gt.user_id=$1 AND gt.group_id::text=$2 GROUP BY u.id,u.display_name,c.id,c.code,c.title ORDER BY u.display_name,c.title`, middleware.GetUserID(r), classID, middleware.GetInstitutionID(r))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+	out := []map[string]interface{}{}
+	for rows.Next() {
+		var studentID, name, conceptID, code, title string
+		var correct, errors, questions int
+		var latest time.Time
+		if rows.Scan(&studentID, &name, &conceptID, &code, &title, &correct, &errors, &questions, &latest) != nil {
+			middleware.InternalError(w)
+			return
+		}
+		state := "insufficient_evidence"
+		if questions >= 2 && errors > correct {
+			state = "needs_support"
+		} else if questions >= 2 {
+			state = "on_track"
+		}
+		out = append(out, map[string]interface{}{"student_id": studentID, "student_name": name, "concept_id": conceptID, "concept_code": code, "concept_title": title, "correct_count": correct, "error_count": errors, "distinct_questions": questions, "state": state, "latest_evidence_at": latest})
+	}
+	middleware.JSON(w, http.StatusOK, out)
+}
+
 func (h *Handler) StudentAssignments(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.Query(r.Context(), `SELECT a.id,a.quiz_id,q.title,a.purpose,a.due_at,ar.status,ar.attempt_id
-		FROM learning_assignment_recipients ar JOIN learning_assignments a ON a.id=ar.assignment_id JOIN quizzes q ON q.id=a.quiz_id
-		WHERE ar.student_id=$1 AND a.status='published' AND (a.due_at IS NULL OR a.due_at > now() OR ar.status IN ('submitted','started')) ORDER BY a.due_at NULLS LAST,a.created_at DESC LIMIT 100`, middleware.GetUserID(r))
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
+	filter := strings.TrimSpace(r.URL.Query().Get("filter"))
+	if filter != "" && filter != "active" && filter != "completed" && filter != "overdue" {
+		middleware.BadRequest(w, "invalid assignment filter")
+		return
+	}
+	classID := strings.TrimSpace(r.URL.Query().Get("class_id"))
+	var total int
+	countErr := h.db.QueryRow(r.Context(), `SELECT COUNT(*)
+		FROM learning_assignment_recipients ar JOIN learning_assignments a ON a.id=ar.assignment_id
+		WHERE ar.student_id=$1 AND a.status IN ('published','closed') AND ($2='' OR a.group_id::text=$2)
+		AND ($3='' OR ($3='completed' AND ar.status='submitted') OR ($3='overdue' AND ar.status<>'submitted' AND a.due_at<=now()) OR ($3='active' AND ar.status NOT IN ('submitted','excused','withdrawn') AND a.status='published'))`, middleware.GetUserID(r), classID, filter).Scan(&total)
+	if countErr != nil {
+		middleware.InternalError(w)
+		return
+	}
+	rows, err := h.db.Query(r.Context(), `SELECT a.id,a.quiz_id,q.title,a.purpose,a.due_at,
+		CASE WHEN ar.status='assigned' AND a.available_at IS NOT NULL AND a.available_at>now() THEN 'scheduled'
+		     WHEN ar.status='assigned' AND a.due_at IS NOT NULL AND a.due_at<=now() THEN 'overdue' ELSE ar.status END,
+		ar.attempt_id,a.status,g.id,g.name,u.display_name,COALESCE(a.instructions,''),a.available_at,
+		i.timezone,a.attempt_limit,ar.assigned_at
+		FROM learning_assignment_recipients ar
+		JOIN learning_assignments a ON a.id=ar.assignment_id JOIN quizzes q ON q.id=a.quiz_id
+		JOIN groups g ON g.id=a.group_id JOIN users u ON u.id=a.created_by JOIN institutions i ON i.id=a.institution_id
+		WHERE ar.student_id=$1 AND a.status IN ('published','closed') AND ($2='' OR a.group_id::text=$2)
+		AND ($3='' OR ($3='completed' AND ar.status='submitted') OR ($3='overdue' AND ar.status<>'submitted' AND a.due_at<=now()) OR ($3='active' AND ar.status NOT IN ('submitted','excused','withdrawn') AND a.status='published'))
+		ORDER BY CASE WHEN ar.status='submitted' THEN 1 ELSE 0 END,a.due_at NULLS LAST,a.created_at DESC LIMIT $4 OFFSET $5`, middleware.GetUserID(r), classID, filter, limit, (page-1)*limit)
 	if err != nil {
 		middleware.BadRequest(w, "assignments unavailable")
 		return
@@ -332,23 +409,122 @@ func (h *Handler) StudentAssignments(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	result := []map[string]interface{}{}
 	for rows.Next() {
-		var id, quizID, title, purpose, status string
-		var due, attempt interface{}
-		if rows.Scan(&id, &quizID, &title, &purpose, &due, &status, &attempt) != nil {
+		var id, quizID, title, purpose, status, assignmentStatus, groupID, groupName, teacherName, instructions, timezone string
+		var due, attempt, availableAt interface{}
+		var attemptLimit int
+		var assignedAt time.Time
+		if rows.Scan(&id, &quizID, &title, &purpose, &due, &status, &attempt, &assignmentStatus, &groupID, &groupName, &teacherName, &instructions, &availableAt, &timezone, &attemptLimit, &assignedAt) != nil {
 			middleware.InternalError(w)
 			return
 		}
-		result = append(result, map[string]interface{}{"id": id, "quiz_id": quizID, "title": title, "purpose": purpose, "due_at": due, "status": status, "attempt_id": attempt})
+		result = append(result, map[string]interface{}{"id": id, "quiz_id": quizID, "title": title, "purpose": purpose, "due_at": due, "status": status, "attempt_id": attempt, "assignment_status": assignmentStatus, "class_id": groupID, "class_name": groupName, "teacher_name": teacherName, "instructions": instructions, "available_at": availableAt, "timezone": timezone, "attempt_limit": attemptLimit, "assigned_at": assignedAt})
 	}
-	middleware.JSON(w, http.StatusOK, result)
+	middleware.JSONWithMeta(w, http.StatusOK, result, &middleware.Meta{Page: page, Limit: limit, Total: total})
+}
+
+type StudentCurriculum struct {
+	AssignmentID   string               `json:"assignment_id"`
+	ClassID        string               `json:"class_id"`
+	ClassName      string               `json:"class_name"`
+	AcademicYear   string               `json:"academic_year"`
+	CurriculumName string               `json:"curriculum_name"`
+	VersionID      string               `json:"version_id"`
+	VersionLabel   string               `json:"version_label"`
+	Subject        string               `json:"subject"`
+	Grade          string               `json:"grade"`
+	TeacherNames   []string             `json:"teacher_names"`
+	Chapters       []curriculum.Chapter `json:"chapters"`
+}
+
+func (h *Handler) StudentCurricula(w http.ResponseWriter, r *http.Request) {
+	rows, err := h.db.Query(r.Context(), `SELECT cc.id,g.id,g.name,ay.name,cu.name,cv.id,cv.label,cv.subject,cv.grade,
+		COALESCE(array_agg(DISTINCT t.display_name) FILTER (WHERE t.id IS NOT NULL),'{}')
+		FROM group_students gs
+		JOIN groups g ON g.id=gs.group_id AND g.archived_at IS NULL
+		JOIN class_curricula cc ON cc.group_id=g.id AND cc.ended_at IS NULL
+		JOIN academic_years ay ON ay.id=cc.academic_year_id
+		JOIN curriculum_versions cv ON cv.id=cc.version_id AND cv.status='published'
+		JOIN curricula cu ON cu.id=cv.curriculum_id
+		LEFT JOIN group_teachers gt ON gt.group_id=g.id
+		LEFT JOIN users t ON t.id=gt.user_id AND t.status='active' AND t.deleted_at IS NULL
+		WHERE gs.user_id=$1
+		GROUP BY cc.id,g.id,g.name,ay.name,cu.name,cv.id,cv.label,cv.subject,cv.grade
+		ORDER BY g.name,cv.subject,cv.label`, middleware.GetUserID(r))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+	items := []StudentCurriculum{}
+	for rows.Next() {
+		var item StudentCurriculum
+		if err := rows.Scan(&item.AssignmentID, &item.ClassID, &item.ClassName, &item.AcademicYear,
+			&item.CurriculumName, &item.VersionID, &item.VersionLabel, &item.Subject, &item.Grade,
+			&item.TeacherNames); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+		chapterRows, err := h.db.Query(r.Context(), `SELECT ch.id,ch.title,c.id,c.code,c.title,c.learning_outcome
+			FROM curriculum_chapters ch
+			LEFT JOIN curriculum_concepts c ON c.chapter_id=ch.id
+			WHERE ch.version_id=$1 ORDER BY ch.position,c.position`, item.VersionID)
+		if err != nil {
+			middleware.InternalError(w)
+			return
+		}
+		item.Chapters = []curriculum.Chapter{}
+		chapterIndex := map[string]int{}
+		for chapterRows.Next() {
+			var chapterID, chapterTitle string
+			var conceptID, code, title, outcome *string
+			if err := chapterRows.Scan(&chapterID, &chapterTitle, &conceptID, &code, &title, &outcome); err != nil {
+				chapterRows.Close()
+				middleware.InternalError(w)
+				return
+			}
+			idx, exists := chapterIndex[chapterID]
+			if !exists {
+				idx = len(item.Chapters)
+				chapterIndex[chapterID] = idx
+				item.Chapters = append(item.Chapters, curriculum.Chapter{ID: chapterID, Title: chapterTitle, Concepts: []curriculum.Concept{}})
+			}
+			if conceptID != nil {
+				item.Chapters[idx].Concepts = append(item.Chapters[idx].Concepts, curriculum.Concept{
+					ID:           *conceptID,
+					ConceptInput: curriculum.ConceptInput{Code: valueOrEmpty(code), Title: valueOrEmpty(title), LearningOutcome: valueOrEmpty(outcome)},
+				})
+			}
+		}
+		chapterRows.Close()
+		if chapterRows.Err() != nil {
+			middleware.InternalError(w)
+			return
+		}
+		items = append(items, item)
+	}
+	if rows.Err() != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, items)
+}
+
+func valueOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 type assignmentInput struct {
-	GroupID   string  `json:"group_id"`
-	QuizID    string  `json:"quiz_id"`
-	Purpose   string  `json:"purpose"`
-	DueAt     *string `json:"due_at"`
-	ConceptID *string `json:"concept_id"`
+	GroupID      string  `json:"group_id"`
+	QuizID       string  `json:"quiz_id"`
+	Purpose      string  `json:"purpose"`
+	DueAt        *string `json:"due_at"`
+	ConceptID    *string `json:"concept_id"`
+	Instructions *string `json:"instructions"`
+	AvailableAt  *string `json:"available_at"`
+	AttemptLimit int     `json:"attempt_limit"`
 }
 
 type TeacherAssignment struct {
@@ -435,8 +611,24 @@ func (h *Handler) CreateAssignment(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	var id string
-	err = tx.QueryRow(r.Context(), `INSERT INTO learning_assignments(institution_id,group_id,quiz_id,purpose,due_at,created_by,source_concept_id)
-		SELECT $1,g.id,q.id,$3,$4,$5,NULLIF($7,'')::uuid
+	if in.AttemptLimit < 1 {
+		in.AttemptLimit = 1
+	}
+	if in.AttemptLimit > 10 || (in.Instructions != nil && len(*in.Instructions) > 4000) {
+		middleware.BadRequest(w, "attempt_limit must be 1–10 and instructions at most 4000 characters")
+		return
+	}
+	var availableAt interface{}
+	if in.AvailableAt != nil && strings.TrimSpace(*in.AvailableAt) != "" {
+		parsed, parseErr := time.Parse(time.RFC3339, *in.AvailableAt)
+		if parseErr != nil {
+			middleware.BadRequest(w, "available_at must be an RFC3339 timestamp")
+			return
+		}
+		availableAt = parsed
+	}
+	err = tx.QueryRow(r.Context(), `INSERT INTO learning_assignments(institution_id,group_id,quiz_id,purpose,due_at,created_by,source_concept_id,instructions,available_at,attempt_limit)
+		SELECT $1,g.id,q.id,$3,$4,$5,NULLIF($7,'')::uuid,$8,$9,$10
 		FROM groups g JOIN quizzes q ON q.id=$2
 		WHERE g.id=$6 AND g.institution_id=$1 AND q.created_by=$5 AND q.status='published'
 		AND EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id=g.id AND gt.user_id=$5)
@@ -445,7 +637,7 @@ func (h *Handler) CreateAssignment(w http.ResponseWriter, r *http.Request) {
 			JOIN curriculum_chapters ch ON ch.id=c.chapter_id
 			JOIN curriculum_versions cv ON cv.id=ch.version_id
 			WHERE c.id::text=$7 AND cv.institution_id=$1
-		)) RETURNING id`, middleware.GetInstitutionID(r), in.QuizID, in.Purpose, dueAt, middleware.GetUserID(r), in.GroupID, conceptID).Scan(&id)
+		)) RETURNING id`, middleware.GetInstitutionID(r), in.QuizID, in.Purpose, dueAt, middleware.GetUserID(r), in.GroupID, conceptID, in.Instructions, availableAt, in.AttemptLimit).Scan(&id)
 	if err != nil {
 		middleware.BadRequest(w, "quiz or class is unavailable to this teacher")
 		return
@@ -458,6 +650,28 @@ func (h *Handler) CreateAssignment(w http.ResponseWriter, r *http.Request) {
 	if err = tx.Commit(r.Context()); err != nil {
 		middleware.InternalError(w)
 		return
+	}
+	if h.notif != nil {
+		rows, queryErr := h.db.Query(r.Context(), `SELECT ar.student_id
+			FROM learning_assignment_recipients ar
+			LEFT JOIN notification_preferences np ON np.user_id=ar.student_id
+			WHERE ar.assignment_id=$1 AND COALESCE(np.push_assignments,true)`, id)
+		if queryErr == nil {
+			studentIDs := []string{}
+			for rows.Next() {
+				var studentID string
+				if rows.Scan(&studentID) == nil {
+					studentIDs = append(studentIDs, studentID)
+				}
+			}
+			rows.Close()
+			for _, studentID := range studentIDs {
+				h.notif.Emit(r.Context(), studentID, "assignment", "New assigned work",
+					"A teacher assigned a new assessment. Open Qwish to view the details.",
+					notification.WithIcon("assignment"), notification.WithColor("indigo"),
+					notification.WithReference("assignment:"+id+":new"))
+			}
+		}
 	}
 	middleware.JSON(w, http.StatusCreated, map[string]string{"id": id})
 }

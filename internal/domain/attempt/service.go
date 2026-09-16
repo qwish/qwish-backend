@@ -30,9 +30,20 @@ func NewService(db *pgxpool.Pool, quizSvc *quiz.Service, streakSvc *streak.Servi
 func (s *Service) SetNotifier(n *notification.Service) { s.notifSvc = n }
 
 type StartAttemptResp struct {
-	AttemptID string                    `json:"attempt_id"`
-	QuizID    string                    `json:"quiz_id"`
-	Questions []quiz.QuestionForStudent `json:"questions"`
+	AttemptID        string                       `json:"attempt_id"`
+	QuizID           string                       `json:"quiz_id"`
+	Questions        []quiz.QuestionForStudent    `json:"questions"`
+	Answers          []AttemptAnswerSnapshot      `json:"answers,omitempty"`
+	CurrentIndex     int                          `json:"current_index,omitempty"`
+	RemainingSeconds *int                         `json:"remaining_seconds,omitempty"`
+	RevealedClues    map[string][]json.RawMessage `json:"revealed_clues,omitempty"`
+	Resumed          bool                         `json:"resumed,omitempty"`
+}
+
+type AttemptAnswerSnapshot struct {
+	QuestionID      string          `json:"question_id"`
+	Answer          json.RawMessage `json:"answer"`
+	ConfidenceLevel string          `json:"confidence_level,omitempty"`
 }
 
 type AnswerReq struct {
@@ -103,7 +114,56 @@ type QuestionBreakdownItem struct {
 	Points          int64           `json:"points"`
 }
 
-func (s *Service) Start(ctx context.Context, userID, quizID string) (*StartAttemptResp, error) {
+func (s *Service) Start(ctx context.Context, userID, quizID, assignmentID string) (*StartAttemptResp, error) {
+	// Assignment identity is selected by the client but authorized here. This
+	// prevents one attempt from being attached to every assignment that happens
+	// to reuse the same quiz.
+	if assignmentID != "" {
+		var status string
+		var existingAttempt *string
+		var attemptsStarted, attemptLimit int
+		err := s.db.QueryRow(ctx, `SELECT ar.status,ar.attempt_id
+			,ar.attempts_started,a.attempt_limit
+			FROM learning_assignment_recipients ar
+			JOIN learning_assignments a ON a.id=ar.assignment_id
+			WHERE ar.assignment_id=$1 AND ar.student_id=$2 AND a.quiz_id=$3
+			  AND a.status='published' AND (a.available_at IS NULL OR a.available_at<=now())
+			  AND ar.status IN ('assigned','started','overdue')`,
+			assignmentID, userID, quizID).Scan(&status, &existingAttempt, &attemptsStarted, &attemptLimit)
+		if err != nil {
+			return nil, fmt.Errorf("assignment not available")
+		}
+		if existingAttempt != nil && *existingAttempt != "" {
+			resumed, resumeErr := s.resume(ctx, userID, quizID, *existingAttempt)
+			if resumeErr == nil {
+				return resumed, nil
+			}
+			// A stale-attempt sweep may have abandoned the attempt since the
+			// assignment list was loaded. Abandoned technical sessions do not
+			// consume an allowed attempt: detach the dead session atomically and
+			// let the learner start again.
+			var abandoned bool
+			_ = s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM quiz_attempts
+				WHERE id=$1 AND user_id=$2 AND quiz_id=$3 AND status='abandoned')`,
+				*existingAttempt, userID, quizID).Scan(&abandoned)
+			if !abandoned {
+				return nil, resumeErr
+			}
+			result, clearErr := s.db.Exec(ctx, `UPDATE learning_assignment_recipients ar
+				SET attempt_id=NULL,status=CASE WHEN a.due_at IS NOT NULL AND a.due_at<=now() THEN 'overdue' ELSE 'assigned' END,
+				    attempts_started=GREATEST(0,ar.attempts_started-1)
+				FROM learning_assignments a
+				WHERE ar.assignment_id=a.id AND ar.assignment_id=$1 AND ar.student_id=$2 AND ar.attempt_id=$3`,
+				assignmentID, userID, *existingAttempt)
+			if clearErr != nil || result.RowsAffected() != 1 {
+				return nil, fmt.Errorf("assignment changed; refresh and try again")
+			}
+			attemptsStarted--
+		}
+		if attemptsStarted >= attemptLimit {
+			return nil, fmt.Errorf("attempt limit reached")
+		}
+	}
 	// Load delivery settings at the trust boundary. Date gates, randomisation
 	// and question limits are all server-owned; a caller can never opt out by
 	// modifying an app request.
@@ -113,7 +173,11 @@ func (s *Service) Start(ctx context.Context, userID, quizID string) (*StartAttem
 	var startsAt, endsAt *time.Time
 	err := s.db.QueryRow(ctx,
 		`SELECT type, question_limit, shuffle_questions, starts_at, ends_at
-		 FROM quizzes WHERE id=$1 AND status='published' AND deleted_at IS NULL`, quizID,
+		 FROM quizzes q WHERE q.id=$1 AND q.status='published' AND q.deleted_at IS NULL
+		 AND ($3::bool OR q.visibility='public' OR (
+		   q.institution_id=(SELECT institution_id FROM users WHERE id=$2)
+		   AND (q.group_id IS NULL OR EXISTS(SELECT 1 FROM group_students gs WHERE gs.group_id=q.group_id AND gs.user_id=$2))
+		 ))`, quizID, userID, assignmentID != "",
 	).Scan(&qType, &questionLimit, &shuffle, &startsAt, &endsAt)
 	if err != nil || (startsAt != nil && time.Now().Before(*startsAt)) || (endsAt != nil && !time.Now().Before(*endsAt)) {
 		return nil, fmt.Errorf("quiz not available")
@@ -209,15 +273,120 @@ func (s *Service) Start(ctx context.Context, userID, quizID string) (*StartAttem
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	// Link an assigned diagnostic/practice attempt without trusting an assignment
-	// identifier from the client; the server resolves it by quiz and student.
-	s.db.Exec(ctx, `UPDATE learning_assignment_recipients ar SET status='started',attempt_id=$1
-		FROM learning_assignments a WHERE ar.assignment_id=a.id AND ar.student_id=$2 AND a.quiz_id=$3 AND ar.status='assigned'`, attemptID, userID, quizID)
+	if assignmentID != "" {
+		result, linkErr := s.db.Exec(ctx, `UPDATE learning_assignment_recipients
+			SET status='started',attempt_id=$1,attempts_started=attempts_started+1
+			WHERE assignment_id=$2 AND student_id=$3
+			  AND status IN ('assigned','overdue') AND attempt_id IS NULL
+			  AND attempts_started < (SELECT attempt_limit FROM learning_assignments WHERE id=$2)`,
+			attemptID, assignmentID, userID)
+		if linkErr != nil || result.RowsAffected() != 1 {
+			// The attempt is unusable without the requested assignment link. Mark it
+			// abandoned rather than letting it become an unattributed live attempt.
+			s.db.Exec(ctx, `UPDATE quiz_attempts SET status='abandoned' WHERE id=$1 AND user_id=$2`, attemptID, userID)
+			return nil, fmt.Errorf("assignment changed; refresh and try again")
+		}
+	}
 
 	// Update last_active_at after the attempt transaction has committed.
 	s.db.Exec(ctx, `UPDATE users SET last_active_at=now() WHERE id=$1`, userID)
 
 	return &StartAttemptResp{AttemptID: attemptID, QuizID: quizID, Questions: questions}, nil
+}
+
+func (s *Service) resume(ctx context.Context, userID, quizID, attemptID string) (*StartAttemptResp, error) {
+	var status string
+	var lastAnswerAt time.Time
+	if err := s.db.QueryRow(ctx, `SELECT status FROM quiz_attempts
+		WHERE id=$1 AND user_id=$2 AND quiz_id=$3`, attemptID, userID, quizID).Scan(&status); err != nil || status != "in_progress" {
+		return nil, fmt.Errorf("attempt is not available to resume")
+	}
+	if err := s.db.QueryRow(ctx, `SELECT COALESCE(last_answer_at,started_at) FROM quiz_attempts WHERE id=$1`, attemptID).Scan(&lastAnswerAt); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(ctx, `SELECT q.id,q.quiz_id,aq.position,qv.type,qv.prompt,qv.media_url,qv.options,
+		COALESCE((SELECT jsonb_agg(jsonb_build_object('id',qo.id,'label',qo.label) ORDER BY qo.position)
+		 FROM question_options qo WHERE qo.question_id=q.id AND qo.active),'[]'::jsonb),
+		EXISTS (SELECT 1 FROM question_concepts qc WHERE qc.question_id=q.id),aq.question_revision,
+		aq.question_version_id,qv.time_limit_seconds,jsonb_array_length(COALESCE(qv.clues,'[]'::jsonb))
+		FROM quiz_attempt_questions aq
+		JOIN questions q ON q.id=aq.question_id
+		JOIN question_versions qv ON qv.id=aq.question_version_id
+		WHERE aq.attempt_id=$1 ORDER BY aq.position`, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	questions := []quiz.QuestionForStudent{}
+	for rows.Next() {
+		var question quiz.QuestionForStudent
+		if err := rows.Scan(&question.ID, &question.QuizID, &question.Position, &question.Type, &question.Prompt, &question.MediaURL,
+			&question.Options, &question.OptionChoices, &question.CollectConfidence, &question.Revision, &question.VersionID, &question.TimeLimitSeconds, &question.ClueCount); err != nil {
+			return nil, err
+		}
+		questions = append(questions, question)
+	}
+	answerRows, err := s.db.Query(ctx, `SELECT question_id,answer,COALESCE(confidence_level,'')
+		FROM question_responses WHERE attempt_id=$1 ORDER BY submitted_at`, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	defer answerRows.Close()
+	answers := []AttemptAnswerSnapshot{}
+	answered := map[string]bool{}
+	for answerRows.Next() {
+		var answer AttemptAnswerSnapshot
+		if err := answerRows.Scan(&answer.QuestionID, &answer.Answer, &answer.ConfidenceLevel); err != nil {
+			return nil, err
+		}
+		answers = append(answers, answer)
+		answered[answer.QuestionID] = true
+	}
+	current := 0
+	for current < len(questions) && answered[questions[current].ID] {
+		current++
+	}
+	if current >= len(questions) {
+		current = len(questions) - 1
+	}
+	if current < 0 {
+		return nil, fmt.Errorf("attempt has no questions")
+	}
+	remaining := questions[current].TimeLimitSeconds
+	if remaining > 0 {
+		remaining -= int(time.Since(lastAnswerAt).Seconds())
+		if remaining < 0 {
+			remaining = 0
+		}
+	}
+	revealed := map[string][]json.RawMessage{}
+	clueRows, err := s.db.Query(ctx, `SELECT cr.question_id,qv.clues->cr.clue_index
+		FROM clue_reveals cr
+		JOIN quiz_attempt_questions aq ON aq.attempt_id=cr.attempt_id AND aq.question_id=cr.question_id
+		JOIN question_versions qv ON qv.id=aq.question_version_id
+		WHERE cr.attempt_id=$1 ORDER BY cr.question_id,cr.clue_index`, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	defer clueRows.Close()
+	for clueRows.Next() {
+		var questionID string
+		var clue json.RawMessage
+		if err := clueRows.Scan(&questionID, &clue); err != nil {
+			return nil, err
+		}
+		revealed[questionID] = append(revealed[questionID], clue)
+	}
+	return &StartAttemptResp{AttemptID: attemptID, QuizID: quizID, Questions: questions,
+		Answers: answers, CurrentIndex: current, RemainingSeconds: &remaining, RevealedClues: revealed, Resumed: true}, nil
+}
+
+func (s *Service) ResumeAttempt(ctx context.Context, userID, attemptID string) (*StartAttemptResp, error) {
+	var quizID string
+	if err := s.db.QueryRow(ctx, `SELECT quiz_id FROM quiz_attempts WHERE id=$1 AND user_id=$2`, attemptID, userID).Scan(&quizID); err != nil {
+		return nil, fmt.Errorf("attempt is not available to resume")
+	}
+	return s.resume(ctx, userID, quizID, attemptID)
 }
 
 // SubmitAnswer records an answer during live play. Elapsed time is measured
@@ -379,9 +548,6 @@ func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, re
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit answer: %w", err)
 	}
-	s.db.Exec(ctx, `UPDATE learning_assignment_recipients SET status='submitted',submitted_at=now()
-		WHERE attempt_id=$1 AND student_id=$2`, attemptID, userID)
-
 	return &AnswerResp{
 		IsCorrect:     isCorrect,
 		CorrectAnswer: correctAnswer,
@@ -687,6 +853,18 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		return nil, err
 	}
 
+	// An assignment is submitted only when its attempt completes. Updating this
+	// after each answer made partially answered work disappear from the active
+	// list and falsely recorded a submission timestamp.
+	if _, err = tx.Exec(ctx,
+		`UPDATE learning_assignment_recipients
+		 SET status='submitted', submitted_at=now()
+		 WHERE attempt_id=$1 AND student_id=$2 AND status IN ('assigned','started','overdue')`,
+		attemptID, userID,
+	); err != nil {
+		return nil, fmt.Errorf("failed to submit assignment: %w", err)
+	}
+
 	err = tx.Commit(ctx)
 	if err != nil {
 		return nil, err
@@ -805,25 +983,56 @@ func (s *Service) GetResult(ctx context.Context, userID, attemptID string) (map[
 	var status string
 	var completedAt *time.Time
 	var quizID string
+	var quizTitle string
 
 	err := s.db.QueryRow(ctx,
-		`SELECT quiz_id, status, COALESCE(score_pct,0), COALESCE(points_delta,0), COALESCE(total_correct,0), COALESCE(total_questions,0), completed_at
-		 FROM quiz_attempts WHERE id=$1 AND user_id=$2`,
+		`SELECT qa.quiz_id,q.title,qa.status,COALESCE(qa.score_pct,0),COALESCE(qa.points_delta,0),COALESCE(qa.total_correct,0),COALESCE(qa.total_questions,0),qa.completed_at
+		 FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id WHERE qa.id=$1 AND qa.user_id=$2`,
 		attemptID, userID,
-	).Scan(&quizID, &status, &scorePct, &pointsDelta, &totalCorrect, &totalQuestions, &completedAt)
+	).Scan(&quizID, &quizTitle, &status, &scorePct, &pointsDelta, &totalCorrect, &totalQuestions, &completedAt)
 	if err != nil {
 		return nil, err
 	}
+	if status != "completed" {
+		return nil, fmt.Errorf("attempt is not completed")
+	}
+	breakdown := []QuestionBreakdownItem{}
+	rows, err := s.db.Query(ctx, `SELECT q.position,qv.prompt,qr.answer,qv.correct_answer,qr.is_correct,qr.points_earned
+		FROM question_responses qr
+		JOIN quiz_attempt_questions aq ON aq.attempt_id=qr.attempt_id AND aq.question_id=qr.question_id
+		JOIN questions q ON q.id=qr.question_id
+		JOIN question_versions qv ON qv.id=aq.question_version_id
+		WHERE qr.attempt_id=$1 ORDER BY q.position`, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item QuestionBreakdownItem
+		if err := rows.Scan(&item.Position, &item.QuestionSnippet, &item.StudentAnswer, &item.CorrectAnswer, &item.IsCorrect, &item.Points); err != nil {
+			return nil, err
+		}
+		breakdown = append(breakdown, item)
+	}
+	badge := "needs_work"
+	if scorePct >= 75 {
+		badge = "excellent"
+	} else if scorePct >= 50 {
+		badge = "good"
+	}
 
 	result = map[string]interface{}{
-		"attempt_id":      attemptID,
-		"quiz_id":         quizID,
-		"status":          status,
-		"score_pct":       scorePct,
-		"points_delta":    pointsDelta,
-		"total_correct":   totalCorrect,
-		"total_questions": totalQuestions,
-		"completed_at":    completedAt,
+		"attempt_id":         attemptID,
+		"quiz_id":            quizID,
+		"quiz_title":         quizTitle,
+		"status":             status,
+		"score_pct":          scorePct,
+		"performance_badge":  badge,
+		"points_delta":       pointsDelta,
+		"total_correct":      totalCorrect,
+		"total_questions":    totalQuestions,
+		"completed_at":       completedAt,
+		"question_breakdown": breakdown,
 	}
 	return result, nil
 }

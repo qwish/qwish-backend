@@ -78,7 +78,7 @@ func (h *Handler) MapQuestion(w http.ResponseWriter, r *http.Request) {
 	var in mapInput
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&in) != nil || in.ConceptID == "" || len(in.Options) > 20 {
+	if decoder.Decode(&in) != nil || len(in.Options) > 20 {
 		middleware.BadRequest(w, "invalid learning map")
 		return
 	}
@@ -96,6 +96,29 @@ func (h *Handler) MapQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	questionID := chi.URLParam(r, "questionId")
+	if strings.TrimSpace(in.ConceptID) == "" {
+		var allowed bool
+		if err = tx.QueryRow(r.Context(), `SELECT EXISTS(
+			SELECT 1 FROM questions q JOIN quizzes z ON z.id=q.quiz_id
+			WHERE q.id=$1 AND z.created_by=$2 AND z.status IN ('draft','rejected') AND z.curriculum_question_mapping_enabled)`, questionID, middleware.GetUserID(r)).Scan(&allowed); err != nil || !allowed {
+			middleware.NotFound(w, "question")
+			return
+		}
+		if _, err = tx.Exec(r.Context(), `DELETE FROM question_concepts WHERE question_id=$1 AND mapped_by=$2`, questionID, middleware.GetUserID(r)); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+		if _, err = tx.Exec(r.Context(), `DELETE FROM question_misconception_options WHERE question_id=$1`, questionID); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+		middleware.JSON(w, http.StatusOK, map[string]string{"status": "unmapped"})
+		return
+	}
 	var allowed bool
 	err = tx.QueryRow(r.Context(), `SELECT EXISTS(
 		SELECT 1 FROM questions q JOIN quizzes z ON z.id=q.quiz_id
@@ -103,7 +126,9 @@ func (h *Handler) MapQuestion(w http.ResponseWriter, r *http.Request) {
 		JOIN curriculum_versions cv ON cv.id=ch.version_id AND cv.status='published'
 		JOIN curricula cu ON cu.id=cv.curriculum_id
 		JOIN class_curricula cc ON cc.version_id=cv.id AND cc.group_id=z.group_id AND cc.ended_at IS NULL
-		WHERE q.id=$1 AND z.created_by=$2 AND z.status IN ('draft','rejected') AND cu.institution_id=$3)`, questionID, middleware.GetUserID(r), middleware.GetInstitutionID(r), in.ConceptID).Scan(&allowed)
+		WHERE q.id=$1 AND z.created_by=$2 AND z.status IN ('draft','rejected') AND z.curriculum_question_mapping_enabled AND cu.institution_id=$3
+		  AND (NOT EXISTS (SELECT 1 FROM quiz_curriculum_units qu WHERE qu.quiz_id=z.id)
+		       OR EXISTS (SELECT 1 FROM quiz_curriculum_units qu WHERE qu.quiz_id=z.id AND qu.unit_id=ch.id)))`, questionID, middleware.GetUserID(r), middleware.GetInstitutionID(r), in.ConceptID).Scan(&allowed)
 	if err != nil || !allowed {
 		middleware.NotFound(w, "question or concept")
 		return
@@ -410,7 +435,8 @@ func (h *Handler) StudentAssignments(w http.ResponseWriter, r *http.Request) {
 	result := []map[string]interface{}{}
 	for rows.Next() {
 		var id, quizID, title, purpose, status, assignmentStatus, groupID, groupName, teacherName, instructions, timezone string
-		var due, attempt, availableAt interface{}
+		var due, availableAt interface{}
+		var attempt *string
 		var attemptLimit int
 		var assignedAt time.Time
 		if rows.Scan(&id, &quizID, &title, &purpose, &due, &status, &attempt, &assignmentStatus, &groupID, &groupName, &teacherName, &instructions, &availableAt, &timezone, &attemptLimit, &assignedAt) != nil {

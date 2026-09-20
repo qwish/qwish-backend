@@ -1527,12 +1527,14 @@ Domain → subdomain tree for the quiz authoring dropdowns.
   "visibility":  "institution",
   "domain":      "quantitative",
   "subdomain":   "quant_percentages",
+  "curriculum_unit_ids": ["chapter-uuid-1", "chapter-uuid-2"],
+  "curriculum_question_mapping_enabled": true,
   "time_limit":  30,
   "expires_at":  "2024-06-01T00:00:00Z"
 }
 ```
 
-`title` is required. `visibility` defaults to `institution`. `domain`/`subdomain` are optional but validated against `/teacher/quizzes/taxonomy` — a subdomain must belong to its domain, else `400`.
+`title` is required. `visibility` defaults to `institution`. `domain`/`subdomain` are optional but validated against `/teacher/quizzes/taxonomy` — a subdomain must belong to its domain, else `400`. `curriculum_unit_ids` contains published curriculum chapter IDs assigned to the selected class. When `curriculum_question_mapping_enabled` is true, the teacher can optionally map individual questions to topics from those units.
 
 ### Response `201`
 Quiz object.

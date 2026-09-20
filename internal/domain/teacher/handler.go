@@ -105,6 +105,55 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	type activityDay struct {
+		Date  string `json:"date"`
+		Count int    `json:"count"`
+	}
+	studentActivity := []activityDay{}
+	studentActivityRows, err := h.db.Query(r.Context(), `
+		SELECT TO_CHAR(qa.completed_at::date, 'YYYY-MM-DD'), COUNT(*)
+		FROM quiz_attempts qa
+		JOIN quizzes q ON q.id=qa.quiz_id
+		WHERE q.created_by=$1 AND qa.status='completed'
+		  AND qa.completed_at >= CURRENT_DATE - INTERVAL '19 weeks'
+		GROUP BY qa.completed_at::date
+		ORDER BY qa.completed_at::date`, teacherID)
+	if err == nil {
+		defer studentActivityRows.Close()
+		for studentActivityRows.Next() {
+			var item activityDay
+			if studentActivityRows.Scan(&item.Date, &item.Count) == nil {
+				studentActivity = append(studentActivity, item)
+			}
+		}
+	}
+
+	teacherActivity := []activityDay{}
+	teacherActivityRows, err := h.db.Query(r.Context(), `
+		SELECT day, COUNT(*)
+		FROM (
+			SELECT TO_CHAR(created_at::date, 'YYYY-MM-DD') AS day
+			FROM quizzes
+			WHERE created_by=$1 AND deleted_at IS NULL
+			  AND created_at >= CURRENT_DATE - INTERVAL '19 weeks'
+			UNION ALL
+			SELECT TO_CHAR(created_at::date, 'YYYY-MM-DD') AS day
+			FROM learning_assignments
+			WHERE created_by=$1
+			  AND created_at >= CURRENT_DATE - INTERVAL '19 weeks'
+		) activity
+		GROUP BY day
+		ORDER BY day`, teacherID)
+	if err == nil {
+		defer teacherActivityRows.Close()
+		for teacherActivityRows.Next() {
+			var item activityDay
+			if teacherActivityRows.Scan(&item.Date, &item.Count) == nil {
+				teacherActivity = append(teacherActivity, item)
+			}
+		}
+	}
+
 	var weeklyAssignments, weeklyCompletions, weeklyPublished int
 	h.db.QueryRow(r.Context(), `SELECT
 		(SELECT COUNT(*) FROM learning_assignments WHERE created_by=$1 AND created_at >= date_trunc('week',now())),
@@ -126,6 +175,8 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		"open_topic_requests": openTopicRequests,
 		"recent_attempts":     recent,
 		"recent_quizzes":      recentQuizzes,
+		"student_activity":    studentActivity,
+		"teacher_activity":    teacherActivity,
 		"weekly_progress": map[string]int{
 			"assignments_created":   weeklyAssignments,
 			"student_completions":   weeklyCompletions,

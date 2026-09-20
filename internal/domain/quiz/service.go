@@ -40,6 +40,8 @@ type Quiz struct {
 	Domain          *string    `json:"domain,omitempty"`
 	Subdomain       *string    `json:"subdomain,omitempty"`
 	ConceptID       *string    `json:"curriculum_concept_id,omitempty"`
+	CurriculumUnitIDs []string `json:"curriculum_unit_ids,omitempty"`
+	CurriculumQuestionMappingEnabled bool `json:"curriculum_question_mapping_enabled,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	QuestionTypes   []string   `json:"question_types,omitempty"`
 	// Peer stats over completed attempts; nil when nobody has finished the quiz.
@@ -73,6 +75,8 @@ type CreateQuizReq struct {
 	Domain      *string    `json:"domain"`
 	Subdomain   *string    `json:"subdomain"`
 	ConceptID   *string    `json:"curriculum_concept_id"`
+	CurriculumUnitIDs []string `json:"curriculum_unit_ids"`
+	CurriculumQuestionMappingEnabled bool `json:"curriculum_question_mapping_enabled"`
 }
 
 type DuplicateQuizReq struct {
@@ -260,7 +264,7 @@ func (s *Service) GetByID(ctx context.Context, quizID string) (*Quiz, error) {
 		`SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status,
 		        LEAST(q.question_count, COALESCE(q.question_limit, q.question_count)) AS question_count,
-		        st.taker_count, q.ends_at, q.published_at, q.rejection_reason, q.group_id, q.domain, q.subdomain, q.curriculum_concept_id, q.created_at,
+		        st.taker_count, q.ends_at, q.published_at, q.rejection_reason, q.group_id, q.domain, q.subdomain, q.curriculum_concept_id, q.curriculum_question_mapping_enabled, q.created_at,
 		        st.avg_score_pct, st.avg_seconds
 		 FROM quizzes q
 		 JOIN users u ON u.id = q.created_by
@@ -269,7 +273,7 @@ func (s *Service) GetByID(ctx context.Context, quizID string) (*Quiz, error) {
 		 WHERE q.id = $1 AND q.deleted_at IS NULL`, quizID,
 	).Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName, &q.Title, &q.Description,
 		&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt,
-		&q.RejectionReason, &q.GroupID, &q.Domain, &q.Subdomain, &q.ConceptID, &q.CreatedAt,
+		&q.RejectionReason, &q.GroupID, &q.Domain, &q.Subdomain, &q.ConceptID, &q.CurriculumQuestionMappingEnabled, &q.CreatedAt,
 		&q.AvgScorePct, &q.AvgSeconds)
 	if err != nil {
 		return nil, err
@@ -284,6 +288,21 @@ func (s *Service) GetByID(ctx context.Context, quizID string) (*Quiz, error) {
 		var t string
 		rows.Scan(&t)
 		q.QuestionTypes = append(q.QuestionTypes, t)
+	}
+	unitRows, err := s.db.Query(ctx, `SELECT unit_id FROM quiz_curriculum_units WHERE quiz_id=$1 ORDER BY position, unit_id`, quizID)
+	if err != nil {
+		return nil, err
+	}
+	defer unitRows.Close()
+	for unitRows.Next() {
+		var unitID string
+		if err := unitRows.Scan(&unitID); err != nil {
+			return nil, err
+		}
+		q.CurriculumUnitIDs = append(q.CurriculumUnitIDs, unitID)
+	}
+	if err := unitRows.Err(); err != nil {
+		return nil, err
 	}
 	return q, nil
 }
@@ -347,20 +366,59 @@ func (s *Service) Create(ctx context.Context, req CreateQuizReq, userID, institu
 	if err := validateCurriculumConcept(ctx, s.db, req.ConceptID, req.GroupID, userID, institutionID); err != nil {
 		return nil, err
 	}
+	if err := validateCurriculumUnits(ctx, s.db, req.CurriculumUnitIDs, req.GroupID, userID, institutionID); err != nil {
+		return nil, err
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
 	q := &Quiz{}
-	err := s.db.QueryRow(ctx,
-		`INSERT INTO quizzes (institution_id, created_by, title, description, type, visibility, group_id, ends_at, domain, subdomain, curriculum_concept_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	err = tx.QueryRow(ctx,
+		`INSERT INTO quizzes (institution_id, created_by, title, description, type, visibility, group_id, ends_at, domain, subdomain, curriculum_concept_id, curriculum_question_mapping_enabled)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		 RETURNING id, institution_id, created_by, title, description, type, visibility, status, question_count, ends_at, group_id, domain, subdomain, created_at`,
-		institutionID, userID, req.Title, req.Description, req.Type, req.Visibility, req.GroupID, req.EndsAt, req.Domain, req.Subdomain, req.ConceptID,
+		institutionID, userID, req.Title, req.Description, req.Type, req.Visibility, req.GroupID, req.EndsAt, req.Domain, req.Subdomain, req.ConceptID, req.CurriculumQuestionMappingEnabled,
 	).Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.Title, &q.Description, &q.Type,
 		&q.Visibility, &q.Status, &q.QuestionCount, &q.EndsAt, &q.GroupID, &q.Domain, &q.Subdomain, &q.CreatedAt)
-	return q, err
+	if err != nil {
+		return nil, err
+	}
+	for i, unitID := range uniqueStrings(req.CurriculumUnitIDs) {
+		if _, err = tx.Exec(ctx, `INSERT INTO quiz_curriculum_units(quiz_id,unit_id,position) VALUES($1,$2,$3)`, q.ID, unitID, i+1); err != nil {
+			return nil, err
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	q.CurriculumUnitIDs = uniqueStrings(req.CurriculumUnitIDs)
+	q.CurriculumQuestionMappingEnabled = req.CurriculumQuestionMappingEnabled
+	return q, nil
 }
 
 var ErrInvalidTeacherGroup = fmt.Errorf("class is not assigned to this teacher")
 var ErrInvalidCurriculumConcept = fmt.Errorf("topic is not in a published curriculum assigned to this class")
+var ErrInvalidCurriculumUnit = fmt.Errorf("unit is not in a published curriculum assigned to this class")
+var ErrTooManyCurriculumUnits = fmt.Errorf("an assessment can include at most 50 units")
 var ErrDuplicateTitleTooLong = fmt.Errorf("duplicate title must be 160 characters or fewer")
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
 
 type rowQuerier interface {
 	QueryRow(context.Context, string, ...interface{}) pgx.Row
@@ -409,6 +467,44 @@ func validateCurriculumConcept(ctx context.Context, db rowQuerier, conceptID, gr
 	return nil
 }
 
+func validateCurriculumUnits(ctx context.Context, db rowQuerier, unitIDs []string, groupID *string, teacherID, institutionID string) error {
+	if len(unitIDs) == 0 {
+		return nil
+	}
+	if len(uniqueStrings(unitIDs)) > 50 {
+		return ErrTooManyCurriculumUnits
+	}
+	if groupID == nil || *groupID == "" {
+		return ErrInvalidCurriculumUnit
+	}
+	seen := make(map[string]struct{}, len(unitIDs))
+	for _, unitID := range unitIDs {
+		if unitID == "" {
+			return ErrInvalidCurriculumUnit
+		}
+		if _, ok := seen[unitID]; ok {
+			continue
+		}
+		seen[unitID] = struct{}{}
+		var allowed bool
+		err := db.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1 FROM curriculum_chapters ch
+			JOIN curriculum_versions cv ON cv.id=ch.version_id AND cv.status='published'
+			JOIN class_curricula cc ON cc.version_id=cv.id AND cc.group_id=$1 AND cc.ended_at IS NULL
+			JOIN group_teachers gt ON gt.group_id=cc.group_id AND gt.user_id=$2
+			JOIN curricula cu ON cu.id=cv.curriculum_id AND cu.institution_id=$3
+			WHERE ch.id=$4
+		)`, *groupID, teacherID, institutionID, unitID).Scan(&allowed)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return ErrInvalidCurriculumUnit
+		}
+	}
+	return nil
+}
+
 // Duplicate creates an independent draft owned by the requesting teacher.
 // Source ownership is checked in the same transaction as the copy so a client
 // cannot use this endpoint to read or clone another teacher's answer key.
@@ -421,9 +517,10 @@ func (s *Service) Duplicate(ctx context.Context, sourceID, teacherID string, req
 
 	var source Quiz
 	var conceptID *string
-	if err = tx.QueryRow(ctx, `SELECT institution_id,title,description,type,visibility,group_id,domain,subdomain,curriculum_concept_id
+	var mappingEnabled bool
+	if err = tx.QueryRow(ctx, `SELECT institution_id,title,description,type,visibility,group_id,domain,subdomain,curriculum_concept_id,curriculum_question_mapping_enabled
 		FROM quizzes WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL FOR SHARE`, sourceID, teacherID).
-		Scan(&source.InstitutionID, &source.Title, &source.Description, &source.Type, &source.Visibility, &source.GroupID, &source.Domain, &source.Subdomain, &conceptID); err != nil {
+		Scan(&source.InstitutionID, &source.Title, &source.Description, &source.Type, &source.Visibility, &source.GroupID, &source.Domain, &source.Subdomain, &conceptID, &mappingEnabled); err != nil {
 		return nil, err
 	}
 	title := req.Title
@@ -445,10 +542,33 @@ func (s *Service) Duplicate(ctx context.Context, sourceID, teacherID string, req
 
 	var duplicateID string
 	if err = tx.QueryRow(ctx, `INSERT INTO quizzes
-		(institution_id,created_by,title,description,type,visibility,status,group_id,domain,subdomain,curriculum_concept_id,question_count)
-		VALUES($1,$2,$3,$4,$5,$6,'draft',$7,$8,$9,$10,0) RETURNING id`, source.InstitutionID, teacherID,
-		title, source.Description, source.Type, source.Visibility, source.GroupID, source.Domain, source.Subdomain, conceptID).Scan(&duplicateID); err != nil {
+		(institution_id,created_by,title,description,type,visibility,status,group_id,domain,subdomain,curriculum_concept_id,curriculum_question_mapping_enabled,question_count)
+		VALUES($1,$2,$3,$4,$5,$6,'draft',$7,$8,$9,$10,$11,0) RETURNING id`, source.InstitutionID, teacherID,
+		title, source.Description, source.Type, source.Visibility, source.GroupID, source.Domain, source.Subdomain, conceptID, mappingEnabled).Scan(&duplicateID); err != nil {
 		return nil, err
+	}
+	unitRows, err := tx.Query(ctx, `SELECT unit_id FROM quiz_curriculum_units WHERE quiz_id=$1 ORDER BY position, unit_id`, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	var unitIDs []string
+	for unitRows.Next() {
+		var unitID string
+		if err = unitRows.Scan(&unitID); err != nil {
+			unitRows.Close()
+			return nil, err
+		}
+		unitIDs = append(unitIDs, unitID)
+	}
+	if err = unitRows.Err(); err != nil {
+		unitRows.Close()
+		return nil, err
+	}
+	unitRows.Close()
+	for i, unitID := range unitIDs {
+		if _, err = tx.Exec(ctx, `INSERT INTO quiz_curriculum_units(quiz_id,unit_id,position) VALUES($1,$2,$3)`, duplicateID, unitID, i+1); err != nil {
+			return nil, err
+		}
 	}
 
 	rows, err := tx.Query(ctx, `SELECT id,position,type,prompt,media_url,options,correct_answer,time_limit_seconds,clues
@@ -730,10 +850,18 @@ func (s *Service) Update(ctx context.Context, quizID, ownerID string, req Create
 	if err := validateCurriculumConcept(ctx, s.db, req.ConceptID, req.GroupID, ownerID, institutionID); err != nil {
 		return err
 	}
-	result, err := s.db.Exec(ctx,
-		`UPDATE quizzes SET title=$1, description=$2, type=$3, visibility=$4, group_id=$5, ends_at=$6, domain=$7, subdomain=$8, curriculum_concept_id=$9, updated_at=now()
-		 WHERE id=$10 AND created_by=$11 AND status IN ('draft','rejected') AND deleted_at IS NULL`,
-		req.Title, req.Description, req.Type, req.Visibility, req.GroupID, req.EndsAt, req.Domain, req.Subdomain, req.ConceptID, quizID, ownerID)
+	if err := validateCurriculumUnits(ctx, s.db, req.CurriculumUnitIDs, req.GroupID, ownerID, institutionID); err != nil {
+		return err
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	result, err := tx.Exec(ctx,
+		`UPDATE quizzes SET title=$1, description=$2, type=$3, visibility=$4, group_id=$5, ends_at=$6, domain=$7, subdomain=$8, curriculum_concept_id=$9, curriculum_question_mapping_enabled=$10, updated_at=now()
+		 WHERE id=$11 AND created_by=$12 AND status IN ('draft','rejected') AND deleted_at IS NULL`,
+		req.Title, req.Description, req.Type, req.Visibility, req.GroupID, req.EndsAt, req.Domain, req.Subdomain, req.ConceptID, req.CurriculumQuestionMappingEnabled, quizID, ownerID)
 	if err != nil {
 		return err
 	}
@@ -742,16 +870,27 @@ func (s *Service) Update(ctx context.Context, quizID, ownerID string, req Create
 	}
 	// Keep every question in this single-topic assessment aligned when the
 	// teacher changes or clears the topic after beginning authoring.
-	if _, err = s.db.Exec(ctx, `DELETE FROM question_concepts qc USING questions q
+	if _, err = tx.Exec(ctx, `DELETE FROM quiz_curriculum_units WHERE quiz_id=$1`, quizID); err != nil {
+		return err
+	}
+	for i, unitID := range uniqueStrings(req.CurriculumUnitIDs) {
+		if _, err = tx.Exec(ctx, `INSERT INTO quiz_curriculum_units(quiz_id,unit_id,position) VALUES($1,$2,$3)`, quizID, unitID, i+1); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM question_concepts qc USING questions q
 		WHERE qc.question_id=q.id AND q.quiz_id=$1 AND qc.mapped_by=$2`, quizID, ownerID); err != nil {
 		return err
 	}
 	if req.ConceptID != nil && *req.ConceptID != "" {
-		_, err = s.db.Exec(ctx, `INSERT INTO question_concepts(question_id,concept_id,weight,mapped_by)
+		_, err = tx.Exec(ctx, `INSERT INTO question_concepts(question_id,concept_id,weight,mapped_by)
 			SELECT q.id,$1,1,$2 FROM questions q WHERE q.quiz_id=$3
 			ON CONFLICT(question_id,concept_id) DO UPDATE SET weight=1,mapped_by=EXCLUDED.mapped_by,mapped_at=now()`, *req.ConceptID, ownerID, quizID)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // ── Taxonomy ────────────────────────────────────────────────────────────────
@@ -835,11 +974,16 @@ func (s *Service) AddQuestion(ctx context.Context, quizID, ownerID string, req A
 	if err != nil {
 		return nil, err
 	}
-	if _, err = s.db.Exec(ctx, `INSERT INTO question_concepts(question_id,concept_id,weight,mapped_by)
-		SELECT $1,curriculum_concept_id,1,$2 FROM quizzes
-		WHERE id=$3 AND curriculum_concept_id IS NOT NULL
-		ON CONFLICT(question_id,concept_id) DO NOTHING`, q.ID, ownerID, quizID); err != nil {
+	var quizConceptID *string
+	var mappingEnabled bool
+	if err = s.db.QueryRow(ctx, `SELECT curriculum_concept_id,curriculum_question_mapping_enabled FROM quizzes WHERE id=$1`, quizID).Scan(&quizConceptID, &mappingEnabled); err != nil {
 		return nil, err
+	}
+	if !mappingEnabled && quizConceptID != nil && *quizConceptID != "" {
+		if _, err = s.db.Exec(ctx, `INSERT INTO question_concepts(question_id,concept_id,weight,mapped_by)
+			VALUES($1,$2,1,$3) ON CONFLICT(question_id,concept_id) DO NOTHING`, q.ID, *quizConceptID, ownerID); err != nil {
+			return nil, err
+		}
 	}
 	storeMinhash(ctx, s.db, q.ID, q.Prompt)
 	// Update question count
@@ -1044,6 +1188,7 @@ type QuestionForStudent struct {
 	MediaURL          *string         `json:"media_url,omitempty"`
 	Options           json.RawMessage `json:"options"`
 	OptionChoices     json.RawMessage `json:"option_choices"`
+	OptionOrder       json.RawMessage `json:"-"`
 	CollectConfidence bool            `json:"collect_confidence"`
 	Revision          int             `json:"question_revision"`
 	VersionID         string          `json:"question_version_id"`

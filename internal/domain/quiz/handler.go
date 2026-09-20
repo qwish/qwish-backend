@@ -234,7 +234,7 @@ func (h *Handler) TeacherCreate(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "visibility must be institution or public")
 		return
 	}
-	if req.Visibility == "public" && (req.GroupID != nil || req.ConceptID != nil) {
+	if req.Visibility == "public" && (req.GroupID != nil || req.ConceptID != nil || len(req.CurriculumUnitIDs) > 0 || req.CurriculumQuestionMappingEnabled) {
 		middleware.BadRequest(w, "public quizzes cannot target a class or institution curriculum")
 		return
 	}
@@ -248,6 +248,14 @@ func (h *Handler) TeacherCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err == ErrInvalidCurriculumConcept {
+		middleware.BadRequest(w, err.Error())
+		return
+	}
+	if err == ErrInvalidCurriculumUnit {
+		middleware.BadRequest(w, err.Error())
+		return
+	}
+	if err == ErrTooManyCurriculumUnits {
 		middleware.BadRequest(w, err.Error())
 		return
 	}
@@ -365,7 +373,7 @@ func (h *Handler) TeacherUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Title = strings.TrimSpace(req.Title)
-	if req.Visibility == "public" && (req.GroupID != nil || req.ConceptID != nil) {
+	if req.Visibility == "public" && (req.GroupID != nil || req.ConceptID != nil || len(req.CurriculumUnitIDs) > 0 || req.CurriculumQuestionMappingEnabled) {
 		middleware.BadRequest(w, "public quizzes cannot target a class or institution curriculum")
 		return
 	}
@@ -379,6 +387,14 @@ func (h *Handler) TeacherUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err == ErrInvalidCurriculumConcept {
+			middleware.BadRequest(w, err.Error())
+			return
+		}
+		if err == ErrInvalidCurriculumUnit {
+			middleware.BadRequest(w, err.Error())
+			return
+		}
+		if err == ErrTooManyCurriculumUnits {
 			middleware.BadRequest(w, err.Error())
 			return
 		}

@@ -237,6 +237,12 @@ func (s *Service) Start(ctx context.Context, userID, quizID, assignmentID string
 			rows.Close()
 			return nil, err
 		}
+		options, choices, order, shuffleErr := shuffleQuestionOptions(question.Options, question.OptionChoices)
+		if shuffleErr != nil {
+			rows.Close()
+			return nil, shuffleErr
+		}
+		question.Options, question.OptionChoices, question.OptionOrder = options, choices, order
 		questions = append(questions, question)
 	}
 	rows.Close()
@@ -265,8 +271,8 @@ func (s *Service) Start(ctx context.Context, userID, quizID, assignmentID string
 
 	for i, question := range questions {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO quiz_attempt_questions (attempt_id, question_id, position, question_revision, question_version_id) VALUES ($1,$2,$3,$4,$5)`,
-			attemptID, question.ID, i+1, question.Revision, question.VersionID); err != nil {
+			`INSERT INTO quiz_attempt_questions (attempt_id, question_id, position, question_revision, question_version_id, option_order) VALUES ($1,$2,$3,$4,$5,$6)`,
+			attemptID, question.ID, i+1, question.Revision, question.VersionID, question.OptionOrder); err != nil {
 			return nil, err
 		}
 	}
@@ -308,7 +314,7 @@ func (s *Service) resume(ctx context.Context, userID, quizID, attemptID string) 
 		COALESCE((SELECT jsonb_agg(jsonb_build_object('id',qo.id,'label',qo.label) ORDER BY qo.position)
 		 FROM question_options qo WHERE qo.question_id=q.id AND qo.active),'[]'::jsonb),
 		EXISTS (SELECT 1 FROM question_concepts qc WHERE qc.question_id=q.id),aq.question_revision,
-		aq.question_version_id,qv.time_limit_seconds,jsonb_array_length(COALESCE(qv.clues,'[]'::jsonb))
+		aq.question_version_id,qv.time_limit_seconds,jsonb_array_length(COALESCE(qv.clues,'[]'::jsonb)),aq.option_order
 		FROM quiz_attempt_questions aq
 		JOIN questions q ON q.id=aq.question_id
 		JOIN question_versions qv ON qv.id=aq.question_version_id
@@ -321,8 +327,16 @@ func (s *Service) resume(ctx context.Context, userID, quizID, attemptID string) 
 	for rows.Next() {
 		var question quiz.QuestionForStudent
 		if err := rows.Scan(&question.ID, &question.QuizID, &question.Position, &question.Type, &question.Prompt, &question.MediaURL,
-			&question.Options, &question.OptionChoices, &question.CollectConfidence, &question.Revision, &question.VersionID, &question.TimeLimitSeconds, &question.ClueCount); err != nil {
+			&question.Options, &question.OptionChoices, &question.CollectConfidence, &question.Revision, &question.VersionID, &question.TimeLimitSeconds, &question.ClueCount, &question.OptionOrder); err != nil {
 			return nil, err
+		}
+		var order []int
+		if len(question.OptionOrder) > 0 && json.Unmarshal(question.OptionOrder, &order) == nil {
+			options, choices, _, reorderErr := applyOptionOrder(question.Options, question.OptionChoices, order)
+			if reorderErr != nil {
+				return nil, reorderErr
+			}
+			question.Options, question.OptionChoices = options, choices
 		}
 		questions = append(questions, question)
 	}

@@ -67,6 +67,10 @@ type Enrollment struct {
 	Status        string     `json:"status"`
 	JoinedAt      *time.Time `json:"joined_at,omitempty"`
 	EndedAt       *time.Time `json:"ended_at,omitempty"`
+	// Presentation context is read-only. These values let student surfaces use
+	// the institution's actual name and assigned class instead of local guesses.
+	InstitutionName *string `json:"institution_name,omitempty"`
+	ClassName       *string `json:"class_name,omitempty"`
 }
 
 const selectCols = `id, institution_id, user_id, full_name, email, roll_number,
@@ -107,7 +111,44 @@ func (s *Service) ActiveByUser(ctx context.Context, userID string) (*Enrollment,
 	if err != nil {
 		return nil, err
 	}
+	if err := s.addProfileContext(ctx, &e); err != nil {
+		return nil, err
+	}
 	return &e, nil
+}
+
+// addProfileContext decorates a live enrollment for student-facing reads. A
+// learner may belong to several groups, so the most recently joined active
+// class is the one shown in compact profile surfaces.
+func (s *Service) addProfileContext(ctx context.Context, e *Enrollment) error {
+	var institutionName string
+	if err := s.db.QueryRow(ctx,
+		`SELECT name FROM institutions WHERE id=$1`, e.InstitutionID,
+	).Scan(&institutionName); err != nil {
+		return err
+	}
+	e.InstitutionName = &institutionName
+
+	if e.UserID == nil {
+		return nil
+	}
+	var className string
+	err := s.db.QueryRow(ctx, `
+		SELECT g.name
+		FROM groups g
+		JOIN group_students gs ON gs.group_id=g.id
+		WHERE gs.user_id=$1 AND g.institution_id=$2 AND g.archived_at IS NULL
+		ORDER BY gs.joined_at DESC, g.name ASC
+		LIMIT 1`, *e.UserID, e.InstitutionID,
+	).Scan(&className)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	e.ClassName = &className
+	return nil
 }
 
 // Claim binds a pending_claim roster row to an authenticated student.

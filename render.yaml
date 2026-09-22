@@ -42,6 +42,12 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false
+      # App store review login: one address that accepts one fixed 6-digit code,
+      # because reviewers cannot read the OTP mailbox. Set both or neither.
+      - key: DEMO_LOGIN_EMAIL
+        sync: false
+      - key: DEMO_LOGIN_OTP
+        sync: false
       # Firebase push. Without these, notifications (streak recovery included)
       # are written in-app and streamed, but never reach a closed app.
       - key: FCM_PROJECT_ID

@@ -3,6 +3,7 @@ package config
 import (
 	"log"
 	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -36,6 +37,8 @@ type Config struct {
 	TurnstileSecret          string // Cloudflare Turnstile secret; empty disables bot verification on public forms
 	RecruiterTestLoginSecret string // non-production only; enables recruiter test login
 	RecruiterTestLoginEmail  string // active recruiter membership used by test login
+	DemoLoginEmail           string // store-review account; empty disables the fixed-OTP login
+	DemoLoginOTP             string // the 6-digit code that address accepts
 }
 
 func Load() *Config {
@@ -72,6 +75,20 @@ func Load() *Config {
 		TurnstileSecret:          getEnv("TURNSTILE_SECRET", ""),
 		RecruiterTestLoginSecret: getEnv("RECRUITER_TEST_LOGIN_SECRET", ""),
 		RecruiterTestLoginEmail:  getEnv("RECRUITER_TEST_LOGIN_EMAIL", ""),
+		DemoLoginEmail:           strings.ToLower(strings.TrimSpace(getEnv("DEMO_LOGIN_EMAIL", ""))),
+		DemoLoginOTP:             getEnv("DEMO_LOGIN_OTP", ""),
+	}
+	// Unlike the recruiter test login this one is allowed in production — app
+	// store review runs against prod. Half a configuration is a foot-gun, so
+	// refuse to boot on one: an address with no code would silently fall
+	// through to the real OTP path and fail review with no signal.
+	if (cfg.DemoLoginEmail == "") != (cfg.DemoLoginOTP == "") {
+		log.Fatal("DEMO_LOGIN_EMAIL and DEMO_LOGIN_OTP must be set together")
+	}
+	// The app's OTP field is exactly six digits and digits-only, so a code it
+	// cannot type is a code no reviewer can use.
+	if cfg.DemoLoginOTP != "" && !sixDigits(cfg.DemoLoginOTP) {
+		log.Fatal("DEMO_LOGIN_OTP must be exactly 6 digits")
 	}
 	if cfg.AppEnv == "production" {
 		for key, value := range map[string]string{
@@ -93,6 +110,18 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func sixDigits(v string) bool {
+	if len(v) != 6 {
+		return false
+	}
+	for _, c := range v {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func mustEnv(key string) string {

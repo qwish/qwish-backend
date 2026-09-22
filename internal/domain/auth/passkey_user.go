@@ -276,8 +276,14 @@ func (s *Service) TryUserPasskeyRefresh(ctx context.Context, sub string, gen int
 	if gen != u.TokenGeneration {
 		return "", "", false
 	}
-	if n, err := s.countUserCredentials(ctx, u.ID); err != nil || n == 0 {
-		return "", "", false
+	// Every other minted session belongs to a passkey holder. The review
+	// account is the exception: it may not enrol one, but its session still has
+	// to outlive the one-hour access token or a reviewer is signed out midway
+	// through the review.
+	if !s.IsDemoLoginEmail(u.Email) {
+		if n, err := s.countUserCredentials(ctx, u.ID); err != nil || n == 0 {
+			return "", "", false
+		}
 	}
 	a, r, err := s.mintSession(u.SupabaseUID, u.Email, u.TokenGeneration)
 	if err != nil {
@@ -303,6 +309,13 @@ func (h *Handler) UserPasskeyRegisterBegin(w http.ResponseWriter, r *http.Reques
 	u, err := h.svc.getUserByID(r.Context(), userID)
 	if err != nil {
 		middleware.Forbidden(w)
+		return
+	}
+	// The store-review account is email+OTP only. A passkey enrolled on a
+	// reviewer's device would outlive the review and nothing on our side could
+	// revoke it, so the account is never allowed to hold a credential.
+	if h.svc.IsDemoLoginEmail(u.Email) {
+		middleware.Error(w, http.StatusForbidden, "PASSKEY_NOT_ALLOWED", "this account cannot use passkeys")
 		return
 	}
 	creds, err := h.svc.listUserCredentials(r.Context(), userID)
@@ -348,6 +361,13 @@ func (h *Handler) UserPasskeyRegisterFinish(w http.ResponseWriter, r *http.Reque
 	u, err := h.svc.getUserByID(r.Context(), userID)
 	if err != nil {
 		middleware.Forbidden(w)
+		return
+	}
+	// The store-review account is email+OTP only. A passkey enrolled on a
+	// reviewer's device would outlive the review and nothing on our side could
+	// revoke it, so the account is never allowed to hold a credential.
+	if h.svc.IsDemoLoginEmail(u.Email) {
+		middleware.Error(w, http.StatusForbidden, "PASSKEY_NOT_ALLOWED", "this account cannot use passkeys")
 		return
 	}
 	creds, err := h.svc.listUserCredentials(r.Context(), userID)

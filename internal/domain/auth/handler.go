@@ -85,6 +85,12 @@ func (h *Handler) SendOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email := NormalizeEmail(req.Email)
+	// The review account has no mailbox and its code is fixed in the
+	// environment, so there is nothing to send and a send would only bounce.
+	if h.svc.IsDemoLoginEmail(email) {
+		middleware.JSON(w, http.StatusOK, map[string]string{"message": "OTP sent"})
+		return
+	}
 	// Do not query local identities here. Account state is disclosed only after
 	// the OTP proves control of the address in VerifyOTP.
 	if err := h.svc.SupabaseSendOTP(r.Context(), email); err != nil {
@@ -111,21 +117,44 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authResp, err := h.svc.SupabaseVerifyOTP(r.Context(), NormalizeEmail(req.Email), req.OTP)
-	if err != nil {
-		middleware.Error(w, http.StatusUnauthorized, "INVALID_OTP", "invalid or expired OTP")
-		return
+	email := NormalizeEmail(req.Email)
+
+	// uid and verifiedEmail are the address this session proved it owns,
+	// whichever path proved it; the tokens come from whoever minted them.
+	var uid, verifiedEmail, accessToken, refreshToken string
+	if h.svc.IsDemoLogin(email, req.OTP) {
+		// Store-review login. Logged because it is the one way into the app
+		// that no mailbox gates.
+		var demoErr error
+		uid, accessToken, refreshToken, demoErr = h.svc.MintDemoSession(r.Context(), email)
+		if demoErr != nil {
+			// Almost always "not seeded yet": the configured address has no
+			// learner row. Answer exactly like a bad code, so the endpoint
+			// stays silent about which address is special.
+			log.Printf("auth: demo login unavailable, review account is not a seeded learner: %v", demoErr)
+			middleware.Error(w, http.StatusUnauthorized, "INVALID_OTP", "invalid or expired OTP")
+			return
+		}
+		verifiedEmail = email
+		log.Printf("auth: store-review demo login accepted")
+	} else {
+		authResp, err := h.svc.SupabaseVerifyOTP(r.Context(), email, req.OTP)
+		if err != nil {
+			middleware.Error(w, http.StatusUnauthorized, "INVALID_OTP", "invalid or expired OTP")
+			return
+		}
+		// Use the provider-returned address, not the request body, for UID
+		// repair: Supabase has just verified that this UID controls it.
+		uid, verifiedEmail = authResp.User.ID, authResp.User.Email
+		accessToken, refreshToken = authResp.AccessToken, authResp.RefreshToken
 	}
 
-	uid := authResp.User.ID
 	if uid == "" {
 		middleware.InternalError(w)
 		return
 	}
 
-	// Use the provider-returned address, not the request body, for UID repair:
-	// Supabase has just verified that this UID controls this email address.
-	existingUser, err := h.svc.GetUserForLogin(r.Context(), uid, authResp.User.Email)
+	existingUser, err := h.svc.GetUserForLogin(r.Context(), uid, verifiedEmail)
 	if err == nil {
 		// A teacher awaiting institution verification cannot sign in yet. Return
 		// 403 without tokens so the client can't enter the dashboard.
@@ -143,8 +172,8 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		}
 		middleware.JSON(w, http.StatusOK, map[string]interface{}{
 			"user":          userPayload(existingUser, instName),
-			"access_token":  authResp.AccessToken,
-			"refresh_token": authResp.RefreshToken,
+			"access_token":  accessToken,
+			"refresh_token": refreshToken,
 			"is_new_user":   false,
 		})
 		return
@@ -171,8 +200,8 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 				"email":        admin.Email,
 				"role":         admin.Role,
 			},
-			"access_token":  authResp.AccessToken,
-			"refresh_token": authResp.RefreshToken,
+			"access_token":  accessToken,
+			"refresh_token": refreshToken,
 			"is_new_user":   false,
 		})
 		return
@@ -180,8 +209,8 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 
 	// New user — return tokens so they can call create-profile next
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
-		"access_token":  authResp.AccessToken,
-		"refresh_token": authResp.RefreshToken,
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
 		"is_new_user":   true,
 	})
 }

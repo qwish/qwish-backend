@@ -584,6 +584,16 @@ func (h *Handler) ListAssignments(w http.ResponseWriter, r *http.Request) {
 		JOIN group_teachers gt ON gt.group_id=a.group_id AND gt.user_id=$1
 		JOIN quizzes q ON q.id=a.quiz_id
 		LEFT JOIN learning_assignment_recipients ar ON ar.assignment_id=a.id
+		 AND EXISTS (
+			SELECT 1
+			  FROM group_students gs
+			  JOIN users u ON u.id=gs.user_id
+			     AND u.role='student' AND u.deleted_at IS NULL
+			  JOIN enrollments e ON e.user_id=gs.user_id
+			     AND e.institution_id=a.institution_id
+			     AND e.status IN ('active','suspended')
+			 WHERE gs.group_id=a.group_id AND gs.user_id=ar.student_id
+		 )
 		WHERE a.institution_id=$2 AND ($3='' OR a.group_id::text=$3)
 		GROUP BY a.id,g.name,q.title
 		ORDER BY CASE WHEN a.status='published' THEN 0 ELSE 1 END,a.due_at NULLS LAST,a.created_at DESC

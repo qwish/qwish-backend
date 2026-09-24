@@ -101,7 +101,20 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/quizzes/:quizId/save
 func (h *Handler) Save(w http.ResponseWriter, r *http.Request) {
-	if err := h.svc.SaveQuiz(r.Context(), middleware.GetUserID(r), chi.URLParam(r, "quizId")); err != nil {
+	quizID := chi.URLParam(r, "quizId")
+	if !h.svc.CanView(r.Context(), quizID, middleware.GetUserID(r), middleware.GetInstitutionID(r), middleware.GetRole(r)) {
+		middleware.NotFound(w, "quiz")
+		return
+	}
+	if err := h.svc.SaveQuiz(r.Context(), middleware.GetUserID(r), quizID); err != nil {
+		if errors.Is(err, ErrQuizNotSaveable) {
+			middleware.BadRequest(w, err.Error())
+			return
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			middleware.NotFound(w, "quiz")
+			return
+		}
 		middleware.InternalError(w)
 		return
 	}

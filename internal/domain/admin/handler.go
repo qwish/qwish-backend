@@ -107,7 +107,38 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Queue depth and age for the dashboard's "needs attention" list.
+	var reportsOpen, reportsHigh, contactNew, instOver48h, expiringLearners int
+	var expiring14d int64
+	var oldestReport, oldestInst, oldestQuiz *time.Time
+	var activePrevWeek, attemptsYesterdaySoFar int
+	// Comparisons for the metric strip: the previous 7 days, and yesterday up
+	// to the same time of day (so a partial today isn't compared to a full day).
+	h.db.QueryRow(r.Context(), `SELECT
+		(SELECT COUNT(DISTINCT user_id) FROM quiz_attempts
+		  WHERE completed_at >= CURRENT_DATE - 14 AND completed_at < CURRENT_DATE - 7),
+		(SELECT COUNT(*) FROM quiz_attempts
+		  WHERE completed_at >= CURRENT_DATE - 1 AND completed_at < now() - interval '1 day')`,
+	).Scan(&activePrevWeek, &attemptsYesterdaySoFar)
+	h.db.QueryRow(r.Context(), `SELECT
+		(SELECT COUNT(*) FROM reports WHERE status IN ('open','reviewing')),
+		(SELECT COUNT(*) FROM reports WHERE status IN ('open','reviewing') AND priority='high'),
+		(SELECT MIN(created_at) FROM reports WHERE status IN ('open','reviewing')),
+		(SELECT COUNT(*) FROM contact_submissions WHERE status='new'),
+		(SELECT COUNT(*) FROM institutions WHERE status='pending' AND deleted_at IS NULL AND created_at < now() - interval '48 hours'),
+		(SELECT MIN(created_at) FROM institutions WHERE status='pending' AND deleted_at IS NULL),
+		(SELECT MIN(COALESCE(updated_at, created_at)) FROM quizzes WHERE status='pending_approval' AND deleted_at IS NULL),
+		(SELECT COALESCE(SUM(amount),0) FROM points_ledger WHERE amount > 0 AND expires_at > now() AND expires_at <= now() + interval '14 days'),
+		(SELECT COUNT(DISTINCT user_id) FROM points_ledger WHERE amount > 0 AND expires_at > now() AND expires_at <= now() + interval '14 days')`,
+	).Scan(&reportsOpen, &reportsHigh, &oldestReport, &contactNew, &instOver48h, &oldestInst, &oldestQuiz,
+		&expiring14d, &expiringLearners)
+
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
+		"reports":           map[string]interface{}{"open": reportsOpen, "high": reportsHigh, "oldest_at": oldestReport},
+		"contact_new":       contactNew,
+		"queue_age":         map[string]interface{}{"institutions_over_48h": instOver48h, "oldest_institution_at": oldestInst, "oldest_quiz_at": oldestQuiz},
+		"points_expiring":   map[string]interface{}{"points_14d": expiring14d, "learners_14d": expiringLearners},
+		"previous":          map[string]int{"active_users_week": activePrevWeek, "attempts_yesterday_so_far": attemptsYesterdaySoFar},
 		"total_users":       totalUsers,
 		"active_users_week": activeUsers,
 		"institutions":      map[string]int{"pending": pendingInst, "verified": verifiedInst, "suspended": suspendedInst},
@@ -185,9 +216,17 @@ func (h *Handler) ListInstitutions(w http.ResponseWriter, r *http.Request) {
 	args := []interface{}{}
 	n := 1
 	if search != "" {
-		where += fmt.Sprintf(` AND name ILIKE $%d`, n)
+		where += fmt.Sprintf(` AND (name ILIKE $%d OR contact_email ILIKE $%d OR onboarding_city ILIKE $%d)`, n, n, n)
 		args = append(args, "%"+search+"%")
 		n++
+	}
+	if v := q.Get("city"); v != "" {
+		where += fmt.Sprintf(` AND onboarding_city ILIKE $%d`, n)
+		args = append(args, v)
+		n++
+	}
+	if q.Get("non_default_multiplier") == "1" {
+		where += ` AND point_multiplier <> 1.0`
 	}
 	if status != "" {
 		where += fmt.Sprintf(` AND status=$%d`, n)
@@ -206,9 +245,15 @@ func (h *Handler) ListInstitutions(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.db.Query(r.Context(),
 		`SELECT id, name, type, status, contact_email, verified_at, created_at,
-			(SELECT COUNT(*) FROM users u WHERE u.institution_id = i.id AND u.role='student') AS student_count,
+			(SELECT COUNT(*) FROM enrollments e
+			 WHERE e.institution_id = i.id
+			   AND e.status IN ('pending_claim','active','suspended')) AS student_count,
 			(SELECT COUNT(*) FROM users u WHERE u.institution_id = i.id AND u.role='teacher') AS teacher_count,
-			(SELECT COUNT(*) FROM quizzes q WHERE q.institution_id = i.id AND q.deleted_at IS NULL) AS quiz_count
+			(SELECT COUNT(*) FROM quizzes q WHERE q.institution_id = i.id AND q.deleted_at IS NULL) AS quiz_count,
+			(SELECT COUNT(*) FROM quizzes q WHERE q.institution_id = i.id AND q.deleted_at IS NULL AND q.status='published') AS active_quizzes,
+			(SELECT AVG(u.current_streak) FROM users u WHERE u.institution_id = i.id AND u.role='student' AND u.status='active') AS avg_streak,
+			onboarding_city, point_multiplier::float8,
+			(SELECT MAX(h.created_at) FROM institution_multiplier_history h WHERE h.institution_id = i.id) AS multiplier_set_at
 		 FROM institutions i WHERE `+where+
 			fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, n, n+1),
 		args...)
@@ -219,22 +264,27 @@ func (h *Handler) ListInstitutions(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type instRow struct {
-		ID           string     `json:"id"`
-		Name         string     `json:"name"`
-		Type         string     `json:"type"`
-		Status       string     `json:"status"`
-		ContactEmail string     `json:"contact_email"`
-		VerifiedAt   *time.Time `json:"verified_at,omitempty"`
-		CreatedAt    time.Time  `json:"created_at"`
-		StudentCount int        `json:"student_count"`
-		TeacherCount int        `json:"teacher_count"`
-		QuizCount    int        `json:"quiz_count"`
+		ID            string     `json:"id"`
+		Name          string     `json:"name"`
+		Type          string     `json:"type"`
+		Status        string     `json:"status"`
+		ContactEmail  string     `json:"contact_email"`
+		VerifiedAt    *time.Time `json:"verified_at,omitempty"`
+		CreatedAt     time.Time  `json:"created_at"`
+		StudentCount  int        `json:"student_count"`
+		TeacherCount  int        `json:"teacher_count"`
+		QuizCount     int        `json:"quiz_count"`
+		ActiveQuizzes int        `json:"active_quizzes"`
+		AvgStreak     *float64   `json:"avg_streak"`
+		City          *string    `json:"city"`
+		Multiplier    float64    `json:"point_multiplier"`
+		MultiplierSet *time.Time `json:"multiplier_set_at"`
 	}
 	var insts []instRow
 	for rows.Next() {
 		var i instRow
 		rows.Scan(&i.ID, &i.Name, &i.Type, &i.Status, &i.ContactEmail, &i.VerifiedAt, &i.CreatedAt,
-			&i.StudentCount, &i.TeacherCount, &i.QuizCount)
+			&i.StudentCount, &i.TeacherCount, &i.QuizCount, &i.ActiveQuizzes, &i.AvgStreak, &i.City, &i.Multiplier, &i.MultiplierSet)
 		insts = append(insts, i)
 	}
 	if insts == nil {
@@ -246,7 +296,10 @@ func (h *Handler) ListInstitutions(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/admin/institutions/queue
 func (h *Handler) InstitutionQueue(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Query(r.Context(),
-		`SELECT id, name, type, contact_email, created_at FROM institutions WHERE status='pending' ORDER BY created_at ASC`)
+		`SELECT id, name, type, contact_email, created_at,
+		        onboarding_admin_name, onboarding_phone, onboarding_website,
+		        onboarding_city, onboarding_state, onboarding_country, timezone
+		   FROM institutions WHERE status='pending' AND deleted_at IS NULL ORDER BY created_at ASC`)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -258,11 +311,19 @@ func (h *Handler) InstitutionQueue(w http.ResponseWriter, r *http.Request) {
 		Type         string    `json:"type"`
 		ContactEmail string    `json:"contact_email"`
 		SubmittedAt  time.Time `json:"submitted_at"`
+		ContactName  *string   `json:"contact_name"`
+		Phone        *string   `json:"phone"`
+		Website      *string   `json:"website"`
+		City         *string   `json:"city"`
+		State        *string   `json:"state"`
+		Country      *string   `json:"country"`
+		Timezone     string    `json:"timezone"`
 	}
 	var queue []qRow
 	for rows.Next() {
 		var i qRow
-		rows.Scan(&i.ID, &i.Name, &i.Type, &i.ContactEmail, &i.SubmittedAt)
+		rows.Scan(&i.ID, &i.Name, &i.Type, &i.ContactEmail, &i.SubmittedAt,
+			&i.ContactName, &i.Phone, &i.Website, &i.City, &i.State, &i.Country, &i.Timezone)
 		queue = append(queue, i)
 	}
 	if queue == nil {
@@ -336,22 +397,63 @@ func (h *Handler) RejectInstitution(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/admin/institutions/:institutionId
 func (h *Handler) GetInstitution(w http.ResponseWriter, r *http.Request) {
 	instID := chi.URLParam(r, "institutionId")
-	var name, instType, status, email, sCode, tCode string
+	var name, instType, status, email, sCode, tCode, tz string
 	var verifiedAt *time.Time
-	h.db.QueryRow(r.Context(),
-		`SELECT name, type, status, contact_email, student_referral_code, teacher_referral_code, verified_at
-		 FROM institutions WHERE id=$1`, instID,
-	).Scan(&name, &instType, &status, &email, &sCode, &tCode, &verifiedAt)
+	var createdAt time.Time
+	var multiplier float64
+	var contactName, phone, website, city, state, country *string
+	if err := h.db.QueryRow(r.Context(),
+		`SELECT name, type, status, contact_email, student_referral_code, teacher_referral_code, verified_at,
+		        created_at, point_multiplier::float8, timezone,
+		        onboarding_admin_name, onboarding_phone, onboarding_website,
+		        onboarding_city, onboarding_state, onboarding_country
+		 FROM institutions WHERE id=$1 AND deleted_at IS NULL`, instID,
+	).Scan(&name, &instType, &status, &email, &sCode, &tCode, &verifiedAt, &createdAt, &multiplier, &tz,
+		&contactName, &phone, &website, &city, &state, &country); err != nil {
+		middleware.NotFound(w, "institution")
+		return
+	}
 
-	var studentCount, teacherCount, quizCount int
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='student'`, instID).Scan(&studentCount)
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher'`, instID).Scan(&teacherCount)
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM quizzes WHERE institution_id=$1 AND deleted_at IS NULL`, instID).Scan(&quizCount)
+	var studentCount, teacherCount, quizCount, activeQuizzes, sJoined, tJoined int
+	var avgStreak *float64
+	h.db.QueryRow(r.Context(), `SELECT
+		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='student' AND deleted_at IS NULL),
+		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher' AND deleted_at IS NULL),
+		(SELECT COUNT(*) FROM quizzes WHERE institution_id=$1 AND deleted_at IS NULL),
+		(SELECT COUNT(*) FROM quizzes WHERE institution_id=$1 AND deleted_at IS NULL AND status='published'),
+		(SELECT AVG(current_streak) FROM users WHERE institution_id=$1 AND role='student' AND status='active'),
+		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='student'),
+		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher')`, instID,
+	).Scan(&studentCount, &teacherCount, &quizCount, &activeQuizzes, &avgStreak, &sJoined, &tJoined)
+
+	// The primary institution admin, if provisioned: users row with role
+	// institution_admin. last_active_at set means they have signed in.
+	var admin map[string]interface{}
+	var aName, aEmail, aStatus string
+	var aCreated time.Time
+	var aActive *time.Time
+	if h.db.QueryRow(r.Context(),
+		`SELECT display_name, email, status, created_at, last_active_at FROM users
+		  WHERE institution_id=$1 AND role='institution_admin' AND deleted_at IS NULL
+		  ORDER BY created_at ASC LIMIT 1`, instID,
+	).Scan(&aName, &aEmail, &aStatus, &aCreated, &aActive) == nil {
+		admin = map[string]interface{}{
+			"name": aName, "email": aEmail, "status": aStatus,
+			"invited_at": aCreated, "last_active_at": aActive, "accepted": aActive != nil,
+		}
+	}
 
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"id": instID, "name": name, "type": instType, "status": status,
 		"contact_email": email, "student_referral_code": sCode, "teacher_referral_code": tCode,
-		"verified_at": verifiedAt, "student_count": studentCount, "teacher_count": teacherCount, "quiz_count": quizCount,
+		"verified_at": verifiedAt, "created_at": createdAt, "timezone": tz,
+		"student_count": studentCount, "teacher_count": teacherCount, "quiz_count": quizCount,
+		"active_quizzes": activeQuizzes, "avg_streak": avgStreak,
+		"students_joined": sJoined, "teachers_joined": tJoined,
+		"point_multiplier": multiplier,
+		"contact_name":     contactName, "phone": phone, "website": website,
+		"city": city, "state": state, "country": country,
+		"primary_admin": admin,
 	})
 }
 
@@ -494,6 +596,17 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 		args = append(args, v)
 		n++
 	}
+	// The institution-scoped student view must agree with the institute
+	// roster, which is enrollment-backed. Keep global user management broad,
+	// but exclude stale student accounts from a scoped student roster.
+	if q.Get("role") == "student" && q.Get("institution_id") != "" {
+		where += ` AND EXISTS (
+			SELECT 1 FROM enrollments e
+			 WHERE e.user_id=u.id
+			   AND e.institution_id=u.institution_id
+			   AND e.status IN ('pending_claim','active','suspended')
+		)`
+	}
 
 	var total int
 	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users u WHERE `+where, args...).Scan(&total)
@@ -535,16 +648,20 @@ func (h *Handler) GetUser(w http.ResponseWriter, r *http.Request) {
 	var displayName, email, role, status string
 	var instName *string
 	var totalPoints int64
-	var currentStreak int
+	var currentStreak, longestStreak int
 	var memberSince time.Time
 	var lastActive *time.Time
+	var instID, suspensionReason *string
+	var recruiterVisible bool
 
 	err := h.db.QueryRow(r.Context(),
-		`SELECT u.display_name, u.email, u.role, u.status, i.name, u.total_points, u.current_streak, u.member_since, u.last_active_at
+		`SELECT u.display_name, u.email, u.role, u.status, i.name, u.total_points, u.current_streak, u.member_since, u.last_active_at,
+		        u.longest_streak, u.recruiter_visible, u.suspension_reason, u.institution_id::text
 		 FROM users u LEFT JOIN institutions i ON i.id=u.institution_id
 		 WHERE u.id=$1 AND u.deleted_at IS NULL
 		   AND u.role IN ('student','teacher','parent','institution_admin')`, userID,
-	).Scan(&displayName, &email, &role, &status, &instName, &totalPoints, &currentStreak, &memberSince, &lastActive)
+	).Scan(&displayName, &email, &role, &status, &instName, &totalPoints, &currentStreak, &memberSince, &lastActive,
+		&longestStreak, &recruiterVisible, &suspensionReason, &instID)
 	if err != nil {
 		middleware.NotFound(w, "user")
 		return
@@ -569,10 +686,34 @@ func (h *Handler) GetUser(w http.ResponseWriter, r *http.Request) {
 		attempts = append(attempts, a)
 	}
 
+	// Registered push devices. Tokens themselves are secrets and never leave
+	// the server; only the platform, version and dates are shown.
+	type dRow struct {
+		Platform   string    `json:"platform"`
+		AppVersion *string   `json:"app_version"`
+		Locale     *string   `json:"locale"`
+		CreatedAt  time.Time `json:"registered_at"`
+		LastSeen   time.Time `json:"last_seen"`
+	}
+	devices := []dRow{}
+	if dRows, derr := h.db.Query(r.Context(),
+		`SELECT platform, app_version, locale, created_at, last_seen FROM device_tokens
+		  WHERE user_id=$1 ORDER BY last_seen DESC LIMIT 10`, userID); derr == nil {
+		for dRows.Next() {
+			var d dRow
+			if dRows.Scan(&d.Platform, &d.AppVersion, &d.Locale, &d.CreatedAt, &d.LastSeen) == nil {
+				devices = append(devices, d)
+			}
+		}
+		dRows.Close()
+	}
+
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"id": userID, "display_name": displayName, "email": email, "role": role, "status": status,
-		"institution": instName, "total_points": totalPoints, "current_streak": currentStreak,
+		"institution": instName, "institution_id": instID, "total_points": totalPoints, "current_streak": currentStreak,
+		"longest_streak": longestStreak, "recruiter_visible": recruiterVisible, "suspension_reason": suspensionReason,
 		"member_since": memberSince, "last_active_at": lastActive, "recent_attempts": attempts,
+		"devices": devices,
 	})
 }
 
@@ -841,61 +982,132 @@ func (h *Handler) ListReports(w http.ResponseWriter, r *http.Request) {
 		args = append(args, v)
 		n++
 	}
+	if v := q.Get("reason"); v != "" {
+		where += fmt.Sprintf(` AND r.reason=$%d`, n)
+		args = append(args, v)
+		n++
+	}
+	if v := q.Get("quiz_id"); v != "" {
+		where += fmt.Sprintf(` AND r.quiz_id::text=$%d`, n)
+		args = append(args, v)
+		n++
+	}
+	if v := q.Get("search"); v != "" {
+		where += fmt.Sprintf(` AND (qz.title ILIKE $%d OR r.description ILIKE $%d)`, n, n)
+		args = append(args, "%"+v+"%")
+		n++
+	}
 
 	var total int
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM reports r WHERE `+where, args...).Scan(&total)
+	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM reports r LEFT JOIN quizzes qz ON qz.id=r.quiz_id WHERE `+where, args...).Scan(&total)
 	args = append(args, limit, offset)
 
-	rows, _ := h.db.Query(r.Context(),
-		`SELECT r.id, u.display_name, COALESCE(qz.title,'') as quiz_title, r.reason, r.status, r.priority, r.created_at
-		 FROM reports r JOIN users u ON u.id=r.reporter_id LEFT JOIN quizzes qz ON qz.id=r.quiz_id
+	rows, err := h.db.Query(r.Context(),
+		`SELECT r.id, u.display_name, COALESCE(qz.title,'') as quiz_title, r.reason, r.status, r.priority, r.created_at,
+		        r.description, r.quiz_id::text, r.question_id::text, qn.prompt, qn.position,
+		        r.resolution, r.resolution_note, r.resolved_at, COALESCE(qz.status,''),
+		        COALESCE(au.display_name,'')
+		 FROM reports r JOIN users u ON u.id=r.reporter_id
+		 LEFT JOIN quizzes qz ON qz.id=r.quiz_id
+		 LEFT JOIN users au ON au.id=qz.created_by
+		 LEFT JOIN questions qn ON qn.id=r.question_id
 		 WHERE `+where+fmt.Sprintf(` ORDER BY r.priority DESC, r.created_at ASC LIMIT $%d OFFSET $%d`, n, n+1),
 		args...)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
 	defer rows.Close()
 
 	type repRow struct {
-		ID        string    `json:"id"`
-		Reporter  string    `json:"reporter"`
-		QuizTitle string    `json:"quiz_title"`
-		Reason    string    `json:"reason"`
-		Status    string    `json:"status"`
-		Priority  string    `json:"priority"`
-		CreatedAt time.Time `json:"created_at"`
+		ID             string     `json:"id"`
+		Reporter       string     `json:"reporter"`
+		QuizTitle      string     `json:"quiz_title"`
+		Reason         string     `json:"reason"`
+		Status         string     `json:"status"`
+		Priority       string     `json:"priority"`
+		CreatedAt      time.Time  `json:"created_at"`
+		Description    *string    `json:"description"`
+		QuizID         *string    `json:"quiz_id"`
+		QuestionID     *string    `json:"question_id"`
+		QuestionPrompt *string    `json:"question_prompt"`
+		QuestionNumber *int       `json:"question_number"`
+		Resolution     *string    `json:"resolution"`
+		ResolutionNote *string    `json:"resolution_note"`
+		ResolvedAt     *time.Time `json:"resolved_at"`
+		QuizStatus     string     `json:"quiz_status"`
+		QuizAuthor     string     `json:"quiz_author"`
 	}
-	var reports []repRow
+	reports := []repRow{}
 	for rows.Next() {
 		var rr repRow
-		rows.Scan(&rr.ID, &rr.Reporter, &rr.QuizTitle, &rr.Reason, &rr.Status, &rr.Priority, &rr.CreatedAt)
-		reports = append(reports, rr)
-	}
-	if reports == nil {
-		reports = []repRow{}
+		if rows.Scan(&rr.ID, &rr.Reporter, &rr.QuizTitle, &rr.Reason, &rr.Status, &rr.Priority, &rr.CreatedAt,
+			&rr.Description, &rr.QuizID, &rr.QuestionID, &rr.QuestionPrompt, &rr.QuestionNumber,
+			&rr.Resolution, &rr.ResolutionNote, &rr.ResolvedAt, &rr.QuizStatus, &rr.QuizAuthor) == nil {
+			reports = append(reports, rr)
+		}
 	}
 	middleware.JSONWithMeta(w, http.StatusOK, reports, &middleware.Meta{Page: page, Limit: limit, Total: total})
 }
 
 // POST /api/v1/admin/reports/:reportId/resolve
+//
+// Body: {resolution, note}. resolution is one of no_action | edit_required |
+// author_warned | escalated | remove_quiz ("escalate" is accepted as an alias).
+// remove_quiz unpublishes the quiz; author_warned records a warning against the
+// quiz author in the audit log. A note is required except for remove_quiz.
 func (h *Handler) ResolveReport(w http.ResponseWriter, r *http.Request) {
 	reportID := chi.URLParam(r, "reportId")
 	var req struct {
 		Resolution string `json:"resolution"`
+		Note       string `json:"note"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid request body")
+		return
+	}
+	if req.Resolution == "escalate" {
+		req.Resolution = "escalated"
+	}
+	switch req.Resolution {
+	case "no_action", "edit_required", "author_warned", "escalated", "remove_quiz":
+	default:
+		middleware.BadRequest(w, "resolution must be no_action, edit_required, author_warned, escalated or remove_quiz")
+		return
+	}
+	note := strings.TrimSpace(req.Note)
+	if note == "" && req.Resolution != "remove_quiz" {
+		middleware.BadRequest(w, "a resolution note is required")
+		return
+	}
 	adminID := middleware.GetAdminID(r)
-	h.db.Exec(r.Context(),
-		`UPDATE reports SET status='resolved', resolution=$1, reviewed_by=$2, resolved_at=now() WHERE id=$3`,
-		req.Resolution, nullableAdmin(adminID), reportID)
-
-	// If remove_quiz, unpublish it
-	if req.Resolution == "remove_quiz" {
-		var quizID *string
-		h.db.QueryRow(r.Context(), `SELECT quiz_id FROM reports WHERE id=$1`, reportID).Scan(&quizID)
-		if quizID != nil {
-			h.db.Exec(r.Context(), `UPDATE quizzes SET status='closed', updated_at=now() WHERE id=$1`, *quizID)
-		}
+	var quizID, authorID *string
+	tag, err := h.db.Exec(r.Context(),
+		`UPDATE reports SET status='resolved', resolution=$1, resolution_note=NULLIF($2,''), reviewed_by=$3, resolved_at=now()
+		  WHERE id=$4`,
+		req.Resolution, note, nullableAdmin(adminID), reportID)
+	if err != nil {
+		middleware.InternalError(w)
+		return
 	}
-	logAudit(r.Context(), h.db, adminID, "resolve_report", "report", reportID, req.Resolution)
-	middleware.JSON(w, http.StatusOK, map[string]string{"message": "report resolved"})
+	if tag.RowsAffected() == 0 {
+		middleware.NotFound(w, "report")
+		return
+	}
+	h.db.QueryRow(r.Context(),
+		`SELECT r.quiz_id::text, q.created_by::text FROM reports r LEFT JOIN quizzes q ON q.id=r.quiz_id WHERE r.id=$1`,
+		reportID).Scan(&quizID, &authorID)
+
+	if req.Resolution == "remove_quiz" && quizID != nil {
+		h.db.Exec(r.Context(), `UPDATE quizzes SET status='closed', updated_at=now() WHERE id=$1`, *quizID)
+		logAudit(r.Context(), h.db, adminID, "unpublish_quiz", "quiz", *quizID, "report "+reportID+": "+note)
+	}
+	if req.Resolution == "author_warned" && authorID != nil {
+		logAudit(r.Context(), h.db, adminID, "warn_author", "user", *authorID, note)
+	}
+	logAuditChange(r.Context(), h.db, adminID, "resolve_report", "report", reportID, note,
+		map[string]string{"status": "open"}, map[string]string{"status": "resolved", "resolution": req.Resolution})
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "report resolved", "resolution": req.Resolution})
 }
 
 // GET /api/v1/admin/point-economy
@@ -1077,6 +1289,21 @@ func (h *Handler) AuditLog(w http.ResponseWriter, r *http.Request) {
 		args = append(args, v)
 		n++
 	}
+	if v := q.Get("target_id"); v != "" {
+		where += fmt.Sprintf(` AND target_id::text=$%d`, n)
+		args = append(args, v)
+		n++
+	}
+	if v := q.Get("from"); v != "" {
+		where += fmt.Sprintf(` AND timestamp >= $%d::date`, n)
+		args = append(args, v)
+		n++
+	}
+	if v := q.Get("to"); v != "" {
+		where += fmt.Sprintf(` AND timestamp < $%d::date + 1`, n)
+		args = append(args, v)
+		n++
+	}
 
 	var total int
 	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM audit_log WHERE `+where, args...).Scan(&total)
@@ -1232,7 +1459,10 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/admin/admin-accounts
 func (h *Handler) ListAdminAccounts(w http.ResponseWriter, r *http.Request) {
 	rows, _ := h.db.Query(r.Context(),
-		`SELECT id, name, email, role, status, created_at, accepted_at FROM admin_accounts WHERE deleted_at IS NULL ORDER BY created_at DESC`)
+		`SELECT a.id, a.name, a.email, a.role, a.status, a.created_at, a.accepted_at,
+		        (SELECT COUNT(*) FROM webauthn_credentials c WHERE c.admin_id=a.id),
+		        (SELECT MAX(s.last_seen) FROM admin_sessions s WHERE s.admin_id=a.id)
+		   FROM admin_accounts a WHERE a.deleted_at IS NULL ORDER BY a.created_at DESC`)
 	defer rows.Close()
 	type aRow struct {
 		ID         string     `json:"id"`
@@ -1242,11 +1472,13 @@ func (h *Handler) ListAdminAccounts(w http.ResponseWriter, r *http.Request) {
 		Status     string     `json:"status"`
 		CreatedAt  time.Time  `json:"created_at"`
 		AcceptedAt *time.Time `json:"accepted_at,omitempty"`
+		Passkeys   int        `json:"passkey_count"`
+		LastSeen   *time.Time `json:"last_seen_at"`
 	}
 	var accounts []aRow
 	for rows.Next() {
 		var a aRow
-		rows.Scan(&a.ID, &a.Name, &a.Email, &a.Role, &a.Status, &a.CreatedAt, &a.AcceptedAt)
+		rows.Scan(&a.ID, &a.Name, &a.Email, &a.Role, &a.Status, &a.CreatedAt, &a.AcceptedAt, &a.Passkeys, &a.LastSeen)
 		accounts = append(accounts, a)
 	}
 	if accounts == nil {
@@ -1266,15 +1498,57 @@ func (h *Handler) UpdateAdminAccount(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Role   *string `json:"role"`
 		Status *string `json:"status"`
+		Reason string  `json:"reason"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.Role == nil && req.Status == nil) {
+		middleware.BadRequest(w, "role or status is required")
+		return
+	}
+	if req.Role != nil && *req.Role != "super_admin" && *req.Role != "moderator" && *req.Role != "support_agent" {
+		middleware.BadRequest(w, "role must be super_admin, moderator or support_agent")
+		return
+	}
+	if req.Status != nil && *req.Status != "active" && *req.Status != "suspended" {
+		middleware.BadRequest(w, "status must be active or suspended")
+		return
+	}
+	var oldRole, oldStatus string
+	if err := h.db.QueryRow(r.Context(),
+		`SELECT role, status FROM admin_accounts WHERE id=$1 AND deleted_at IS NULL`, targetID).Scan(&oldRole, &oldStatus); err != nil {
+		middleware.NotFound(w, "admin account")
+		return
+	}
+	removesSuper := oldRole == "super_admin" && oldStatus == "active" &&
+		((req.Role != nil && *req.Role != "super_admin") || (req.Status != nil && *req.Status != "active"))
+	if removesSuper && h.lastActiveSuperAdmin(r.Context(), targetID) {
+		middleware.Error(w, http.StatusConflict, "LAST_SUPER_ADMIN",
+			"this is the last active super_admin; promote another admin first")
+		return
+	}
 	if req.Role != nil {
-		h.db.Exec(r.Context(), `UPDATE admin_accounts SET role=$1 WHERE id=$2`, *req.Role, targetID)
+		if _, err := h.db.Exec(r.Context(), `UPDATE admin_accounts SET role=$1 WHERE id=$2`, *req.Role, targetID); err != nil {
+			middleware.InternalError(w)
+			return
+		}
 	}
 	if req.Status != nil {
-		h.db.Exec(r.Context(), `UPDATE admin_accounts SET status=$1 WHERE id=$2`, *req.Status, targetID)
+		if _, err := h.db.Exec(r.Context(), `UPDATE admin_accounts SET status=$1 WHERE id=$2`, *req.Status, targetID); err != nil {
+			middleware.InternalError(w)
+			return
+		}
 	}
-	logAudit(r.Context(), h.db, requestorID, "update_admin_account", "admin", targetID, "")
+	action := "update_admin_account"
+	switch {
+	case req.Role != nil:
+		action = "change_admin_role"
+	case req.Status != nil && *req.Status == "suspended":
+		action = "suspend_admin_account"
+	case req.Status != nil:
+		action = "reactivate_admin_account"
+	}
+	logAuditChange(r.Context(), h.db, requestorID, action, "admin", targetID, req.Reason,
+		map[string]string{"role": oldRole, "status": oldStatus},
+		map[string]interface{}{"role": req.Role, "status": req.Status})
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "admin account updated"})
 }
 
@@ -1286,9 +1560,30 @@ func (h *Handler) DeleteAdminAccount(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "cannot delete your own account")
 		return
 	}
+	var role, status string
+	if err := h.db.QueryRow(r.Context(),
+		`SELECT role, status FROM admin_accounts WHERE id=$1 AND deleted_at IS NULL`, targetID).Scan(&role, &status); err != nil {
+		middleware.NotFound(w, "admin account")
+		return
+	}
+	if role == "super_admin" && status == "active" && h.lastActiveSuperAdmin(r.Context(), targetID) {
+		middleware.Error(w, http.StatusConflict, "LAST_SUPER_ADMIN",
+			"this is the last active super_admin; promote another admin first")
+		return
+	}
 	h.db.Exec(r.Context(), `UPDATE admin_accounts SET status='deleted', deleted_at=now() WHERE id=$1`, targetID)
-	logAudit(r.Context(), h.db, requestorID, "delete_admin_account", "admin", targetID, "")
+	h.db.Exec(r.Context(), `UPDATE admin_sessions SET revoked_at=now() WHERE admin_id=$1 AND revoked_at IS NULL`, targetID)
+	logAudit(r.Context(), h.db, requestorID, "delete_admin_account", "admin", targetID, r.URL.Query().Get("reason"))
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "admin account deleted"})
+}
+
+// lastActiveSuperAdmin reports whether excluding targetID leaves no active super_admin.
+func (h *Handler) lastActiveSuperAdmin(ctx context.Context, targetID string) bool {
+	var others int
+	h.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM admin_accounts
+		  WHERE role='super_admin' AND status='active' AND deleted_at IS NULL AND id<>$1`, targetID).Scan(&others)
+	return others == 0
 }
 
 // POST /api/v1/admin/admin-accounts/:adminId/resend
@@ -1553,7 +1848,7 @@ func (h *Handler) ListPromos(w http.ResponseWriter, r *http.Request) {
 	// "by undefined". There is no impression counter on this table — see
 	// the note on the response type.
 	rows, err := h.db.Query(r.Context(),
-		`SELECT p.id, p.type, p.title, p.body, p.cta_label, p.cta_url, p.audience, p.status,
+		`SELECT p.id, p.type, p.title, p.body, p.cta_label, p.cta_url, p.image_url, p.audience, p.status,
 		        p.starts_at, p.ends_at, p.created_at, COALESCE(ac.name,''),
 		        COALESCE((SELECT COUNT(*) FROM content_delivery_events e WHERE e.content_kind='promo' AND e.content_id=p.id AND e.event_type='impression'),0),
 		        COALESCE((SELECT array_agg(pi.institution_id::text) FROM promo_institutions pi WHERE pi.promo_id=p.id), ARRAY[]::text[])
@@ -1579,6 +1874,7 @@ func (h *Handler) ListPromos(w http.ResponseWriter, r *http.Request) {
 		Body           *string    `json:"body,omitempty"`
 		CTALabel       *string    `json:"cta_label,omitempty"`
 		CTAURL         *string    `json:"cta_url,omitempty"`
+		ImageURL       *string    `json:"image_url,omitempty"`
 		Audience       string     `json:"target"`
 		Status         string     `json:"status"`
 		StartsAt       *time.Time `json:"start_date,omitempty"`
@@ -1591,7 +1887,7 @@ func (h *Handler) ListPromos(w http.ResponseWriter, r *http.Request) {
 	var promos []promo
 	for rows.Next() {
 		var p promo
-		rows.Scan(&p.ID, &p.Type, &p.Title, &p.Body, &p.CTALabel, &p.CTAURL, &p.Audience, &p.Status,
+		rows.Scan(&p.ID, &p.Type, &p.Title, &p.Body, &p.CTALabel, &p.CTAURL, &p.ImageURL, &p.Audience, &p.Status,
 			&p.StartsAt, &p.EndsAt, &p.CreatedAt, &p.CreatedBy, &p.Impressions, &p.InstitutionIDs)
 		promos = append(promos, p)
 	}
@@ -1608,6 +1904,7 @@ func (h *Handler) CreatePromo(w http.ResponseWriter, r *http.Request) {
 		Body           *string    `json:"body"`
 		CTALabel       *string    `json:"cta_label"`
 		CTAURL         *string    `json:"cta_url"`
+		ImageURL       *string    `json:"image_url"`
 		Placement      string     `json:"placement"`
 		Target         string     `json:"target"`
 		StartDate      *time.Time `json:"start_date"`
@@ -1619,7 +1916,7 @@ func (h *Handler) CreatePromo(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "title, placement, and target are required")
 		return
 	}
-	if len(req.Title) > 80 || (req.Body != nil && len(*req.Body) > 600) || !validContentURL(req.CTAURL) ||
+	if len(req.Title) > 80 || (req.Body != nil && len(*req.Body) > 600) || !validContentURL(req.CTAURL) || !validContentURL(req.ImageURL) ||
 		!map[string]bool{"home_banner": true, "quiz_browser_banner": true, "splash_interstitial": true, "achievement_prompt": true}[req.Placement] ||
 		!map[string]bool{"all": true, "students": true, "institution": true, "lapsed": true}[req.Target] {
 		middleware.BadRequest(w, "invalid promo fields")
@@ -1661,9 +1958,9 @@ func (h *Handler) CreatePromo(w http.ResponseWriter, r *http.Request) {
 	}
 	var id string
 	err = tx.QueryRow(r.Context(),
-		`INSERT INTO promotional_content (title, body, cta_label, cta_url, type, audience, institution_id, status, starts_at, ends_at, created_by)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
-		strings.TrimSpace(req.Title), req.Body, req.CTALabel, req.CTAURL, req.Placement, req.Target, instID, req.Status, req.StartDate, req.EndDate, nullableAdmin(adminID),
+		`INSERT INTO promotional_content (title, body, cta_label, cta_url, type, audience, institution_id, status, starts_at, ends_at, created_by, image_url)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+		strings.TrimSpace(req.Title), req.Body, req.CTALabel, req.CTAURL, req.Placement, req.Target, instID, req.Status, req.StartDate, req.EndDate, nullableAdmin(adminID), req.ImageURL,
 	).Scan(&id)
 	if err != nil {
 		middleware.InternalError(w)
@@ -2210,6 +2507,22 @@ func nullableAdmin(adminID string) *string {
 		return nil
 	}
 	return &adminID
+}
+
+// logAuditChange is logAudit with before/after values, which the console's
+// audit drawer renders as a field-by-field diff.
+func logAuditChange(ctx context.Context, db *pgxpool.Pool, adminID, action, targetType, targetID, reason string, before, after interface{}) {
+	if adminID == "" {
+		return
+	}
+	oldJSON, _ := json.Marshal(before)
+	newJSON, _ := json.Marshal(after)
+	var adminName, adminRole string
+	db.QueryRow(ctx, `SELECT name, role FROM admin_accounts WHERE id=$1`, adminID).Scan(&adminName, &adminRole)
+	db.Exec(ctx,
+		`INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, reason, old_value, new_value)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		adminID, adminName, adminRole, action, targetType, nullableAdmin(targetID), reason, string(oldJSON), string(newJSON))
 }
 
 func logAudit(ctx context.Context, db *pgxpool.Pool, adminID, action, targetType, targetID, reason string) {

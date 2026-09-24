@@ -51,18 +51,20 @@ type Pack struct {
 	Quizzes   []PackQuiz `json:"quizzes"`
 }
 
-// BuildPack returns every practice quiz visible to the user (their institution's
-// published quizzes plus public ones) with full question payloads. The returned
-// Version is the newest quiz updated_at; the caller may pass the client's last
-// version as `since` to skip rebuilding when nothing changed (Changed=false).
-func (s *Service) BuildPack(ctx context.Context, institutionID, since string) (*Pack, bool, error) {
+// BuildPack returns the user's saved practice quizzes that are currently
+// visible (their institution's published quizzes plus public ones) with full
+// question payloads. The returned Version is the newest quiz updated_at; the
+// caller may pass the client's last version as `since` to skip rebuilding when
+// nothing changed (Changed=false).
+func (s *Service) BuildPack(ctx context.Context, userID, institutionID, since string) (*Pack, bool, error) {
 	// Newest update across the candidate set; used as the pack version.
 	var newest *time.Time
 	s.db.QueryRow(ctx,
 		`SELECT MAX(updated_at) FROM quizzes
 		 WHERE type='knowledge_check' AND status='published' AND deleted_at IS NULL
-		   AND (institution_id=$1::uuid OR visibility='public')`,
-		nullable(institutionID),
+		   AND (institution_id=$2::uuid OR visibility='public')
+		   AND EXISTS (SELECT 1 FROM saved_quizzes sq WHERE sq.quiz_id=quizzes.id AND sq.user_id=$1)`,
+		userID, nullable(institutionID),
 	).Scan(&newest)
 
 	version := ""
@@ -77,9 +79,10 @@ func (s *Service) BuildPack(ctx context.Context, institutionID, since string) (*
 		`SELECT id, title, description, type, question_count, updated_at
 		 FROM quizzes
 		 WHERE type='knowledge_check' AND status='published' AND deleted_at IS NULL
-		   AND (institution_id=$1::uuid OR visibility='public')
+		   AND (institution_id=$2::uuid OR visibility='public')
+		   AND EXISTS (SELECT 1 FROM saved_quizzes sq WHERE sq.quiz_id=quizzes.id AND sq.user_id=$1)
 		 ORDER BY updated_at DESC`,
-		nullable(institutionID))
+		userID, nullable(institutionID))
 	if err != nil {
 		return nil, false, err
 	}
@@ -185,6 +188,10 @@ func (s *Service) Sync(ctx context.Context, userID string, results []SyncResult)
 		 SELECT id, $2, quiz_id, total_questions, correct_count, score_pct, answers, completed_at
 		   FROM unnest($1::uuid[], $3::uuid[], $4::int[], $5::int[], $6::float8[], $7::jsonb[], $8::timestamptz[])
 		     AS t(id, quiz_id, total_questions, correct_count, score_pct, answers, completed_at)
+		  WHERE t.quiz_id IS NULL OR EXISTS (
+		    SELECT 1 FROM quizzes q
+		     WHERE q.id=t.quiz_id AND q.type='knowledge_check' AND q.deleted_at IS NULL
+		  )
 		 ON CONFLICT (id) DO NOTHING`,
 		ids, userID, quizIDs, totals, corrects, scores, answers, completedAts)
 	if err != nil {

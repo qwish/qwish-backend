@@ -979,7 +979,11 @@ topics. Returns `404 NO_QUIZ_AVAILABLE` when no matching unplayed assessment rem
 ## GET `/users/me/report-card`
 **Auth required:** Yes
 
-Generates and downloads a verified PDF report card for the user.
+Generates a dated Qwish learning report for the authenticated user. Includes institution-recorded education stages and promotions, separately labelled self-reported education, first-attempt accuracy and evidence counts, current assignment progress, 30-day trends, domain strengths, and aggregate peer comparisons.
+
+Peer standing uses raw accuracy (not the composite `score_pct` or points) on the same quiz IDs. It excludes the learner, counts strictly lower accuracy, and averages across qualifying quizzes. Requires at least 3 quizzes with 5 other active students each; ties are not lower. Question sampling and revisions may differ, so this is descriptive context, not a calibrated national percentile. Trends require 3 scored first attempts in each 30-day window. Strength labels require 3 assessments and 20 questions; 80%+ is an observed strength and below 60% a review priority.
+
+Stages associate institution assessments with recorded enrollment/promotion periods. Missing history is explicitly labelled, and self-reported education is not given inferred marks. The report is not a signed credential or academic transcript. All sections use a consistent database snapshot; responses are `private, no-store`.
 
 ### Response `200`
 `Content-Type: application/pdf` with PDF binary data.
@@ -994,8 +998,8 @@ Generates and downloads a verified PDF report card for the user.
 ### Query Params
 | Param | Description |
 |-------|-------------|
-| `type` | Filter by quiz type (`practice`, `play_and_win`) |
-| `saved` | `true` to return only saved quizzes |
+| `type` | Filter by quiz type (`knowledge_check` practice, `play_and_win` ranked) |
+| `saved` | `true` to return only the authenticated user's saved practice quizzes |
 | `page`, `limit` | Pagination |
 
 ### Response `200` (paginated)
@@ -1005,7 +1009,7 @@ Generates and downloads a verified PDF report card for the user.
     "id":             "uuid",
     "title":          "Biology Chapter 3",
     "description":    "Cell division and genetics",
-    "type":           "practice",
+    "type":           "knowledge_check",
     "status":         "published",
     "question_count": 10,
     "is_saved":       false,
@@ -1039,7 +1043,8 @@ list — to render a quiz detail view.
 ## POST `/quizzes/{quizId}/save`
 **Auth required:** Yes
 
-Saves a quiz to the user's saved list.
+Saves an accessible practice quiz (`type=knowledge_check`) to the user's saved
+list. Ranked quizzes cannot be saved and return `400`.
 
 ### Response `200`
 ```json
@@ -3397,7 +3402,7 @@ All endpoints below require a Bearer token unless noted. Standard response shape
 ```json
 { "theme": "auto", "profile_private": true, "recruiter_visible": false }
 ```
-`theme` ∈ `auto | light | dark`. Profiles are **private by default**; `recruiter_visible=true` opts the user into public/recruiter discovery.
+`theme` ∈ `auto | light | dark`. Profiles are **private by default**. Setting `profile_private=false` makes the public profile visible to anyone with access to its link. `recruiter_visible=true` opts the user into recruiter discovery and also makes the public profile visible.
 
 ### PATCH `/users/me/settings`
 Body (all fields optional):
@@ -3406,7 +3411,7 @@ Body (all fields optional):
 ```
 Returns the updated settings. `400 BAD_REQUEST` for an invalid `theme`.
 
-> Privacy enforcement: `GET /users/{userId}/profile` returns `403 PROFILE_PRIVATE` unless the viewer is the owner, a follower, or the target has `recruiter_visible=true`.
+> Privacy enforcement: `GET /users/{userId}/profile` returns `403 PROFILE_PRIVATE` unless the viewer is the owner, a follower, or the target has `profile_private=false` or `recruiter_visible=true`.
 
 ## Push Alerts — Notification Preferences
 
@@ -3484,7 +3489,9 @@ Bucketed average `score_pct` over time for the insights chart, scaled to the sam
 ## Offline Mode
 
 ### GET `/offline/pack?since=<version>`
-Returns the bundle of practice quizzes (`type=knowledge_check`, published, visible to the user) **including correct answers** so grading happens on-device. Practice is non-competitive (no points, no leaderboard).
+Returns the authenticated user's saved practice quizzes (`type=knowledge_check`,
+published, and visible to the user) **including correct answers** so grading
+happens on-device. Practice is non-competitive (no points, no leaderboard).
 ```json
 {
   "version": "2026-06-10T11:02:33.21Z",
@@ -3733,6 +3740,28 @@ institution-less and entirely valid: they own their whole record, never appear
 in a roster, and can join later without anything being migrated.
 
 ## Student
+
+### POST `/students/join/preview`
+Resolve any student join code without consuming it. Requires a signed-in student.
+```json
+{ "code": "K7M2QX9P4T" }
+```
+Returns `kind` (`claim`, `institution`, or `class`), `target_id`,
+`institution_id`, `institution_name`, optional `class_name`, and
+`already_joined`. It never returns the roster student's personal details.
+
+### POST `/students/join/confirm`
+Confirm the destination previously shown to the student.
+```json
+{ "code": "K7M2QX9P4T", "kind": "claim", "target_id": "uuid-from-preview" }
+```
+Returns `destination` and `enrollment`. The server rechecks the code and
+reviewed target before writing. Repeating a completed request returns the
+current enrollment. A class join adds `group_students` in the same transaction.
+An existing enrollment at another institution is never moved.
+
+Errors: `400 JOIN_CODE_INVALID`, `409 CLAIM_CODE_USED`,
+`409 ENROLLMENT_EXISTS`, `409 JOIN_CHANGED`, `403 JOIN_SUSPENDED`.
 
 ### POST `/students/claim`
 Redeem a roster row the institution pre-provisioned.

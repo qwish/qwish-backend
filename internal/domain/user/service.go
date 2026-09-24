@@ -119,24 +119,25 @@ func (s *Service) GetProfile(ctx context.Context, userID string) (*Profile, erro
 
 // GetPublicProfile returns the public view of targetID's profile, enforcing
 // privacy: a profile is private by default and only visible to the owner, to
-// followers, or once the owner enables recruiter visibility. Returns
+// followers, or when the owner makes it public. Recruiter visibility also
+// makes it public. Returns
 // ErrProfilePrivate otherwise.
 func (s *Service) GetPublicProfile(ctx context.Context, viewerID, targetID string) (*PublicProfile, error) {
 	p := &PublicProfile{}
 	var instName *string
-	var recruiterVisible bool
+	var profilePrivate, recruiterVisible bool
 	err := s.db.QueryRow(ctx,
 		`SELECT u.id, u.display_name, i.name, u.total_points, u.current_streak, u.longest_streak,
-		        u.recruiter_visible
+		        u.profile_private, u.recruiter_visible
 		 FROM users u
 		 LEFT JOIN institutions i ON i.id = u.institution_id
 		 WHERE u.id = $1 AND u.deleted_at IS NULL AND u.status = 'active'`, targetID,
-	).Scan(&p.ID, &p.DisplayName, &instName, &p.TotalPoints, &p.CurrentStreak, &p.LongestStreak, &recruiterVisible)
+	).Scan(&p.ID, &p.DisplayName, &instName, &p.TotalPoints, &p.CurrentStreak, &p.LongestStreak, &profilePrivate, &recruiterVisible)
 	if err != nil {
 		return nil, err
 	}
 
-	if viewerID != targetID && !recruiterVisible {
+	if publicProfileNeedsFollow(viewerID, targetID, profilePrivate, recruiterVisible) {
 		var followsTarget bool
 		s.db.QueryRow(ctx,
 			`SELECT EXISTS(SELECT 1 FROM user_follows WHERE follower_id=$1 AND followee_id=$2)`,
@@ -167,6 +168,10 @@ func (s *Service) GetPublicProfile(ctx context.Context, viewerID, targetID strin
 		p.Badges = []string{}
 	}
 	return p, nil
+}
+
+func publicProfileNeedsFollow(viewerID, targetID string, profilePrivate, recruiterVisible bool) bool {
+	return viewerID != targetID && profilePrivate && !recruiterVisible
 }
 
 func (s *Service) GetStats(ctx context.Context, userID string) (*Stats, error) {
@@ -822,8 +827,8 @@ func (s *Service) GetSettings(ctx context.Context, userID string) (*Settings, er
 	return st, nil
 }
 
-// UpdateSettings applies the non-nil fields. Returns ErrInvalidTheme for a bad
-// theme value.
+// UpdateSettings applies the non-nil fields atomically. Returns ErrInvalidTheme
+// for a bad theme value.
 func (s *Service) UpdateSettings(ctx context.Context, userID string, theme *string, private, recruiter *bool) (*Settings, error) {
 	if theme != nil {
 		switch *theme {
@@ -831,13 +836,12 @@ func (s *Service) UpdateSettings(ctx context.Context, userID string, theme *stri
 		default:
 			return nil, ErrInvalidTheme
 		}
-		s.db.Exec(ctx, `UPDATE users SET theme=$1, updated_at=now() WHERE id=$2`, *theme, userID)
 	}
-	if private != nil {
-		s.db.Exec(ctx, `UPDATE users SET profile_private=$1, updated_at=now() WHERE id=$2`, *private, userID)
-	}
-	if recruiter != nil {
-		s.db.Exec(ctx, `UPDATE users SET recruiter_visible=$1, updated_at=now() WHERE id=$2`, *recruiter, userID)
+	if _, err := s.db.Exec(ctx, `UPDATE users SET theme=COALESCE($1,theme),
+		profile_private=COALESCE($2,profile_private),
+		recruiter_visible=COALESCE($3,recruiter_visible), updated_at=now()
+		WHERE id=$4`, theme, private, recruiter, userID); err != nil {
+		return nil, err
 	}
 	return s.GetSettings(ctx, userID)
 }

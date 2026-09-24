@@ -138,6 +138,11 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		args = append(args, status)
 		idx++
 	}
+	if assignee := q.Get("assignee_id"); assignee != "" {
+		where = append(where, "c.assignee_id::text = $"+itoa(idx))
+		args = append(args, assignee)
+		idx++
+	}
 
 	whereSQL := ""
 	if len(where) > 0 {
@@ -145,10 +150,11 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := h.db.Query(r.Context(),
-		`SELECT id, topic, name, email, phone, message, metadata, status, resolved_at, created_at
-		 FROM contact_submissions
-		 `+whereSQL+`
-		 ORDER BY created_at DESC
+		`SELECT c.id, c.topic, c.name, c.email, c.phone, c.message, c.metadata, c.status, c.resolved_at, c.created_at,
+		        c.assignee_id::text, a.name, c.internal_note, c.updated_at
+		 FROM contact_submissions c LEFT JOIN admin_accounts a ON a.id = c.assignee_id
+		 `+strings.ReplaceAll(strings.ReplaceAll(whereSQL, "topic =", "c.topic ="), "status =", "c.status =")+`
+		 ORDER BY c.created_at DESC
 		 LIMIT 100`,
 		args...,
 	)
@@ -159,16 +165,20 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type row struct {
-		ID         string          `json:"id"`
-		Topic      string          `json:"topic"`
-		Name       string          `json:"name"`
-		Email      string          `json:"email"`
-		Phone      *string         `json:"phone,omitempty"`
-		Message    string          `json:"message"`
-		Metadata   json.RawMessage `json:"metadata,omitempty"`
-		Status     string          `json:"status"`
-		ResolvedAt *time.Time      `json:"resolved_at,omitempty"`
-		CreatedAt  time.Time       `json:"created_at"`
+		ID           string          `json:"id"`
+		Topic        string          `json:"topic"`
+		Name         string          `json:"name"`
+		Email        string          `json:"email"`
+		Phone        *string         `json:"phone,omitempty"`
+		Message      string          `json:"message"`
+		Metadata     json.RawMessage `json:"metadata,omitempty"`
+		Status       string          `json:"status"`
+		ResolvedAt   *time.Time      `json:"resolved_at,omitempty"`
+		CreatedAt    time.Time       `json:"created_at"`
+		AssigneeID   *string         `json:"assignee_id"`
+		AssigneeName *string         `json:"assignee_name"`
+		InternalNote *string         `json:"internal_note"`
+		UpdatedAt    time.Time       `json:"updated_at"`
 	}
 
 	results := []row{}
@@ -177,6 +187,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(
 			&s.ID, &s.Topic, &s.Name, &s.Email, &s.Phone,
 			&s.Message, &s.Metadata, &s.Status, &s.ResolvedAt, &s.CreatedAt,
+			&s.AssigneeID, &s.AssigneeName, &s.InternalNote, &s.UpdatedAt,
 		); err != nil {
 			middleware.InternalError(w)
 			return

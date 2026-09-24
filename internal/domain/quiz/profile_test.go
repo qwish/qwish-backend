@@ -58,6 +58,19 @@ func TestStudentListWhereScoped(t *testing.T) {
 	}
 }
 
+func TestSavedFilterIsPracticeOnly(t *testing.T) {
+	where, args := studentListWhereScoped("", "", "", "true", "", "user-1")
+	if len(args) != 1 || args[0] != "user-1" {
+		t.Fatalf("saved filter should bind the authenticated user: %s %#v", where, args)
+	}
+	if !regexp.MustCompile(`q\.type = 'knowledge_check'`).MatchString(where) {
+		t.Fatalf("saved filter must only return practice quizzes: %s", where)
+	}
+	if !regexp.MustCompile(`sq\.user_id = \$1`).MatchString(where) {
+		t.Fatalf("saved filter must be user-scoped: %s", where)
+	}
+}
+
 func TestFindSeqScans(t *testing.T) {
 	// Shape mirrors EXPLAIN FORMAT JSON: nested "Plans" arrays.
 	raw := `{"Node Type":"Limit","Plans":[

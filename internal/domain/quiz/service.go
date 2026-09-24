@@ -49,6 +49,7 @@ type Quiz struct {
 	AvgSeconds  *float64 `json:"avg_seconds,omitempty"`
 	// HasPlayed is derived from the authenticated learner's completed attempts.
 	// It is never accepted from a client write.
+	IsSaved   bool `json:"is_saved"`
 	HasPlayed bool `json:"has_played"`
 }
 
@@ -150,6 +151,7 @@ func studentListSelect(userArg int) string {
 		        LEAST(q.question_count, COALESCE(q.question_limit, q.question_count)) AS question_count,
 		        st.taker_count, q.ends_at, q.published_at, q.group_id, q.domain, q.subdomain, q.created_at,
 		        st.avg_score_pct, st.avg_seconds,
+		        EXISTS (SELECT 1 FROM saved_quizzes sq WHERE sq.quiz_id=q.id AND sq.user_id=$%d AND q.type='knowledge_check') AS is_saved,
 		        EXISTS (SELECT 1 FROM quiz_attempts mine
 		                WHERE mine.quiz_id = q.id AND mine.user_id = $%d
 		                  AND mine.status = 'completed') AS has_played
@@ -157,7 +159,7 @@ func studentListSelect(userArg int) string {
 		 JOIN users u ON u.id = q.created_by
 		 LEFT JOIN institutions i ON i.id = u.institution_id
 		 LEFT JOIN LATERAL (`+attemptStatsSelect+`) st ON TRUE
-		 WHERE `, userArg)
+		 WHERE `, userArg, userArg)
 }
 
 // studentListWhere builds the WHERE clause and its args for the student quiz
@@ -194,7 +196,7 @@ func studentListWhereScoped(institutionID, scope, quizType, saved, search, userI
 		argN++
 	}
 	if saved == "true" {
-		baseWhere += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM saved_quizzes sq WHERE sq.quiz_id = q.id AND sq.user_id = $%d)`, argN)
+		baseWhere += fmt.Sprintf(` AND q.type = 'knowledge_check' AND EXISTS (SELECT 1 FROM saved_quizzes sq WHERE sq.quiz_id = q.id AND sq.user_id = $%d)`, argN)
 		args = append(args, userID)
 		argN++
 	}
@@ -1118,10 +1120,19 @@ func (s *Service) ReorderQuestions(ctx context.Context, quizID, ownerID string, 
 }
 
 func (s *Service) SaveQuiz(ctx context.Context, userID, quizID string) error {
+	var quizType string
+	if err := s.db.QueryRow(ctx, `SELECT type FROM quizzes WHERE id=$1 AND deleted_at IS NULL`, quizID).Scan(&quizType); err != nil {
+		return err
+	}
+	if quizType != "knowledge_check" {
+		return ErrQuizNotSaveable
+	}
 	_, err := s.db.Exec(ctx,
 		`INSERT INTO saved_quizzes (user_id, quiz_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, userID, quizID)
 	return err
 }
+
+var ErrQuizNotSaveable = fmt.Errorf("only practice quizzes can be saved")
 
 func (s *Service) UnsaveQuiz(ctx context.Context, userID, quizID string) error {
 	_, err := s.db.Exec(ctx, `DELETE FROM saved_quizzes WHERE user_id=$1 AND quiz_id=$2`, userID, quizID)
@@ -1218,7 +1229,7 @@ func (s *Service) ListForTeacher(ctx context.Context, teacherID, statusFilter, c
 		`SELECT q.id, q.institution_id, q.created_by, '' as teacher, '' as institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
 		        0 AS taker_count, q.ends_at, q.published_at, q.group_id, q.domain, q.subdomain, q.created_at,
-		        NULL::float8, NULL::float8, false AS has_played
+		        NULL::float8, NULL::float8, false AS is_saved, false AS has_played
 		 FROM quizzes q WHERE `+where+fmt.Sprintf(` ORDER BY q.created_at DESC LIMIT $%d OFFSET $%d`, n-1, n),
 		args...)
 	if err != nil {
@@ -1478,7 +1489,7 @@ func (s *Service) scanQuizRows(rows interface {
 		var q Quiz
 		if err := rows.Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName, &q.Title, &q.Description,
 			&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.Domain, &q.Subdomain, &q.CreatedAt,
-			&q.AvgScorePct, &q.AvgSeconds, &q.HasPlayed); err != nil {
+			&q.AvgScorePct, &q.AvgSeconds, &q.IsSaved, &q.HasPlayed); err != nil {
 			return nil, fmt.Errorf("scan quiz row: %w", err)
 		}
 		quizzes = append(quizzes, q)

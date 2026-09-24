@@ -33,6 +33,26 @@ func (s *Service) logComplete(quizID string, r *ScoreResult) {
 	}()
 }
 
+// LogRegistration records that a visitor registered after playing a demo.
+// Clients call it once, right after sign-up; like the other events it carries no
+// identity, so it only feeds aggregate conversion.
+func (s *Service) LogRegistration(ctx context.Context, quizID string) error {
+	var ok bool
+	if err := s.db.QueryRow(ctx,
+		`SELECT is_demo FROM quizzes WHERE id = $1 AND deleted_at IS NULL`, quizID).Scan(&ok); err != nil || !ok {
+		return ErrNotDemo
+	}
+	_, err := s.db.Exec(ctx, `INSERT INTO demo_events (quiz_id, event_type) VALUES ($1, 'register')`, quizID)
+	return err
+}
+
+// SetLive turns a demo quiz's public link on or off.
+func (s *Service) SetLive(ctx context.Context, quizID string, live bool) (bool, error) {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE quizzes SET demo_live = $2, updated_at = now() WHERE id = $1 AND is_demo = true AND deleted_at IS NULL`, quizID, live)
+	return tag.RowsAffected() > 0, err
+}
+
 // ── Admin authoring ──────────────────────────────────────────────────────────
 
 // CreateQuestionReq is one question in a demo-quiz create request.
@@ -100,16 +120,21 @@ func (s *Service) Delete(ctx context.Context, quizID string) error {
 
 // AdminDemoQuiz is a demo quiz row with headline play stats for the list view.
 type AdminDemoQuiz struct {
-	ID             string    `json:"id"`
-	Title          string    `json:"title"`
-	Description    *string   `json:"description,omitempty"`
-	Domain         *string   `json:"domain,omitempty"`
-	Subdomain      *string   `json:"subdomain,omitempty"`
-	QuestionCount  int       `json:"question_count"`
-	Starts         int       `json:"starts"`
-	Completions    int       `json:"completions"`
-	CompletionRate float64   `json:"completion_rate"`
-	AvgScorePct    float64   `json:"avg_score_pct"`
+	ID             string  `json:"id"`
+	Title          string  `json:"title"`
+	Description    *string `json:"description,omitempty"`
+	Domain         *string `json:"domain,omitempty"`
+	Subdomain      *string `json:"subdomain,omitempty"`
+	QuestionCount  int     `json:"question_count"`
+	Starts         int     `json:"starts"`
+	Completions    int     `json:"completions"`
+	CompletionRate float64 `json:"completion_rate"`
+	AvgScorePct    float64 `json:"avg_score_pct"`
+	// Registrations reported by clients after a visitor signs up from this demo.
+	Registrations int `json:"registrations"`
+	// ConversionRate = registrations ÷ completions × 100.
+	ConversionRate float64   `json:"conversion_rate"`
+	Live           bool      `json:"live"`
 	CreatedAt      time.Time `json:"created_at"`
 }
 
@@ -119,7 +144,9 @@ func (s *Service) ListAdmin(ctx context.Context) ([]AdminDemoQuiz, error) {
 		`SELECT q.id, q.title, q.description, q.domain, q.subdomain, q.question_count, q.created_at,
 		        COUNT(*) FILTER (WHERE e.event_type = 'start')    AS starts,
 		        COUNT(*) FILTER (WHERE e.event_type = 'complete') AS completions,
-		        COALESCE(AVG(e.score_pct) FILTER (WHERE e.event_type = 'complete'), 0) AS avg_score
+		        COALESCE(AVG(e.score_pct) FILTER (WHERE e.event_type = 'complete'), 0) AS avg_score,
+		        COUNT(*) FILTER (WHERE e.event_type = 'register') AS registrations,
+		        q.demo_live
 		 FROM quizzes q
 		 LEFT JOIN demo_events e ON e.quiz_id = q.id
 		 WHERE q.is_demo = true AND q.deleted_at IS NULL
@@ -134,11 +161,15 @@ func (s *Service) ListAdmin(ctx context.Context) ([]AdminDemoQuiz, error) {
 	for rows.Next() {
 		var q AdminDemoQuiz
 		if err := rows.Scan(&q.ID, &q.Title, &q.Description, &q.Domain, &q.Subdomain,
-			&q.QuestionCount, &q.CreatedAt, &q.Starts, &q.Completions, &q.AvgScorePct); err != nil {
+			&q.QuestionCount, &q.CreatedAt, &q.Starts, &q.Completions, &q.AvgScorePct,
+			&q.Registrations, &q.Live); err != nil {
 			return nil, err
 		}
 		if q.Starts > 0 {
 			q.CompletionRate = float64(q.Completions) / float64(q.Starts) * 100
+		}
+		if q.Completions > 0 {
+			q.ConversionRate = float64(q.Registrations) / float64(q.Completions) * 100
 		}
 		out = append(out, q)
 	}

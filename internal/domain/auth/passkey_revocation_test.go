@@ -22,11 +22,11 @@ func TestMintedTokensCarryGeneration(t *testing.T) {
 	s := testService()
 
 	for _, gen := range []int{0, 1, 42} {
-		access, err := s.mintAccessToken("uid-1", "a@example.com", gen)
+		access, err := s.mintAccessToken("uid-1", "a@example.com", gen, "sess-test")
 		if err != nil {
 			t.Fatalf("mintAccessToken: %v", err)
 		}
-		refresh, err := s.mintRefreshToken("uid-1", "a@example.com", gen)
+		refresh, err := s.mintRefreshToken("uid-1", "a@example.com", gen, "sess-test")
 		if err != nil {
 			t.Fatalf("mintRefreshToken: %v", err)
 		}
@@ -66,7 +66,7 @@ func TestTokenGenerationDefaultsToZeroWhenClaimAbsent(t *testing.T) {
 
 func TestPasskeyRefreshSubjectReturnsGeneration(t *testing.T) {
 	s := testService()
-	raw, err := s.mintRefreshToken("uid-9", "b@example.com", 5)
+	raw, err := s.mintRefreshToken("uid-9", "b@example.com", 5, "sess-test")
 	if err != nil {
 		t.Fatalf("mintRefreshToken: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestPasskeyRefreshSubjectReturnsGeneration(t *testing.T) {
 	}
 
 	// An access token is not a refresh token, and must not be accepted as one.
-	access, _ := s.mintAccessToken("uid-9", "b@example.com", 5)
+	access, _ := s.mintAccessToken("uid-9", "b@example.com", 5, "sess-test")
 	if _, _, ok := s.PasskeyRefreshSubject(access); ok {
 		t.Error("an access token was accepted as a passkey refresh token")
 	}

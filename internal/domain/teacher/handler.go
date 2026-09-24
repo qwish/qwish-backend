@@ -498,7 +498,14 @@ func (h *Handler) ListClasses(w http.ResponseWriter, r *http.Request) {
 	teacherID := middleware.GetUserID(r)
 	rows, err := h.db.Query(r.Context(), `
 		SELECT g.id, g.name, g.description, g.invite_code, g.archived_at, g.created_at,
-		       (SELECT COUNT(*) FROM group_students gs WHERE gs.group_id=g.id) AS student_count
+		       (SELECT COUNT(DISTINCT gs.user_id)
+		          FROM group_students gs
+		          JOIN users u ON u.id=gs.user_id
+		             AND u.role='student' AND u.deleted_at IS NULL
+		          JOIN enrollments e ON e.user_id=gs.user_id
+		             AND e.institution_id=g.institution_id
+		             AND e.status IN ('active','suspended')
+		         WHERE gs.group_id=g.id) AS student_count
 		FROM groups g
 		JOIN group_teachers gt ON gt.group_id=g.id
 		WHERE gt.user_id=$1 AND g.archived_at IS NULL
@@ -549,7 +556,14 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 	// Class details + roster size + average, in one round-trip.
 	h.db.QueryRow(r.Context(), `SELECT
 		g.name, g.description, g.invite_code, g.created_at,
-		(SELECT COUNT(*) FROM group_students WHERE group_id=$1),
+		(SELECT COUNT(DISTINCT gs.user_id)
+		   FROM group_students gs
+		   JOIN users u ON u.id=gs.user_id
+		      AND u.role='student' AND u.deleted_at IS NULL
+		   JOIN enrollments e ON e.user_id=gs.user_id
+		      AND e.institution_id=g.institution_id
+		      AND e.status IN ('active','suspended')
+		  WHERE gs.group_id=$1),
 		(SELECT COALESCE(AVG(qa.score_pct),0) FROM quiz_attempts qa
 		 JOIN group_students gs ON gs.user_id=qa.user_id
 		 WHERE gs.group_id=$1 AND qa.status='completed')
@@ -564,8 +578,10 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 		                    AND completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)),0) AS avg_score
 		FROM users u
 		JOIN group_students gs ON gs.user_id=u.id
-		JOIN enrollments e ON e.user_id = u.id AND e.status IN ('active','suspended')
-		WHERE gs.group_id=$1 AND u.deleted_at IS NULL
+		JOIN groups g ON g.id=gs.group_id
+		JOIN enrollments e ON e.user_id = u.id
+		 AND e.institution_id=g.institution_id AND e.status IN ('active','suspended')
+		WHERE gs.group_id=$1 AND u.role='student' AND u.deleted_at IS NULL
 		ORDER BY u.display_name`, classID)
 	defer sRows.Close()
 	// enrollment_id is what the panel needs to propose a correction; a class

@@ -20,7 +20,7 @@ func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 func (h *Handler) GetPack(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
 	since := r.URL.Query().Get("since")
-	pack, changed, err := h.svc.BuildPack(r.Context(), instID, since)
+	pack, changed, err := h.svc.BuildPack(r.Context(), middleware.GetUserID(r), instID, since)
 	if err != nil {
 		middleware.InternalError(w)
 		return

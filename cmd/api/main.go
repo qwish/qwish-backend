@@ -348,6 +348,8 @@ func main() {
 				r.Get("/quizzes", demoH.List)
 				r.Get("/quizzes/{quizId}", demoH.Questions)
 				r.With(mw.RateLimit(30, 10*time.Minute)).Post("/quizzes/{quizId}/score", demoH.Score)
+				// Called by the website/app after a visitor who played a demo signs up.
+				r.With(mw.RateLimit(10, 10*time.Minute)).Post("/quizzes/{quizId}/registered", demoH.Registered)
 			})
 
 			// ------ AUTH (public) ------
@@ -508,6 +510,8 @@ func main() {
 
 				// Enrollment: claim a roster row, or join a class directly.
 				// A student with neither is institution-less and stays valid.
+				r.With(mw.RequireRole("student")).Post("/students/join/preview", enrollmentStudentH.PreviewJoin)
+				r.With(mw.RequireRole("student")).Post("/students/join/confirm", enrollmentStudentH.ConfirmJoin)
 				r.Post("/students/claim", enrollmentStudentH.Claim)
 				r.Post("/students/join-class", enrollmentStudentH.JoinClass)
 				r.Get("/users/me/enrollment", enrollmentStudentH.Mine)
@@ -726,6 +730,8 @@ func main() {
 				// ---- Super Admin routes ----
 				r.Route("/admin", func(r chi.Router) {
 					r.Use(mw.RequireRole("super_admin", "moderator", "support_agent"))
+					// Records console sessions and refuses revoked ones (migration 071).
+					r.Use(mw.TrackAdminSessions(pool))
 
 					// Overview (all roles)
 					r.Get("/overview", adminH.Overview)
@@ -855,6 +861,29 @@ func main() {
 					r.With(mw.RequireRole("super_admin")).Patch("/admin-accounts/{adminId}", adminH.UpdateAdminAccount)
 					r.With(mw.RequireRole("super_admin")).Delete("/admin-accounts/{adminId}", adminH.DeleteAdminAccount)
 					r.With(mw.RequireRole("super_admin")).Post("/admin-accounts/{adminId}/resend", adminH.ResendAdminInvite)
+					r.With(mw.RequireRole("super_admin")).Post("/admin-accounts/{adminId}/reset-passkeys", adminH.ResetAdminPasskeys)
+
+					// Console redesign (migration 071)
+					r.Get("/health", adminH.Health)
+					r.Get("/me/sessions", adminH.MySessions)
+					r.Post("/me/sessions/revoke-others", adminH.RevokeOtherSessions)
+					r.Post("/me/sessions/{sessionId}/revoke", adminH.RevokeMySession)
+					r.Get("/security-policy", adminH.GetSecurityPolicy)
+					r.With(mw.RequireRole("super_admin")).Put("/security-policy", adminH.PutSecurityPolicy)
+					r.Get("/institutions/{institutionId}/duplicates", adminH.InstitutionDuplicates)
+					r.Get("/institutions/{institutionId}/point-rules", adminH.InstitutionPointRules)
+					r.With(mw.RequireRole("super_admin")).Put("/institutions/{institutionId}/multiplier", adminH.SetInstitutionMultiplier)
+					r.Get("/students/{userId}/profile", adminH.StudentProfile)
+					r.Get("/student-scores", adminH.StudentScores)
+					r.Get("/teacher-stats", adminH.TeacherStats)
+					r.Get("/users/{userId}/ledger", adminH.UserLedger)
+					r.With(mw.RequireRole("super_admin", "moderator")).Get("/reports/{reportId}/evidence", adminH.ReportEvidence)
+					r.Patch("/contact-submissions/{id}", adminH.UpdateContactSubmission)
+					r.Get("/assignees", adminH.Assignees)
+					r.With(mw.RequireRole("super_admin")).Get("/points-reserve", adminH.GetPointsReserve)
+					r.With(mw.RequireRole("super_admin")).Put("/points-reserve", adminH.PutPointsReserve)
+					r.With(mw.RequireRole("super_admin", "moderator")).Post("/announcements/estimate", adminH.EstimateAnnouncementReach)
+					r.With(mw.RequireRole("super_admin")).Patch("/demo/quizzes/{quizId}", demoH.AdminSetLive)
 				})
 			})
 		})

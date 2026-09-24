@@ -12,6 +12,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -262,17 +263,20 @@ func (s *Service) consumeChallenge(ctx context.Context, subject, purpose string)
 // middleware verifies the signature against SUPABASE_JWT_SECRET and resolves the
 // admin via the `sub` (supabase_uid) claim, so a passkey session is accepted by
 // every protected route exactly like an OTP session.
-func (s *Service) mintAccessToken(supabaseUID, email string, gen int) (string, error) {
+func (s *Service) mintAccessToken(supabaseUID, email string, gen int, sid string) (string, error) {
 	now := time.Now()
 	claims := jwt.MapClaims{
-		"sub":   supabaseUID,
-		"email": email,
-		"role":  "authenticated",
-		"aud":   "authenticated",
-		"iss":   middleware.SupabaseIssuer(s.cfg.SupabaseURL),
-		"iat":   now.Unix(),
-		"exp":   now.Add(passkeyAccessTTL).Unix(),
-		"amr":   []map[string]any{{"method": "webauthn"}},
+		// Stable across refreshes, like Supabase's own session_id, so the
+		// console can list and revoke this session (migrations/071).
+		"session_id": sid,
+		"sub":        supabaseUID,
+		"email":      email,
+		"role":       "authenticated",
+		"aud":        "authenticated",
+		"iss":        middleware.SupabaseIssuer(s.cfg.SupabaseURL),
+		"iat":        now.Unix(),
+		"exp":        now.Add(passkeyAccessTTL).Unix(),
+		"amr":        []map[string]any{{"method": "webauthn"}},
 		// Session generation. The auth middleware compares this against the
 		// account's token_generation column, so bumping that column invalidates
 		// this token within the request that follows — that is the kill switch.
@@ -284,24 +288,30 @@ func (s *Service) mintAccessToken(supabaseUID, email string, gen int) (string, e
 
 // mintRefreshToken issues our own refresh JWT (distinct `typ`) so /auth/refresh
 // can renew a passkey session without involving Supabase.
-func (s *Service) mintRefreshToken(supabaseUID, email string, gen int) (string, error) {
+func (s *Service) mintRefreshToken(supabaseUID, email string, gen int, sid string) (string, error) {
 	now := time.Now()
 	claims := jwt.MapClaims{
-		"sub":   supabaseUID,
-		"email": email,
-		"typ":   "passkey_refresh",
-		"iat":   now.Unix(),
-		"exp":   now.Add(passkeyRefreshTTL).Unix(),
-		"gen":   gen,
+		"session_id": sid,
+		"sub":        supabaseUID,
+		"email":      email,
+		"typ":        "passkey_refresh",
+		"iat":        now.Unix(),
+		"exp":        now.Add(passkeyRefreshTTL).Unix(),
+		"gen":        gen,
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.cfg.SupabaseJWTSecret))
 }
 
 func (s *Service) mintSession(supabaseUID, email string, gen int) (access, refresh string, err error) {
-	if access, err = s.mintAccessToken(supabaseUID, email, gen); err != nil {
+	return s.mintSessionWithID(supabaseUID, email, gen, uuid.NewString())
+}
+
+// mintSessionWithID re-mints an existing session (a refresh), keeping its id.
+func (s *Service) mintSessionWithID(supabaseUID, email string, gen int, sid string) (access, refresh string, err error) {
+	if access, err = s.mintAccessToken(supabaseUID, email, gen, sid); err != nil {
 		return "", "", err
 	}
-	if refresh, err = s.mintRefreshToken(supabaseUID, email, gen); err != nil {
+	if refresh, err = s.mintRefreshToken(supabaseUID, email, gen, sid); err != nil {
 		return "", "", err
 	}
 	return access, refresh, nil
@@ -411,8 +421,15 @@ func (s *Service) TryPasskeyRefresh(ctx context.Context, refreshToken string) (a
 	if n, err := s.countCredentials(ctx, admin.ID); err != nil || n == 0 {
 		return "", "", false
 	}
+	// A session revoked from the console can't be refreshed back to life.
+	sid, _ := claims["session_id"].(string)
+	if sid == "" {
+		sid = uuid.NewString()
+	} else if s.sessionRevoked(ctx, sid) {
+		return "", "", false
+	}
 
-	a, r, err := s.mintSession(admin.SupabaseUID, admin.Email, admin.TokenGeneration)
+	a, r, err := s.mintSessionWithID(admin.SupabaseUID, admin.Email, admin.TokenGeneration, sid)
 	if err != nil {
 		return "", "", false
 	}
@@ -827,4 +844,24 @@ func (h *Handler) PasskeyLoginFinishDiscoverable(w http.ResponseWriter, r *http.
 	}
 	h.svc.touchCredential(r.Context(), cred)
 	h.writePasskeySession(w, resolved)
+}
+
+// sessionRevoked reports whether a console session was revoked. A lookup error
+// counts as not revoked: the auth middleware re-checks on every request.
+func (s *Service) sessionRevoked(ctx context.Context, sid string) bool {
+	var revoked bool
+	_ = s.db.QueryRow(ctx,
+		`SELECT revoked_at IS NOT NULL FROM admin_sessions WHERE session_id = $1`, sid).Scan(&revoked)
+	return revoked
+}
+
+// PasskeyRequiredForAdmin reports whether the "require admin passkeys" policy is
+// on and this Supabase identity is an administrator who has enrolled one.
+func (s *Service) PasskeyRequiredForAdmin(ctx context.Context, supabaseUID string) bool {
+	var required bool
+	_ = s.db.QueryRow(ctx, `
+		SELECT COALESCE((SELECT value = 'true'::jsonb FROM platform_settings WHERE key = 'require_admin_passkeys'), false)
+		   AND EXISTS (SELECT 1 FROM admin_accounts a JOIN webauthn_credentials c ON c.admin_id = a.id
+		                WHERE a.supabase_uid::text = $1 AND a.deleted_at IS NULL)`, supabaseUID).Scan(&required)
+	return required
 }

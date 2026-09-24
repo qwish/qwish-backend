@@ -334,8 +334,9 @@ func (h *Handler) SetStatus(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Status string `json:"status"`
 	}
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&in) != nil || (in.Status != "published" && in.Status != "closed") {
-		middleware.BadRequest(w, "status must be published or closed")
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&in) != nil ||
+		(in.Status != "published" && in.Status != "closed" && in.Status != "archived") {
+		middleware.BadRequest(w, "status must be published, closed or archived")
 		return
 	}
 	tag, err := h.db.Exec(r.Context(), `UPDATE anonymous_surveys SET status=$1,updated_at=now() WHERE id=$2`, in.Status, chi.URLParam(r, "surveyId"))

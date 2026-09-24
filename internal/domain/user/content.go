@@ -14,6 +14,7 @@ type AppContentItem struct {
 	Body      *string    `json:"body,omitempty"`
 	CTALabel  *string    `json:"cta_label,omitempty"`
 	CTAURL    *string    `json:"cta_url,omitempty"`
+	ImageURL  *string    `json:"image_url,omitempty"`
 	StartsAt  *time.Time `json:"starts_at,omitempty"`
 	EndsAt    *time.Time `json:"ends_at,omitempty"`
 }
@@ -24,7 +25,7 @@ var ErrInvalidContentEvent = errors.New("invalid content event")
 // see. Audience, lifecycle and institution checks live here, never in the app.
 func (s *Service) GetAppContent(ctx context.Context, userID, role, instID string) ([]AppContentItem, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT p.id, 'promo', p.type, p.title, p.body, p.cta_label, p.cta_url, p.starts_at, p.ends_at
+		SELECT p.id, 'promo', p.type, p.title, p.body, p.cta_label, p.cta_url, p.image_url, p.starts_at, p.ends_at
 		  FROM promotional_content p
 		 WHERE p.status='active'
 		   AND (p.starts_at IS NULL OR p.starts_at <= now())
@@ -50,7 +51,7 @@ func (s *Service) GetAppContent(ctx context.Context, userID, role, instID string
 		SELECT a.id, 'announcement',
 		       CASE channel WHEN 'in_app_banner' THEN 'announcement_banner' ELSE 'announcement_notification' END,
 		       a.title, a.body,
-		       a.cta_label, a.cta_url, COALESCE(a.scheduled_at,a.created_at), NULL
+		       a.cta_label, a.cta_url, NULL, COALESCE(a.scheduled_at,a.created_at), NULL
 		  FROM announcements a
 		 CROSS JOIN LATERAL unnest(a.delivery_types) AS channel
 		 WHERE (a.status='sent' OR (a.status='scheduled' AND (a.scheduled_at IS NULL OR a.scheduled_at <= now())))
@@ -76,7 +77,7 @@ func (s *Service) GetAppContent(ctx context.Context, userID, role, instID string
 	for rows.Next() {
 		var item AppContentItem
 		if err := rows.Scan(&item.ID, &item.Kind, &item.Placement, &item.Title, &item.Body,
-			&item.CTALabel, &item.CTAURL, &item.StartsAt, &item.EndsAt); err != nil {
+			&item.CTALabel, &item.CTAURL, &item.ImageURL, &item.StartsAt, &item.EndsAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

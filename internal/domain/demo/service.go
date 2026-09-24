@@ -59,7 +59,7 @@ func (s *Service) List(ctx context.Context) ([]DemoQuiz, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT id, title, description, domain, subdomain, question_count
 		 FROM quizzes
-		 WHERE is_demo = true AND deleted_at IS NULL
+		 WHERE is_demo = true AND demo_live AND deleted_at IS NULL
 		 ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -138,8 +138,9 @@ func grade(questions []quiz.Question, answers []Answer, cfg *scoring.Config) *Sc
 
 func (s *Service) assertDemo(ctx context.Context, quizID string) error {
 	var isDemo bool
+	// A demo switched off by an admin answers exactly like a missing one.
 	err := s.db.QueryRow(ctx,
-		`SELECT is_demo FROM quizzes WHERE id = $1 AND deleted_at IS NULL`, quizID).Scan(&isDemo)
+		`SELECT is_demo AND demo_live FROM quizzes WHERE id = $1 AND deleted_at IS NULL`, quizID).Scan(&isDemo)
 	if err != nil {
 		return ErrNotDemo // not found or bad id → treat as not-a-demo
 	}

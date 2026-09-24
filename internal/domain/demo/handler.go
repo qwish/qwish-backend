@@ -116,3 +116,38 @@ func (h *Handler) AdminAnalytics(w http.ResponseWriter, r *http.Request) {
 	}
 	middleware.JSON(w, http.StatusOK, a)
 }
+
+// POST /api/v1/demo/quizzes/{quizId}/registered — called by the website/app
+// once a visitor who played this demo creates an account.
+func (h *Handler) Registered(w http.ResponseWriter, r *http.Request) {
+	if err := h.svc.LogRegistration(r.Context(), chi.URLParam(r, "quizId")); err != nil {
+		if errors.Is(err, ErrNotDemo) {
+			middleware.NotFound(w, "quiz")
+			return
+		}
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]bool{"recorded": true})
+}
+
+// PATCH /api/v1/admin/demo/quizzes/{quizId} — {"live": bool}
+func (h *Handler) AdminSetLive(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Live *bool `json:"live"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Live == nil {
+		middleware.BadRequest(w, "live is required")
+		return
+	}
+	ok, err := h.svc.SetLive(r.Context(), chi.URLParam(r, "quizId"), *req.Live)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	if !ok {
+		middleware.NotFound(w, "demo quiz")
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]bool{"live": *req.Live})
+}

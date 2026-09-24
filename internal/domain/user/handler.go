@@ -1,10 +1,10 @@
 package user
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -575,59 +575,20 @@ func (h *Handler) UpdateMyLearningPreferences(w http.ResponseWriter, r *http.Req
 // GET /api/v1/users/me/report-card
 func (h *Handler) GetMyReportCardPDF(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.GetUserID(r)
-	profile, err := h.svc.GetProfile(r.Context(), userID)
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	report, err := h.svc.GetLearningReport(ctx, userID)
 	if err != nil {
-		middleware.NotFound(w, "user")
+		if errors.Is(err, pgx.ErrNoRows) {
+			middleware.NotFound(w, "user")
+		} else {
+			middleware.InternalError(w)
+		}
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/pdf")
-	w.Header().Set("Content-Disposition", `attachment; filename="report-card.pdf"`)
-
-	// Minimal valid PDF structure with dynamic user stats
-	streamContent := fmt.Sprintf(`BT
-/F1 22 Tf
-50 750 Td
-(Qwish Verified Skill Report Card) Tj
-/F1 12 Tf
-0 -40 Td
-(Name: %s) Tj
-0 -20 Td
-(Email: %s) Tj
-0 -20 Td
-(Total Points: %d) Tj
-0 -20 Td
-(Current Streak: %d days) Tj
-ET`, profile.DisplayName, profile.Email, profile.TotalPoints, profile.CurrentStreak)
-
-	pdfData := fmt.Sprintf(`%%PDF-1.4
-1 0 obj
-<< /Type /Catalog /Pages 2 0 R >>
-endobj
-2 0 obj
-<< /Type /Pages /Kids [3 0 R] /Count 1 >>
-endobj
-3 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> /Contents 4 0 R >>
-endobj
-4 0 obj
-<< /Length %d >>
-stream
-%s
-endstream
-endobj
-xref
-0 5
-0000000000 65535 f 
-0000000009 00000 n 
-0000000058 00000 n 
-0000000115 00000 n 
-0000000282 00000 n 
-trailer
-<< /Size 5 /Root 1 0 R >>
-startxref
-450
-%%%%EOF`, len(streamContent), streamContent)
-
-	w.Write([]byte(pdfData))
+	w.Header().Set("Content-Disposition", `attachment; filename="qwish-learning-report.pdf"`)
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Write(renderLearningReport(report))
 }

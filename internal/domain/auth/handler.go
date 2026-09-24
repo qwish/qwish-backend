@@ -154,6 +154,15 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Organisation policy: once passkeys are required, an administrator who
+	// has one must use it. Admins without a passkey can still use a code so
+	// they can enrol one — refusing them would lock them out.
+	if h.svc.PasskeyRequiredForAdmin(r.Context(), uid) {
+		middleware.Error(w, http.StatusForbidden, "PASSKEY_REQUIRED",
+			"your organisation requires administrators to sign in with a passkey")
+		return
+	}
+
 	existingUser, err := h.svc.GetUserForLogin(r.Context(), uid, verifiedEmail)
 	if err == nil {
 		// A teacher awaiting institution verification cannot sign in yet. Return

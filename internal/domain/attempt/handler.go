@@ -2,19 +2,24 @@ package attempt
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/qwish/backend/internal/middleware"
+	"github.com/qwish/backend/internal/playintegrity"
 )
 
 type Handler struct {
-	svc *Service
+	svc       *Service
+	integrity *playintegrity.Verifier
 }
 
 func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
+
+func (h *Handler) SetIntegrityVerifier(v *playintegrity.Verifier) { h.integrity = v }
 
 // POST /api/v1/quizzes/:quizId/attempts
 func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +93,42 @@ func (h *Handler) RevealClue(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/attempts/:attemptId/complete
 func (h *Handler) Complete(w http.ResponseWriter, r *http.Request) {
-	resp, err := h.svc.Complete(r.Context(), middleware.GetUserID(r), chi.URLParam(r, "attemptId"))
+	attemptID := chi.URLParam(r, "attemptId")
+	if h.integrity != nil && h.integrity.Mode() != playintegrity.Off {
+		var input struct {
+			IntegrityToken string `json:"integrity_token"`
+		}
+		if r.Body != nil && r.ContentLength != 0 {
+			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&input); err != nil {
+				middleware.BadRequest(w, "invalid completion payload")
+				return
+			}
+		}
+		if input.IntegrityToken != "" {
+			result, err := h.integrity.Verify(r.Context(), attemptID, input.IntegrityToken)
+			if err != nil {
+				log.Printf("[play-integrity] completion verification failed: %v", err)
+				if h.integrity.Mode() == playintegrity.Enforce {
+					middleware.Error(w, http.StatusForbidden, "INTEGRITY_FAILED", "This quiz completion could not be verified. Please retry from the Play Store app.")
+					return
+				}
+			} else {
+				log.Printf("[play-integrity] trusted=%t app=%s license=%s device=%v sdk=%d activity=%s protect=%s access=%v risk=%v", result.Trusted, result.App, result.License, result.Device, result.SDKVersion, result.Activity, result.PlayProtect, result.AppAccess, result.RiskFlags)
+				if !result.Trusted && h.integrity.Mode() == playintegrity.Enforce {
+					middleware.Error(w, http.StatusForbidden, "INTEGRITY_FAILED", "This quiz completion could not be verified. Please use the Play Store app on a certified device.")
+					return
+				}
+			}
+		} else if h.integrity.Mode() == playintegrity.Enforce {
+			middleware.Error(w, http.StatusForbidden, "INTEGRITY_REQUIRED", "Update the app to complete this quiz.")
+			return
+		} else {
+			log.Printf("[play-integrity] completion has no token")
+		}
+	}
+	resp, err := h.svc.Complete(r.Context(), middleware.GetUserID(r), attemptID)
 	if err != nil {
 		middleware.BadRequest(w, err.Error())
 		return

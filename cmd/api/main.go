@@ -45,6 +45,7 @@ import (
 	"github.com/qwish/backend/internal/domain/upload"
 	"github.com/qwish/backend/internal/domain/user"
 	mw "github.com/qwish/backend/internal/middleware"
+	"github.com/qwish/backend/internal/playintegrity"
 	"github.com/qwish/backend/internal/scheduler"
 	"github.com/qwish/backend/internal/storage"
 )
@@ -85,7 +86,12 @@ func main() {
 	demoH := demo.NewHandler(demoSvc)
 	obSessionH := onboardingsession.NewHandler(obSessionSvc)
 	authH.SetOnboardingClaimer(obSessionSvc)
+	integrityVerifier, err := playintegrity.New(cfg.PlayIntegrityMode, cfg.PlayIntegrityCredentials)
+	if err != nil {
+		log.Fatalf("Play Integrity configuration: %v", err)
+	}
 	attemptH := attempt.NewHandler(attemptSvc)
+	attemptH.SetIntegrityVerifier(integrityVerifier)
 	pointsH := points.NewHandler(pool)
 	streakH := streak.NewHandler(streakSvc)
 	leaderboardH := leaderboard.NewHandler(pool)

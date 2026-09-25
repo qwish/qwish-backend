@@ -31,19 +31,21 @@ type Quiz struct {
 	Status          string  `json:"status"`
 	// QuestionCount is the number delivered to a learner. Learner-facing
 	// queries must never expose the larger authoring-bank size.
-	QuestionCount   int        `json:"question_count"`
-	TakerCount      int        `json:"taker_count"`
-	EndsAt          *time.Time `json:"ends_at,omitempty"`
-	PublishedAt     *time.Time `json:"published_at,omitempty"`
-	RejectionReason *string    `json:"rejection_reason,omitempty"`
-	GroupID         *string    `json:"group_id,omitempty"`
-	Domain          *string    `json:"domain,omitempty"`
-	Subdomain       *string    `json:"subdomain,omitempty"`
-	ConceptID       *string    `json:"curriculum_concept_id,omitempty"`
-	CurriculumUnitIDs []string `json:"curriculum_unit_ids,omitempty"`
-	CurriculumQuestionMappingEnabled bool `json:"curriculum_question_mapping_enabled,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	QuestionTypes   []string   `json:"question_types,omitempty"`
+	QuestionCount                    int        `json:"question_count"`
+	TakerCount                       int        `json:"taker_count"`
+	EndsAt                           *time.Time `json:"ends_at,omitempty"`
+	PublishedAt                      *time.Time `json:"published_at,omitempty"`
+	RejectionReason                  *string    `json:"rejection_reason,omitempty"`
+	GroupID                          *string    `json:"group_id,omitempty"`
+	Domain                           *string    `json:"domain,omitempty"`
+	Subdomain                        *string    `json:"subdomain,omitempty"`
+	DomainLabel                      *string    `json:"domain_label,omitempty"`
+	SubdomainLabel                   *string    `json:"subdomain_label,omitempty"`
+	ConceptID                        *string    `json:"curriculum_concept_id,omitempty"`
+	CurriculumUnitIDs                []string   `json:"curriculum_unit_ids,omitempty"`
+	CurriculumQuestionMappingEnabled bool       `json:"curriculum_question_mapping_enabled,omitempty"`
+	CreatedAt                        time.Time  `json:"created_at"`
+	QuestionTypes                    []string   `json:"question_types,omitempty"`
 	// Peer stats over completed attempts; nil when nobody has finished the quiz.
 	AvgScorePct *float64 `json:"avg_score_pct,omitempty"`
 	AvgSeconds  *float64 `json:"avg_seconds,omitempty"`
@@ -67,17 +69,17 @@ type Question struct {
 }
 
 type CreateQuizReq struct {
-	Title       string     `json:"title"`
-	Description *string    `json:"description"`
-	Type        string     `json:"type"`
-	Visibility  string     `json:"visibility"`
-	GroupID     *string    `json:"group_id"`
-	EndsAt      *time.Time `json:"ends_at"`
-	Domain      *string    `json:"domain"`
-	Subdomain   *string    `json:"subdomain"`
-	ConceptID   *string    `json:"curriculum_concept_id"`
-	CurriculumUnitIDs []string `json:"curriculum_unit_ids"`
-	CurriculumQuestionMappingEnabled bool `json:"curriculum_question_mapping_enabled"`
+	Title                            string     `json:"title"`
+	Description                      *string    `json:"description"`
+	Type                             string     `json:"type"`
+	Visibility                       string     `json:"visibility"`
+	GroupID                          *string    `json:"group_id"`
+	EndsAt                           *time.Time `json:"ends_at"`
+	Domain                           *string    `json:"domain"`
+	Subdomain                        *string    `json:"subdomain"`
+	ConceptID                        *string    `json:"curriculum_concept_id"`
+	CurriculumUnitIDs                []string   `json:"curriculum_unit_ids"`
+	CurriculumQuestionMappingEnabled bool       `json:"curriculum_question_mapping_enabled"`
 }
 
 type DuplicateQuizReq struct {
@@ -149,7 +151,7 @@ func studentListSelect(userArg int) string {
 	return fmt.Sprintf(`SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status,
 		        LEAST(q.question_count, COALESCE(q.question_limit, q.question_count)) AS question_count,
-		        st.taker_count, q.ends_at, q.published_at, q.group_id, q.domain, q.subdomain, q.created_at,
+		        st.taker_count, q.ends_at, q.published_at, q.group_id, q.domain, q.subdomain, d.label, sd.label, q.created_at,
 		        st.avg_score_pct, st.avg_seconds,
 		        EXISTS (SELECT 1 FROM saved_quizzes sq WHERE sq.quiz_id=q.id AND sq.user_id=$%d AND q.type='knowledge_check') AS is_saved,
 		        EXISTS (SELECT 1 FROM quiz_attempts mine
@@ -158,6 +160,8 @@ func studentListSelect(userArg int) string {
 		 FROM quizzes q
 		 JOIN users u ON u.id = q.created_by
 		 LEFT JOIN institutions i ON i.id = u.institution_id
+		 LEFT JOIN domains d ON d.slug = q.domain
+		 LEFT JOIN subdomains sd ON sd.slug = q.subdomain
 		 LEFT JOIN LATERAL (`+attemptStatsSelect+`) st ON TRUE
 		 WHERE `, userArg, userArg)
 }
@@ -212,14 +216,24 @@ func (s *Service) ListForStudent(ctx context.Context, institutionID, quizType, s
 }
 
 func (s *Service) ListForStudentFiltered(ctx context.Context, institutionID, quizType, saved, search, domain, subdomain string, publishedAfter, publishedBefore *time.Time, userID string, page, limit int) ([]Quiz, int, error) {
-	return s.listForStudentFilteredScope(ctx, institutionID, "", quizType, saved, search, domain, subdomain, publishedAfter, publishedBefore, userID, page, limit)
+	return s.listForStudentFilteredScope(ctx, institutionID, "", quizType, saved, search, domain, subdomain, publishedAfter, publishedBefore, userID, "", false, page, limit)
 }
 
-func (s *Service) ListForStudentFilteredScope(ctx context.Context, institutionID, scope, quizType, saved, search, domain, subdomain string, publishedAfter, publishedBefore *time.Time, userID string, page, limit int) ([]Quiz, int, error) {
-	return s.listForStudentFilteredScope(ctx, institutionID, scope, quizType, saved, search, domain, subdomain, publishedAfter, publishedBefore, userID, page, limit)
+// StudentListSorts are the orders the student feed accepts. "" is newest.
+//
+//   - recommended: quizzes matching the learner's interests first, then by
+//     popularity — so a learner with no matches simply gets the most popular.
+//   - popular: most distinct completions first.
+//   - newest: most recently published first.
+var StudentListSorts = map[string]bool{"": true, "recommended": true, "popular": true, "newest": true}
+
+// ListForStudentFilteredScope lists the student feed. unplayed drops quizzes
+// the learner has already completed.
+func (s *Service) ListForStudentFilteredScope(ctx context.Context, institutionID, scope, quizType, saved, search, domain, subdomain string, publishedAfter, publishedBefore *time.Time, userID, sort string, unplayed bool, page, limit int) ([]Quiz, int, error) {
+	return s.listForStudentFilteredScope(ctx, institutionID, scope, quizType, saved, search, domain, subdomain, publishedAfter, publishedBefore, userID, sort, unplayed, page, limit)
 }
 
-func (s *Service) listForStudentFilteredScope(ctx context.Context, institutionID, scope, quizType, saved, search, domain, subdomain string, publishedAfter, publishedBefore *time.Time, userID string, page, limit int) ([]Quiz, int, error) {
+func (s *Service) listForStudentFilteredScope(ctx context.Context, institutionID, scope, quizType, saved, search, domain, subdomain string, publishedAfter, publishedBefore *time.Time, userID, sort string, unplayed bool, page, limit int) ([]Quiz, int, error) {
 	offset := (page - 1) * limit
 	var total int
 
@@ -240,6 +254,11 @@ func (s *Service) listForStudentFilteredScope(ctx context.Context, institutionID
 		baseWhere += fmt.Sprintf(` AND q.published_at < $%d`, len(args)+1)
 		args = append(args, *publishedBefore)
 	}
+	if unplayed {
+		baseWhere += fmt.Sprintf(` AND NOT EXISTS (SELECT 1 FROM quiz_attempts played
+			WHERE played.quiz_id = q.id AND played.user_id = $%d AND played.status = 'completed')`, len(args)+1)
+		args = append(args, userID)
+	}
 	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quizzes q WHERE `+baseWhere, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
@@ -248,9 +267,22 @@ func (s *Service) listForStudentFilteredScope(ctx context.Context, institutionID
 	args = append(args, userID)
 	argN := len(args) + 1
 	args = append(args, limit, offset)
+	// q.id breaks ties so OFFSET pages never repeat or skip a row.
+	order := `q.published_at DESC NULLS LAST, q.id`
+	switch sort {
+	case "popular":
+		order = `st.taker_count DESC NULLS LAST, q.published_at DESC NULLS LAST, q.id`
+	case "recommended":
+		// The interests subquery is uncorrelated, so Postgres runs it once.
+		// IS TRUE: a NULL subdomain makes the OR NULL, and DESC sorts NULLs
+		// first — which would bury the actual matches.
+		interests := fmt.Sprintf(`COALESCE((SELECT interest_domains FROM users WHERE id = $%d), '{}')`, userArgN)
+		order = `(q.domain = ANY(` + interests + `) OR q.subdomain = ANY(` + interests + `)) IS TRUE DESC,
+			st.taker_count DESC NULLS LAST, q.published_at DESC NULLS LAST, q.id`
+	}
 	rows, err := s.db.Query(ctx,
 		studentListSelect(userArgN)+baseWhere+
-			fmt.Sprintf(` ORDER BY q.published_at DESC LIMIT $%d OFFSET $%d`, argN, argN+1),
+			fmt.Sprintf(` ORDER BY %s LIMIT $%d OFFSET $%d`, order, argN, argN+1),
 		args...)
 	if err != nil {
 		return nil, 0, err
@@ -266,16 +298,18 @@ func (s *Service) GetByID(ctx context.Context, quizID string) (*Quiz, error) {
 		`SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status,
 		        LEAST(q.question_count, COALESCE(q.question_limit, q.question_count)) AS question_count,
-		        st.taker_count, q.ends_at, q.published_at, q.rejection_reason, q.group_id, q.domain, q.subdomain, q.curriculum_concept_id, q.curriculum_question_mapping_enabled, q.created_at,
+		        st.taker_count, q.ends_at, q.published_at, q.rejection_reason, q.group_id, q.domain, q.subdomain, d.label, sd.label, q.curriculum_concept_id, q.curriculum_question_mapping_enabled, q.created_at,
 		        st.avg_score_pct, st.avg_seconds
 		 FROM quizzes q
 		 JOIN users u ON u.id = q.created_by
 		 LEFT JOIN institutions i ON i.id = u.institution_id
+		 LEFT JOIN domains d ON d.slug = q.domain
+		 LEFT JOIN subdomains sd ON sd.slug = q.subdomain
 		 LEFT JOIN LATERAL (`+attemptStatsSelect+`) st ON TRUE
 		 WHERE q.id = $1 AND q.deleted_at IS NULL`, quizID,
 	).Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName, &q.Title, &q.Description,
 		&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt,
-		&q.RejectionReason, &q.GroupID, &q.Domain, &q.Subdomain, &q.ConceptID, &q.CurriculumQuestionMappingEnabled, &q.CreatedAt,
+		&q.RejectionReason, &q.GroupID, &q.Domain, &q.Subdomain, &q.DomainLabel, &q.SubdomainLabel, &q.ConceptID, &q.CurriculumQuestionMappingEnabled, &q.CreatedAt,
 		&q.AvgScorePct, &q.AvgSeconds)
 	if err != nil {
 		return nil, err
@@ -1228,9 +1262,10 @@ func (s *Service) ListForTeacher(ctx context.Context, teacherID, statusFilter, c
 	rows, err := s.db.Query(ctx,
 		`SELECT q.id, q.institution_id, q.created_by, '' as teacher, '' as institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
-		        0 AS taker_count, q.ends_at, q.published_at, q.group_id, q.domain, q.subdomain, q.created_at,
+		        0 AS taker_count, q.ends_at, q.published_at, q.group_id, q.domain, q.subdomain, d.label, sd.label, q.created_at,
 		        NULL::float8, NULL::float8, false AS is_saved, false AS has_played
-		 FROM quizzes q WHERE `+where+fmt.Sprintf(` ORDER BY q.created_at DESC LIMIT $%d OFFSET $%d`, n-1, n),
+		 FROM quizzes q LEFT JOIN domains d ON d.slug=q.domain LEFT JOIN subdomains sd ON sd.slug=q.subdomain
+		 WHERE `+where+fmt.Sprintf(` ORDER BY q.created_at DESC LIMIT $%d OFFSET $%d`, n-1, n),
 		args...)
 	if err != nil {
 		return nil, 0, err
@@ -1488,7 +1523,7 @@ func (s *Service) scanQuizRows(rows interface {
 	for rows.Next() {
 		var q Quiz
 		if err := rows.Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName, &q.Title, &q.Description,
-			&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.Domain, &q.Subdomain, &q.CreatedAt,
+			&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.Domain, &q.Subdomain, &q.DomainLabel, &q.SubdomainLabel, &q.CreatedAt,
 			&q.AvgScorePct, &q.AvgSeconds, &q.IsSaved, &q.HasPlayed); err != nil {
 			return nil, fmt.Errorf("scan quiz row: %w", err)
 		}

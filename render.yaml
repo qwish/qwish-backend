@@ -54,6 +54,12 @@ services:
         sync: false
       - key: FCM_SERVICE_ACCOUNT_JSON
         sync: false
+      # Play Integrity is off until a Cloud project is linked and Android
+      # builds include PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER. Start with observe.
+      - key: PLAY_INTEGRITY_MODE
+        sync: false
+      - key: PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON
+        sync: false
       # Cloudflare Turnstile; empty disables bot checks on the public forms.
       - key: TURNSTILE_SECRET
         sync: false

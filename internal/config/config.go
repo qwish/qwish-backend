@@ -26,6 +26,8 @@ type Config struct {
 	AllowedOrigins           string
 	FCMProjectID             string
 	FCMCredentialsJSON       string
+	PlayIntegrityMode        string // off, observe, enforce
+	PlayIntegrityCredentials string // service account JSON from linked Cloud project
 	AppURL                   string
 	SuperAdminURL            string // super-admin console; invite links redirect here
 	InstituteURL             string // institution dashboard; provision-admin invites redirect here
@@ -64,6 +66,8 @@ func Load() *Config {
 		AllowedOrigins:           getEnv("ALLOWED_ORIGINS", "*"),
 		FCMProjectID:             getEnv("FCM_PROJECT_ID", ""),
 		FCMCredentialsJSON:       getEnv("FCM_SERVICE_ACCOUNT_JSON", ""),
+		PlayIntegrityMode:        getEnv("PLAY_INTEGRITY_MODE", "off"),
+		PlayIntegrityCredentials: getEnv("PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON", ""),
 		AppURL:                   getEnv("APP_URL", "https://app.qwish.in"),
 		SuperAdminURL:            getEnv("SUPER_ADMIN_URL", "https://superadmin.qwish.in"),
 		InstituteURL:             getEnv("INSTITUTE_DASHBOARD_URL", "https://institute.qwish.in"),

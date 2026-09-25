@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -50,7 +51,12 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "scope must be public or institution")
 		return
 	}
-	quizzes, total, err := h.svc.ListForStudentFilteredScope(r.Context(), instID, scope, q.Get("type"), q.Get("saved"), q.Get("search"), q.Get("domain"), q.Get("subdomain"), publishedAfter, publishedBefore, userID, page, limit)
+	sort := q.Get("sort")
+	if !StudentListSorts[sort] {
+		middleware.BadRequest(w, "sort must be recommended, popular or newest")
+		return
+	}
+	quizzes, total, err := h.svc.ListForStudentFilteredScope(r.Context(), instID, scope, q.Get("type"), q.Get("saved"), q.Get("search"), q.Get("domain"), q.Get("subdomain"), publishedAfter, publishedBefore, userID, sort, q.Get("unplayed") == "true", page, limit)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -134,7 +140,7 @@ func (h *Handler) Unsave(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Share(w http.ResponseWriter, r *http.Request) {
 	quizID := chi.URLParam(r, "quizId")
 	middleware.JSON(w, http.StatusOK, map[string]string{
-		"deep_link": "quizapp://quiz/" + quizID,
+		"deep_link": "https://app.qwish.in/quiz/" + url.PathEscape(quizID),
 	})
 }
 

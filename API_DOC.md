@@ -1000,6 +1000,8 @@ Stages associate institution assessments with recorded enrollment/promotion peri
 |-------|-------------|
 | `type` | Filter by quiz type (`knowledge_check` practice, `play_and_win` ranked) |
 | `saved` | `true` to return only the authenticated user's saved practice quizzes |
+| `sort` | `recommended` (interest matches first, then most popular), `popular` (most completions), or `newest` (default) |
+| `unplayed` | `true` to drop quizzes the learner has already completed |
 | `page`, `limit` | Pagination |
 
 ### Response `200` (paginated)
@@ -1070,7 +1072,7 @@ Removes a quiz from the user's saved list.
 
 ### Response `200`
 ```json
-{ "deep_link": "quizapp://quiz/uuid" }
+{ "deep_link": "https://app.qwish.in/quiz/uuid" }
 ```
 
 ---

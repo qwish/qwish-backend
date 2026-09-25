@@ -256,7 +256,8 @@ func ConfigFromSnapshot(raw json.RawMessage) (*Config, error) {
 	return &cfg, nil
 }
 
-// QwishScoreFactors holds the inputs for calculating the Learning Score.
+// QwishScoreFactors holds the inputs for the Insights diagnostic components.
+// The published Qwish Score is the skill rating in rating.go.
 type QwishScoreFactors struct {
 	TotalCorrect      int
 	TotalQuestions    int
@@ -308,15 +309,6 @@ func CalculateQwishScoreComponents(f QwishScoreFactors) QwishScoreComponents {
 		c.Activity = 1 - math.Exp(-float64(f.ActivityCount)/activityCurveQuizzes)
 	}
 	return c
-}
-
-func CalculateQwishScore(f QwishScoreFactors) float64 {
-	if f.TotalQuestions == 0 {
-		return 0
-	}
-
-	c := CalculateQwishScoreComponents(f)
-	return c.Accuracy*50 + c.Difficulty*20 + c.Consistency*15 + c.Speed*10 + c.Activity*5
 }
 
 // GetQuestionDifficultyCoefficient returns the question-type difficulty prior.

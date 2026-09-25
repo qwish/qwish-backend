@@ -56,6 +56,11 @@ func main() {
 	defer pool.Close()
 
 	db.RunMigrations(pool)
+	if n, err := scoring.BackfillRatings(context.Background(), pool); err != nil {
+		log.Printf("rating backfill failed: %v", err)
+	} else if n > 0 {
+		log.Printf("rating backfill: %d learners", n)
+	}
 
 	// Services
 	authSvc := auth.NewService(pool, cfg)

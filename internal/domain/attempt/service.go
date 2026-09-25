@@ -103,6 +103,10 @@ type CompleteResp struct {
 	// IsRepeatAttempt is true when the quiz is knowledge_check and the user
 	// has already completed it before. Points are 0 in this case.
 	IsRepeatAttempt bool `json:"is_repeat_attempt"`
+	// QwishScore is the skill rating after this attempt (100–900); the delta
+	// is 0 when every question had been seen before.
+	QwishScore      float64 `json:"qwish_score"`
+	QwishScoreDelta float64 `json:"qwish_score_delta"`
 }
 
 type QuestionBreakdownItem struct {
@@ -686,13 +690,9 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		cfg, _ = scoring.LoadConfig(ctx, s.db)
 	}
 
-	// One round trip for four independent scalars that used to cost four:
-	// the knowledge_check repeat guard, the current streak, the lifetime
-	// completed count, and the institution multiplier. They share no inputs, so
-	// a single SELECT of scalar subqueries is exactly equivalent and pays the
-	// network latency once instead of four times.
+	// One round trip for two independent scalars: the knowledge_check repeat
+	// guard and the institution multiplier.
 	var isRepeatAttempt bool
-	var currentStreak, activityCount int
 	var instMultiplier float64 = 1.0
 	if err := tx.QueryRow(ctx,
 		`SELECT
@@ -700,27 +700,27 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		     SELECT 1 FROM quiz_attempts
 		      WHERE quiz_id=$2 AND user_id=$1 AND status='completed' AND id <> $3
 		   ) ELSE false END,
-		   COALESCE((SELECT current_streak FROM streaks WHERE user_id=$1), 0),
-		   (SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed'),
 		   COALESCE((SELECT i.point_multiplier FROM users u
 		               JOIN institutions i ON i.id = u.institution_id
 		              WHERE u.id=$1), 1.0)`,
 		userID, quizID, attemptID, quizType,
-	).Scan(&isRepeatAttempt, &currentStreak, &activityCount, &instMultiplier); err != nil {
+	).Scan(&isRepeatAttempt, &instMultiplier); err != nil {
 		return nil, err
 	}
-	activityCount++ // count the attempt being completed right now
 
 	// Load all question responses with time_taken_ms and time_limit_seconds
 	rows, err := tx.Query(ctx,
 		`SELECT qr.question_id, qv.type, qv.correct_answer, qr.answer, qr.confidence_level, qr.clues_used, qr.combo_level, qr.points_earned,
-		        q.position, qv.prompt, qr.is_correct, qr.time_taken_ms, qv.time_limit_seconds, q.difficulty
+		        q.position, qv.prompt, qr.is_correct, q.difficulty, q.rating_b, q.rating_n,
+		        `+scoring.GuessFloorSQL+`,
+		        EXISTS (SELECT 1 FROM question_responses p JOIN quiz_attempts pa ON pa.id=p.attempt_id
+		                 WHERE pa.user_id=$2 AND pa.status='completed' AND p.question_id=qr.question_id)
 		 FROM question_responses qr
 		 JOIN questions q ON q.id = qr.question_id
 		 JOIN quiz_attempt_questions aq ON aq.attempt_id=qr.attempt_id AND aq.question_id=qr.question_id
 		 JOIN question_versions qv ON qv.id=aq.question_version_id
 		 WHERE qr.attempt_id=$1
-		 ORDER BY q.position`, attemptID)
+		 ORDER BY q.position`, attemptID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -728,10 +728,9 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 	var rawPoints int64
 	var totalCorrect int
 	var answered int
-	var speedSum float64
 	var totalDifficulty float64
-	var correctDifficulty float64
 	var breakdown []QuestionBreakdownItem
+	var ratingObs []scoring.RatingObs
 
 	for rows.Next() {
 		var qid, qtype, confLevel *string
@@ -740,11 +739,12 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		var prompt string
 		var isCorrect bool
 		var ptsEarned int64
-		var timeTakenMs *int
-		var timeLimitSeconds int
-		var qDifficulty float64
+		var qDifficulty, guess float64
+		var ratingB *float64
+		var ratingN int
+		var seenBefore bool
 
-		rows.Scan(&qid, &qtype, &correctAns, &studentAns, &confLevel, &cluesUsed, &comboLevel, &ptsEarned, &position, &prompt, &isCorrect, &timeTakenMs, &timeLimitSeconds, &qDifficulty)
+		rows.Scan(&qid, &qtype, &correctAns, &studentAns, &confLevel, &cluesUsed, &comboLevel, &ptsEarned, &position, &prompt, &isCorrect, &qDifficulty, &ratingB, &ratingN, &guess, &seenBefore)
 
 		rawPoints += ptsEarned
 		answered++
@@ -755,34 +755,18 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		// Derived per-question difficulty (refined nightly; read live — an
 		// attempt lasts minutes so mid-flight drift is negligible).
 		// ponytail: snapshot per-question difficulty only if that drift bites.
-		qDiff := qDifficulty
-		totalDifficulty += qDiff
+		totalDifficulty += qDifficulty
 
-		if isCorrect {
-			correctDifficulty += qDiff
-
-			// Calculate speed component (within reasonable time, avoiding random fast guessing)
-			tTaken := 0
-			if timeTakenMs != nil {
-				tTaken = *timeTakenMs
+		// Only a first sight of a question measures ability; repeats measure
+		// memory of it and would let practice on one quiz inflate the rating.
+		if !seenBefore && qid != nil {
+			b := scoring.SeedDifficulty(qDifficulty)
+			if ratingB != nil {
+				b = *ratingB
 			}
-			timeLimitMs := float64(timeLimitSeconds * 1000)
-			timeTaken := float64(tTaken)
-			var qSpeed float64
-			if timeLimitSeconds <= 0 {
-				// Untimed questions have no meaningful speed target.
-				qSpeed = 1.0
-			} else if timeTaken < 1000 {
-				qSpeed = 0.1 // avoid random fast guessing
-			} else if timeTaken <= timeLimitMs/3.0 {
-				qSpeed = 1.0 // optimal speed
-			} else {
-				qSpeed = (timeLimitMs - timeTaken) / (timeLimitMs - (timeLimitMs / 3.0))
-				if qSpeed < 0.1 {
-					qSpeed = 0.1
-				}
-			}
-			speedSum += qSpeed
+			ratingObs = append(ratingObs, scoring.RatingObs{
+				QuestionID: *qid, Correct: isCorrect, Guess: guess, B: b, QN: ratingN,
+			})
 		}
 
 		snippet := prompt
@@ -800,19 +784,16 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 	}
 	rows.Close() // Explicit close so tx is free for next statements
 
-	// Score percentage (calculated using the Qwish Score formula)
+	// score_pct is plain accuracy; ability lives in the rating below.
 	scorePct := 0.0
 	if totalQuestions > 0 {
-		factors := scoring.QwishScoreFactors{
-			TotalCorrect:      totalCorrect,
-			TotalQuestions:    totalQuestions,
-			Streak:            currentStreak,
-			ActivityCount:     activityCount,
-			SpeedSum:          speedSum,
-			TotalDifficulty:   totalDifficulty,
-			CorrectDifficulty: correctDifficulty,
-		}
-		scorePct = scoring.CalculateQwishScore(factors)
+		scorePct = float64(totalCorrect) / float64(totalQuestions) * 100
+	}
+
+	// Before the attempt UPDATE: its leaderboard trigger reads learner_ratings.
+	scoreBefore, scoreAfter, err := scoring.ApplyRatings(ctx, tx, userID, ratingObs)
+	if err != nil {
+		return nil, err
 	}
 
 	avgDifficulty := 0.0
@@ -951,6 +932,8 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		BadgesAwarded:      awarded,
 		QuestionBreakdown:  breakdown,
 		IsRepeatAttempt:    isRepeatAttempt,
+		QwishScore:         scoreAfter,
+		QwishScoreDelta:    scoreAfter - scoreBefore,
 	}, nil
 }
 

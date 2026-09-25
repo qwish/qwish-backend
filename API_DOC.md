@@ -623,6 +623,8 @@ Returns the authenticated user's rank and top-percentile across all scopes.
 | `distinct_quizzes_completed` | `int` | Authoritative progress toward leaderboard eligibility |
 | `leaderboard_unlocked` | `bool` | Students unlock at five different completed quizzes; non-student accounts are not ranked |
 
+All ranks here order by `qwish_score`, the same value the leaderboard uses.
+
 ---
 
 ## GET `/users/me/profile-views`
@@ -1215,11 +1217,19 @@ Finalises the attempt, calculates score, awards points and badges, updates strea
       "is_correct":       true,
       "points":           15
     }
-  ]
+  ],
+  "is_repeat_attempt":    false,
+  "qwish_score":          412.6,
+  "qwish_score_delta":    9.3
 }
 ```
 
+> `score_pct` is plain accuracy (`total_correct / total_questions × 100`).
 > `performance_badge`: `excellent` (≥75%), `good` (50–74%), `needs_work` (<50%)
+> `qwish_score` is the learner's skill rating after this attempt (100–900) and
+> `qwish_score_delta` the change it caused. Only questions the learner has never
+> answered before move it, so a delta of `0` on a retake is expected. See
+> **Qwish Score** under Insights.
 
 ---
 
@@ -3458,7 +3468,11 @@ Push alerts are delivered via FCM (existing `/users/me/devices` registration) an
 The same breakdown is emailed weekly to users with `email_weekly_insights=true`.
 
 ### GET `/users/me/insights/breakdown`
-Lifetime Qwish Score breakdown plus question-weighted domain/subdomain performance. `qwish_score` is the weighted sum of the five components, scaled to the 100–900 display range (every user starts at 100). `components` are lifetime fractions (0–1): accuracy 50%, difficulty 20%, consistency 15%, speed 10%, activity 5%. Each domain's `avg_score` is question-weighted accuracy (0–100); `low_sample` is true when fewer than 10 questions have been answered.
+Lifetime Qwish Score plus question-weighted domain/subdomain performance.
+
+**Qwish Score** is a skill rating on 100–900. Each learner has an ability estimate θ and uncertainty σ; each question has a difficulty on the same scale. Every first-time answer moves θ by how surprising it was (a correct answer on a hard question moves it a lot, on an easy one barely), and shrinks σ. The published value is the conservative `θ − 2σ`, so it rises gradually as evidence accumulates (a new learner starts near 200–300) and step sizes shrink with experience. Idle time widens σ slightly. Repeat answers, streaks, speed and activity do not affect it; those feed points/XP. Learners with no answers show 100.
+
+`components` are lifetime diagnostic fractions (0–1) for accuracy, difficulty, consistency, speed and activity; they no longer feed `qwish_score`. Each domain's `avg_score` is question-weighted accuracy (0–100); `low_sample` is true when fewer than 10 questions have been answered.
 ```json
 {
   "qwish_score": 737.1,

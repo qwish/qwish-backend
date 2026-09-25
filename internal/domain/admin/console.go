@@ -220,25 +220,15 @@ func (h *Handler) SetInstitutionMultiplier(w http.ResponseWriter, r *http.Reques
 
 // ── Learners ─────────────────────────────────────────────────────────────────
 
-// scoredStudents mirrors the recruiter Qwish Score (internal/domain/recruiter)
-// over every active student, without the recruiter-visibility filter: admins
-// see scores regardless of recruiter consent. The five factors use the last 90
-// days so a stale profile doesn't read as current.
+// scoredStudents reads the stored skill rating (the same Qwish Score recruiters
+// and the leaderboard see) over every active student, without the
+// recruiter-visibility filter. The five factors are 90-day diagnostics only;
+// they do not feed the score.
 const scoredStudents = `WITH attempt_stats AS (
 	SELECT user_id, COALESCE(SUM(total_correct),0)::float8 total_correct,
 	       COALESCE(SUM(total_questions),0)::float8 total_questions,
 	       COUNT(*)::float8 completed
 	  FROM quiz_attempts WHERE status='completed' GROUP BY user_id
-), response_stats AS (
-	SELECT a.user_id, COALESCE(SUM(q.difficulty),0)::float8 total_difficulty,
-	       COALESCE(SUM(q.difficulty) FILTER (WHERE qr.is_correct),0)::float8 correct_difficulty,
-	       COALESCE(AVG(CASE WHEN qr.time_taken_ms < 1000 THEN .1
-	         WHEN qr.time_taken_ms <= (q.time_limit_seconds*1000)/3.0 THEN 1.0
-	         ELSE GREATEST((q.time_limit_seconds*1000.0-qr.time_taken_ms)/
-	           NULLIF(q.time_limit_seconds*1000.0-q.time_limit_seconds*1000.0/3.0,0),.1)
-	       END) FILTER (WHERE qr.is_correct AND qr.time_taken_ms IS NOT NULL),0)::float8 speed
-	  FROM question_responses qr JOIN questions q ON q.id=qr.question_id
-	  JOIN quiz_attempts a ON a.id=qr.attempt_id AND a.status='completed' GROUP BY a.user_id
 ), recent AS (
 	SELECT a.user_id,
 	       COALESCE(SUM(a.total_correct),0)::float8 correct, COALESCE(SUM(a.total_questions),0)::float8 questions,
@@ -259,11 +249,7 @@ const scoredStudents = `WITH attempt_stats AS (
 	 GROUP BY a.user_id
 ), scored AS (
 	SELECT u.id,
-	       LEAST(900, GREATEST(100, 100 + 8 * (
-	         CASE WHEN COALESCE(a.total_questions,0)>0 THEN ((a.total_correct+5)/(a.total_questions+10))*50 ELSE 0 END +
-	         CASE WHEN COALESCE(rs.total_difficulty,0)>0 THEN rs.correct_difficulty/rs.total_difficulty*20 ELSE 0 END +
-	         (1-EXP(-COALESCE(u.current_streak,0)::float8/14))*15 + COALESCE(rs.speed,0)*10 +
-	         (1-EXP(-COALESCE(a.completed,0)/20))*5)))::float8 qwish_score,
+	       COALESCE(ls.qwish_score,100)::float8 qwish_score,
 	       COALESCE(a.completed,0)::int completed,
 	       CASE WHEN COALESCE(re.questions,0)>0 THEN re.correct/re.questions*100 ELSE 0 END accuracy,
 	       CASE WHEN COALESCE(rr.total_difficulty,0)>0 THEN rr.correct_difficulty/rr.total_difficulty*100 ELSE 0 END difficulty,
@@ -271,7 +257,8 @@ const scoredStudents = `WITH attempt_stats AS (
 	       COALESCE(rr.speed,0)*100 speed,
 	       (1-EXP(-COALESCE(re.completed,0)/20))*100 activity
 	  FROM users u
-	  LEFT JOIN attempt_stats a ON a.user_id=u.id LEFT JOIN response_stats rs ON rs.user_id=u.id
+	  LEFT JOIN attempt_stats a ON a.user_id=u.id
+	  LEFT JOIN leaderboard_scores ls ON ls.user_id=u.id
 	  LEFT JOIN recent re ON re.user_id=u.id LEFT JOIN recent_resp rr ON rr.user_id=u.id
 	 WHERE u.role='student' AND u.status='active' AND u.deleted_at IS NULL
 ), ranked AS (

@@ -523,10 +523,11 @@ func (s *Service) GetRank(ctx context.Context, userID, instID string) (*RankInfo
 	var ir, it, dr, dt int
 	err := s.db.QueryRow(ctx, `
 		WITH me AS (
-			SELECT total_points, domain, role FROM users WHERE id=$1
+			SELECT COALESCE(ls.qwish_score,100) score, u.domain, u.role
+			  FROM users u LEFT JOIN leaderboard_scores ls ON ls.user_id=u.id WHERE u.id=$1
 		), eligible AS (
-			SELECT u.id, u.total_points, u.domain, u.institution_id
-			  FROM users u
+			SELECT u.id, COALESCE(ls.qwish_score,100) score, u.domain, u.institution_id
+			  FROM users u LEFT JOIN leaderboard_scores ls ON ls.user_id=u.id
 			 WHERE u.status='active' AND u.role='student'
 			   AND (
 				SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa
@@ -537,11 +538,11 @@ func (s *Service) GetRank(ctx context.Context, userID, instID string) (*RankInfo
 			(SELECT domain FROM me),
 			(SELECT role FROM me),
 			(SELECT COUNT(DISTINCT quiz_id) FROM quiz_attempts WHERE user_id=$1 AND status='completed'),
-			(SELECT COUNT(*)+1 FROM eligible WHERE total_points>(SELECT total_points FROM me)),
+			(SELECT COUNT(*)+1 FROM eligible WHERE score>(SELECT score FROM me)),
 			(SELECT COUNT(*) FROM eligible),
-			(SELECT COUNT(*)+1 FROM eligible WHERE institution_id=NULLIF($2,'')::uuid AND total_points>(SELECT total_points FROM me)),
+			(SELECT COUNT(*)+1 FROM eligible WHERE institution_id=NULLIF($2,'')::uuid AND score>(SELECT score FROM me)),
 			(SELECT COUNT(*) FROM eligible WHERE institution_id=NULLIF($2,'')::uuid),
-			(SELECT COUNT(*)+1 FROM eligible WHERE LOWER(domain)=LOWER((SELECT domain FROM me)) AND total_points>(SELECT total_points FROM me)),
+			(SELECT COUNT(*)+1 FROM eligible WHERE LOWER(domain)=LOWER((SELECT domain FROM me)) AND score>(SELECT score FROM me)),
 			(SELECT COUNT(*) FROM eligible WHERE LOWER(domain)=LOWER((SELECT domain FROM me)))`,
 		userID, instID,
 	).Scan(&domain, &role, &ri.DistinctQuizzesCompleted, &ri.GlobalRank, &ri.GlobalTotal, &ir, &it, &dr, &dt)
@@ -1080,15 +1081,12 @@ func (s *Service) GetInsightsBreakdown(ctx context.Context, userID string) (*Ins
 		Activity:    scoreParts.Activity,
 	}
 
-	qwishScore := scaleQwish(scoring.CalculateQwishScore(scoring.QwishScoreFactors{
-		TotalCorrect:      int(totalCorrect),
-		TotalQuestions:    int(totalQuestions),
-		Streak:            streak,
-		ActivityCount:     completed,
-		SpeedSum:          speedAvg * float64(totalCorrect),
-		TotalDifficulty:   totalDiff,
-		CorrectDifficulty: correctDiff,
-	}))
+	// The published score is the skill rating; the components above are
+	// diagnostics only and no longer feed it.
+	qwishScore := 100.0
+	if err := s.db.QueryRow(ctx, `SELECT score FROM learner_ratings WHERE user_id=$1`, userID).Scan(&qwishScore); err != nil && err != pgx.ErrNoRows {
+		return nil, err
+	}
 
 	domains, err := s.domainPerformance(ctx, userID)
 	if err != nil {

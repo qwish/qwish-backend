@@ -6,21 +6,6 @@ import (
 	"github.com/qwish/backend/internal/domain/scoring"
 )
 
-func TestScaleQwish(t *testing.T) {
-	cases := []struct{ in, want float64 }{
-		{0, 100},   // fresh user starts at the floor
-		{100, 900}, // perfect weighted score hits the ceiling
-		{50, 500},  // midpoint
-		{-5, 100},  // clamped below
-		{150, 900}, // clamped above
-	}
-	for _, c := range cases {
-		if got := scaleQwish(c.in); got != c.want {
-			t.Errorf("scaleQwish(%v) = %v, want %v", c.in, got, c.want)
-		}
-	}
-}
-
 func TestQwishScoreUsesConfidenceAndSmoothEngagement(t *testing.T) {
 	base := scoring.QwishScoreFactors{
 		TotalCorrect: 5, TotalQuestions: 5, Streak: 1, ActivityCount: 1,

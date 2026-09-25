@@ -1167,12 +1167,12 @@ func (s *Service) domainPerformance(ctx context.Context, userID string) ([]Domai
 
 type TrendPoint struct {
 	Label string  `json:"label"`
-	Value float64 `json:"value"` // avg score_pct scaled to 100–900, carried forward
+	Value float64 `json:"value"` // Qwish Score at the end of the bucket
 }
 
-// GetScoreTrend returns bucketed average score_pct over time for the chart.
+// GetScoreTrend returns the Qwish Score as it stood at the end of each bucket.
 // range: "4w" → 4 weekly buckets, "12w" → 12 weekly, "all" → 12 monthly.
-// Empty buckets carry forward the previous value so the line stays continuous.
+// Quiet buckets repeat the latest earlier score; before any attempt it is 100.
 func (s *Service) GetScoreTrend(ctx context.Context, userID, rng string) ([]TrendPoint, error) {
 	unit, buckets := "week", 12
 	switch rng {
@@ -1192,12 +1192,12 @@ func (s *Service) GetScoreTrend(ctx context.Context, userID, rng string) ([]Tren
 		    ('1 ' || $1)::interval
 		  ) AS b
 		)
-		SELECT buckets.b, AVG(qa.score_pct)
+		SELECT buckets.b,
+		  (SELECT qa.qwish_score_after FROM quiz_attempts qa
+		    WHERE qa.user_id = $2 AND qa.status = 'completed' AND qa.qwish_score_after IS NOT NULL
+		      AND qa.completed_at < buckets.b + ('1 ' || $1)::interval
+		    ORDER BY qa.completed_at DESC LIMIT 1)
 		FROM buckets
-		LEFT JOIN quiz_attempts qa
-		  ON qa.user_id = $2 AND qa.status = 'completed'
-		  AND date_trunc($1, qa.completed_at) = buckets.b
-		GROUP BY buckets.b
 		ORDER BY buckets.b`, unit, userID, buckets)
 	if err != nil {
 		return nil, err
@@ -1205,17 +1205,17 @@ func (s *Service) GetScoreTrend(ctx context.Context, userID, rng string) ([]Tren
 	defer rows.Close()
 
 	out := make([]TrendPoint, 0, buckets)
-	var last float64
 	for rows.Next() {
 		var b time.Time
-		var avg *float64
-		if err := rows.Scan(&b, &avg); err != nil {
+		var score *float64
+		if err := rows.Scan(&b, &score); err != nil {
 			return nil, err
 		}
-		if avg != nil {
-			last = *avg
+		v := 100.0
+		if score != nil {
+			v = *score
 		}
-		out = append(out, TrendPoint{Label: trendLabel(b, unit), Value: round1(scaleQwish(last))})
+		out = append(out, TrendPoint{Label: trendLabel(b, unit), Value: round1(v)})
 	}
 	return out, nil
 }
@@ -1229,25 +1229,6 @@ func trendLabel(b time.Time, unit string) string {
 
 func round1(v float64) float64 {
 	return float64(int64(v*10+0.5)) / 10
-}
-
-// Qwish Score display range. The weighted formula yields 0–100; every user
-// starts at qwishScoreMin and tops out at qwishScoreMax.
-const (
-	qwishScoreMin = 100.0
-	qwishScoreMax = 900.0
-)
-
-// scaleQwish maps a 0–100 weighted score onto the [100, 900] display range.
-func scaleQwish(pct float64) float64 {
-	s := qwishScoreMin + pct/100*(qwishScoreMax-qwishScoreMin)
-	if s < qwishScoreMin {
-		return qwishScoreMin
-	}
-	if s > qwishScoreMax {
-		return qwishScoreMax
-	}
-	return s
 }
 
 func buildSuggestion(wi *WeeklyInsights) string {

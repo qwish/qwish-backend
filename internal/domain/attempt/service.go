@@ -826,7 +826,7 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		`WITH att AS (
 		   UPDATE quiz_attempts
 		      SET status='completed', score_pct=$1, points_delta=$2,
-		          total_correct=$3, total_questions=$4, completed_at=now()
+		          total_correct=$3, total_questions=$4, completed_at=now(), qwish_score_after=$9
 		    WHERE id=$5
 		 ), bal AS (
 		   UPDATE users
@@ -842,7 +842,7 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		   (SELECT total_points FROM users WHERE id=$6)
 		 )`,
 		scorePct, finalPoints, totalCorrect, totalQuestions, attemptID,
-		userID, isRepeatAttempt, expiresAt,
+		userID, isRepeatAttempt, expiresAt, scoreAfter,
 	).Scan(&newBalance)
 	if err != nil {
 		return nil, err

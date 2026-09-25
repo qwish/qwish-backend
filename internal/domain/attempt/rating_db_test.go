@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/domain/quiz"
 	"github.com/qwish/backend/internal/domain/streak"
+	"github.com/qwish/backend/internal/domain/user"
 )
 
 // Runs only with TEST_DATABASE_URL pointed at a migrated scratch database.
@@ -92,5 +93,19 @@ func TestCompleteUpdatesSkillRating(t *testing.T) {
 	second := play(4)
 	if second.QwishScoreDelta != 0 || second.QwishScore != first.QwishScore {
 		t.Fatalf("repeat moved rating: %+v", second)
+	}
+
+	// Every completed attempt records the rating it left behind, and the
+	// trend's latest bucket shows the current rating.
+	var recorded int
+	must("history", pool.QueryRow(ctx, `SELECT COUNT(*) FROM quiz_attempts
+		WHERE user_id=$1 AND status='completed' AND qwish_score_after=$2`, student, first.QwishScore).Scan(&recorded))
+	if recorded != 2 {
+		t.Fatalf("expected both attempts to record %v, got %d", first.QwishScore, recorded)
+	}
+	trend, err := user.NewService(pool).GetScoreTrend(ctx, student, "4w")
+	must("trend", err)
+	if last := trend[len(trend)-1].Value; math.Abs(last-first.QwishScore) > 0.05 {
+		t.Fatalf("trend ends at %v, rating is %v", last, first.QwishScore)
 	}
 }

@@ -3494,7 +3494,7 @@ Lifetime Qwish Score plus question-weighted domain/subdomain performance.
 ```
 
 ### GET `/users/me/insights/trend?range=4w|12w|all`
-Bucketed average `score_pct` over time for the insights chart, scaled to the same 100–900 range as `qwish_score`. `4w` → 4 weekly buckets, `12w` → 12 weekly, `all` → 12 monthly. Empty buckets carry the previous value forward so the line stays continuous.
+The learner's `qwish_score` as it stood at the end of each bucket, for the insights chart. `4w` → 4 weekly buckets, `12w` → 12 weekly, `all` → 12 monthly. Quiet buckets repeat the latest earlier score, and buckets before the first completed attempt show 100. The last bucket equals the current `qwish_score`.
 ```json
 [
   { "label": "5/12", "value": 724.8 },

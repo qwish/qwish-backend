@@ -155,10 +155,14 @@ func ApplyRatings(ctx context.Context, tx pgx.Tx, userID string, obs []RatingObs
 }
 
 // BackfillRatings replays every learner's first-time answers in submission
-// order when learner_ratings is empty. It is a no-op afterwards, and the
-// advisory lock stops two booting replicas from replaying at once.
+// order. With learner_ratings empty it seeds ratings and question difficulty;
+// either way it fills quiz_attempts.qwish_score_after for completed attempts
+// that lack it. A no-op once both are done, and the advisory lock stops two
+// booting replicas from replaying at once.
 // ponytail: whole history in memory, fine to ~millions of responses; batch by
-// user if it ever outgrows the boot window.
+// user if it ever outgrows the boot window. The replay orders answers, not
+// completions, so historical points can differ slightly from what a learner
+// saw live.
 func BackfillRatings(ctx context.Context, db *pgxpool.Pool) (int, error) {
 	tx, err := db.Begin(ctx)
 	if err != nil {
@@ -168,15 +172,17 @@ func BackfillRatings(ctx context.Context, db *pgxpool.Pool) (int, error) {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('backfill_learner_ratings'))`); err != nil {
 		return 0, err
 	}
-	var done bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM learner_ratings)`).Scan(&done); err != nil || done {
+	var haveRatings, needHistory bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM learner_ratings),
+		EXISTS (SELECT 1 FROM quiz_attempts WHERE status='completed' AND qwish_score_after IS NULL)`,
+	).Scan(&haveRatings, &needHistory); err != nil || (haveRatings && !needHistory) {
 		return 0, err
 	}
 
 	rows, err := tx.Query(ctx, `
-		SELECT user_id, question_id, is_correct, guess, difficulty, submitted_at FROM (
+		SELECT user_id, attempt_id, question_id, is_correct, guess, difficulty, submitted_at FROM (
 		  SELECT DISTINCT ON (a.user_id, qr.question_id)
-		         a.user_id::text, qr.question_id::text, COALESCE(qr.is_correct,false) is_correct,
+		         a.user_id::text, a.id::text attempt_id, qr.question_id::text, COALESCE(qr.is_correct,false) is_correct,
 		         `+GuessFloorSQL+` guess, q.difficulty, qr.submitted_at
 		    FROM question_responses qr
 		    JOIN quiz_attempts a ON a.id=qr.attempt_id AND a.status='completed'
@@ -197,12 +203,13 @@ func BackfillRatings(ctx context.Context, db *pgxpool.Pool) (int, error) {
 	}
 	users := map[string]*ustate{}
 	questions := map[string]*qstate{}
+	after := map[string]float64{} // attempt → score after its last counted answer
 	for rows.Next() {
-		var uid, qid string
+		var uid, aid, qid string
 		var correct bool
 		var guess, diff float64
 		var at time.Time
-		if err := rows.Scan(&uid, &qid, &correct, &guess, &diff, &at); err != nil {
+		if err := rows.Scan(&uid, &aid, &qid, &correct, &guess, &diff, &at); err != nil {
 			return 0, err
 		}
 		q := questions[qid]
@@ -222,11 +229,39 @@ func BackfillRatings(ctx context.Context, db *pgxpool.Pool) (int, error) {
 		q.delta += d
 		q.n++
 		u.last = at
+		after[aid] = u.r.Score()
 	}
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
 	rows.Close()
+
+	aids := make([]string, 0, len(after))
+	aScores := make([]float64, 0, len(after))
+	for id, v := range after {
+		aids, aScores = append(aids, id), append(aScores, v)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE quiz_attempts a SET qwish_score_after=t.s
+		   FROM unnest($1::uuid[], $2::float8[]) AS t(id, s)
+		  WHERE a.id=t.id AND a.qwish_score_after IS NULL`, aids, aScores); err != nil {
+		return 0, err
+	}
+	// Attempts with no first-time answers (retakes) keep the score they started
+	// with. The subquery sees the pre-statement snapshot, so runs of retakes all
+	// resolve to the last scored attempt before them.
+	if _, err := tx.Exec(ctx,
+		`UPDATE quiz_attempts a SET qwish_score_after = COALESCE((
+		   SELECT p.qwish_score_after FROM quiz_attempts p
+		    WHERE p.user_id=a.user_id AND p.status='completed' AND p.qwish_score_after IS NOT NULL
+		      AND p.completed_at <= a.completed_at
+		    ORDER BY p.completed_at DESC LIMIT 1), 100)
+		  WHERE a.status='completed' AND a.qwish_score_after IS NULL`); err != nil {
+		return 0, err
+	}
+	if haveRatings {
+		return len(aids), tx.Commit(ctx)
+	}
 
 	var uids []string
 	var thetas, sigmas, scores []float64

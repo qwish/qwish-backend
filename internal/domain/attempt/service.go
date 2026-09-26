@@ -229,6 +229,7 @@ func (s *Service) Start(ctx context.Context, userID, quizID, assignmentID string
 		query += " LIMIT $2"
 		args = append(args, limit)
 	}
+	query += " FOR SHARE OF q"
 	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -315,9 +316,8 @@ func (s *Service) resume(ctx context.Context, userID, quizID, attemptID string) 
 		return nil, err
 	}
 	rows, err := s.db.Query(ctx, `SELECT q.id,q.quiz_id,aq.position,qv.type,qv.prompt,qv.media_url,qv.options,
-		COALESCE((SELECT jsonb_agg(jsonb_build_object('id',qo.id,'label',qo.label) ORDER BY qo.position)
-		 FROM question_options qo WHERE qo.question_id=q.id AND qo.active),'[]'::jsonb),
-		EXISTS (SELECT 1 FROM question_concepts qc WHERE qc.question_id=q.id),aq.question_revision,
+		aq.option_choices,
+        jsonb_array_length(aq.learning_map)>0,aq.question_revision,
 		aq.question_version_id,qv.time_limit_seconds,jsonb_array_length(COALESCE(qv.clues,'[]'::jsonb)),aq.option_order
 		FROM quiz_attempt_questions aq
 		JOIN questions q ON q.id=aq.question_id
@@ -475,29 +475,19 @@ func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, re
 		cfg, _ = scoring.LoadConfig(ctx, s.db) // fallback to load from db
 	}
 
-	// Get question details
-	var correctAnswer json.RawMessage
+	// Grade and interpret the exact question delivered to this attempt.
+	var correctAnswer, choices json.RawMessage
 	var timeLimitSeconds int
-	err = tx.QueryRow(ctx,
-		`SELECT q.type, q.correct_answer, q.time_limit_seconds
-		 FROM questions q
-		 WHERE q.id=$1 AND q.quiz_id=$2
-		   AND (NOT EXISTS (SELECT 1 FROM quiz_attempt_questions WHERE attempt_id=$3)
-		        OR EXISTS (SELECT 1 FROM quiz_attempt_questions WHERE attempt_id=$3 AND question_id=q.id))`,
-		req.QuestionID, quizID, attemptID,
-	).Scan(&qType, &correctAnswer, &timeLimitSeconds)
+	err = tx.QueryRow(ctx, `SELECT qv.type,qv.correct_answer,qv.time_limit_seconds,aq.option_choices
+ FROM quiz_attempt_questions aq JOIN question_versions qv ON qv.id=aq.question_version_id
+ JOIN questions q ON q.id=aq.question_id
+ WHERE aq.attempt_id=$1 AND aq.question_id=$2 AND q.quiz_id=$3`, attemptID, req.QuestionID, quizID).Scan(&qType, &correctAnswer, &timeLimitSeconds, &choices)
 	if err != nil {
-		return nil, fmt.Errorf("question not found")
+		return nil, fmt.Errorf("question snapshot not found")
 	}
-	if req.OptionID != nil {
-		var label string
-		if err := tx.QueryRow(ctx,
-			`SELECT label FROM question_options WHERE id=$1 AND question_id=$2 AND active`,
-			*req.OptionID, req.QuestionID).Scan(&label); err != nil {
-			return nil, fmt.Errorf("option not found")
-		}
-		encoded, _ := json.Marshal(label)
-		req.Answer = encoded
+	req.Answer, req.OptionID, err = resolveAnswerOption(qType, choices, req.Answer, req.OptionID)
+	if err != nil {
+		return nil, err
 	}
 
 	// Clues actually handed out by the server, not what the client claims.
@@ -517,6 +507,7 @@ func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, re
 		ComboLevel:      comboLevel,
 	}
 	isCorrect, pts := scoring.ScoreQuestion(resp, cfg)
+	contentCorrect := isCorrect
 
 	isCorrect, pts, timedOut, newCombo := applyServerGates(isCorrect, pts, timeTakenMs, timeLimitSeconds, comboLevel)
 
@@ -542,18 +533,7 @@ func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, re
 	if err != nil {
 		return nil, fmt.Errorf("failed to save response: %w", err)
 	}
-	_, err = tx.Exec(ctx, `
-		INSERT INTO learning_evidence
-		  (response_id,institution_id,user_id,attempt_id,question_id,question_revision,question_version_id,concept_id,option_id,misconception_id,is_correct,confidence_level,clues_used,occurred_at)
-		SELECT $1,e.institution_id,$2,$3,$4,aq.question_revision,aq.question_version_id,qc.concept_id,$5,qmo.misconception_id,$6,$7,$8,now()
-		FROM enrollments e
-		JOIN question_concepts qc ON qc.question_id=$4
-		JOIN quiz_attempt_questions aq ON aq.attempt_id=$3 AND aq.question_id=$4
-		LEFT JOIN question_misconception_options qmo ON qmo.question_id=$4 AND qmo.option_id=$5
-		WHERE e.user_id=$2 AND e.status IN ('active','suspended')
-		ON CONFLICT (response_id,concept_id) DO NOTHING`,
-		responseID, userID, attemptID, req.QuestionID, req.OptionID, isCorrect, confidence, cluesUsed)
-	if err != nil {
+	if err = recordLearningEvidence(ctx, tx, responseID, userID, attemptID, req.QuestionID, req.OptionID, contentCorrect, timedOut, confidence, cluesUsed); err != nil {
 		return nil, fmt.Errorf("failed to record learning evidence: %w", err)
 	}
 
@@ -597,10 +577,9 @@ func (s *Service) RevealClue(ctx context.Context, userID, attemptID, questionID 
 
 	var rawClues json.RawMessage
 	err = tx.QueryRow(ctx,
-		`SELECT q.clues FROM questions q
-		 WHERE q.id=$1 AND q.quiz_id=$2
-		   AND (NOT EXISTS (SELECT 1 FROM quiz_attempt_questions WHERE attempt_id=$3)
-		        OR EXISTS (SELECT 1 FROM quiz_attempt_questions WHERE attempt_id=$3 AND question_id=q.id))`,
+		`SELECT qv.clues FROM quiz_attempt_questions aq
+ JOIN question_versions qv ON qv.id=aq.question_version_id JOIN questions q ON q.id=aq.question_id
+ WHERE aq.question_id=$1 AND q.quiz_id=$2 AND aq.attempt_id=$3`,
 		questionID, quizID, attemptID,
 	).Scan(&rawClues)
 	if err != nil {

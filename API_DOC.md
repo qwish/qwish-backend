@@ -3994,3 +3994,16 @@ institution keeps its historical roster count.
 ### Class joining and admissions
 
 The class join flow now supports institute admission policies, grouped approval requests, and explicitly confirmed transfers. See [the admission API and rollout guide](docs/ADMISSIONS.md) for contracts, compatibility behavior, and migration order.
+
+### Misconception evidence integrity (migration 075)
+
+Apply `075_misconception_evidence_integrity.sql` before deploying this API version.
+
+- Attempts freeze stable option IDs and concept/misconception mappings alongside the delivered question version. Grading, resumed options, and clues use that snapshot. Label-only answers resolve to the delivered option ID when an exact match exists.
+- `learning_evidence.is_correct` represents answer correctness; `timed_out` records the timing gate independently. Game scoring is unchanged. Learning summaries and misconception detection exclude timed-out observations.
+- `learning_evidence_misconceptions` stores every diagnostic tag while retaining one base observation per response/concept. New evidence leaves the legacy `misconception_id` column NULL; diagnostic queries use the junction table.
+- `GET /teacher/quizzes/{quizId}/response-insights` accepts `window_days` (1–365, default 30). The selected quiz anchors the student/concept pairs; matching evidence spans the authenticated teacher's quizzes within the same institute and requested class scope. Correct-answer counts are calculated per concept before joining diagnostic tags, preventing multi-tag answers from multiplying evidence.
+- Responses retain the existing fields and add `automatic_status`, `window_days`, `evidence_question_ids`, `review_status`, `review_reason`, `reviewed_at`, and `reviewed_by`. A teacher review takes precedence in `status` (`confirmed` or `dismissed`); the automatic assessment remains available separately. Reviews remain effective until the teacher changes them. An expired evidence window returns no stale automatic diagnostic row.
+- `GET /teacher/questions/{questionId}/learning-map` adds `option_mappings: [{option_id, misconception_id}]`. Send that array as `options` when replacing the map. Correct options, inactive misconceptions, and single-option mappings for ordered-answer questions are rejected; failed replacements leave the previous map intact.
+
+Historical repair is limited to information that was actually recorded: the migration separates recoverable timeout/correctness data and preserves existing diagnostic tags. It cannot recover tags previously discarded by the old uniqueness constraint or reconstruct past mapping edits. Pre-migration attempts retain their question/option snapshots but receive an empty diagnostic mapping; newly started attempts capture the full context. Historical game scores are not rewritten. Coordinate the migration and API rollout so old API processes do not continue writing legacy-only diagnostic tags after migration.

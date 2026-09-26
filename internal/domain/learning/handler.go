@@ -1,6 +1,7 @@
 package learning
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -96,6 +97,13 @@ func (h *Handler) MapQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	questionID := chi.URLParam(r, "questionId")
+	var locked string
+	if err = tx.QueryRow(r.Context(), `SELECT q.id FROM questions q JOIN quizzes z ON z.id=q.quiz_id
+ WHERE q.id=$1 AND z.created_by=$2 AND z.institution_id=$3 AND z.status IN ('draft','rejected')
+ FOR UPDATE OF q FOR SHARE OF z`, questionID, middleware.GetUserID(r), middleware.GetInstitutionID(r)).Scan(&locked); err != nil {
+		middleware.NotFound(w, "editable question")
+		return
+	}
 	if strings.TrimSpace(in.ConceptID) == "" {
 		var allowed bool
 		if err = tx.QueryRow(r.Context(), `SELECT EXISTS(
@@ -104,7 +112,7 @@ func (h *Handler) MapQuestion(w http.ResponseWriter, r *http.Request) {
 			middleware.NotFound(w, "question")
 			return
 		}
-		if _, err = tx.Exec(r.Context(), `DELETE FROM question_concepts WHERE question_id=$1 AND mapped_by=$2`, questionID, middleware.GetUserID(r)); err != nil {
+		if _, err = tx.Exec(r.Context(), `DELETE FROM question_concepts WHERE question_id=$1`, questionID); err != nil {
 			middleware.InternalError(w)
 			return
 		}
@@ -133,7 +141,7 @@ func (h *Handler) MapQuestion(w http.ResponseWriter, r *http.Request) {
 		middleware.NotFound(w, "question or concept")
 		return
 	}
-	if _, err = tx.Exec(r.Context(), `DELETE FROM question_concepts WHERE question_id=$1 AND mapped_by=$2`, questionID, middleware.GetUserID(r)); err != nil {
+	if _, err = tx.Exec(r.Context(), `DELETE FROM question_concepts WHERE question_id=$1`, questionID); err != nil {
 		middleware.InternalError(w)
 		return
 	}
@@ -149,7 +157,9 @@ func (h *Handler) MapQuestion(w http.ResponseWriter, r *http.Request) {
 	for _, option := range in.Options {
 		ct, execErr := tx.Exec(r.Context(), `INSERT INTO question_misconception_options(question_id,option_id,misconception_id,reviewed_by)
 			SELECT $1,qo.id,m.id,$4 FROM question_options qo JOIN misconceptions m ON m.id=$3
-			WHERE qo.id=$2 AND qo.question_id=$1 AND qo.active AND m.concept_id=$5 AND m.institution_id=$6`, questionID, option.OptionID, option.MisconceptionID, middleware.GetUserID(r), in.ConceptID, middleware.GetInstitutionID(r))
+			JOIN questions q ON q.id=qo.question_id
+            WHERE qo.id=$2 AND qo.question_id=$1 AND qo.active AND m.active AND m.concept_id=$5 AND m.institution_id=$6
+              AND q.type<>'arrange_order' AND to_jsonb(qo.label)<>q.correct_answer`, questionID, option.OptionID, option.MisconceptionID, middleware.GetUserID(r), in.ConceptID, middleware.GetInstitutionID(r))
 		if execErr != nil || ct.RowsAffected() != 1 {
 			middleware.BadRequest(w, "an option or misconception is outside this learning map")
 			return
@@ -207,56 +217,27 @@ func (h *Handler) GetQuestionMap(w http.ResponseWriter, r *http.Request) {
 		}
 		misconceptions = append(misconceptions, map[string]interface{}{"id": id, "code": code, "title": title, "description": description})
 	}
-	middleware.JSON(w, http.StatusOK, map[string]interface{}{"question_id": questionID, "options": options, "concept_id": conceptID, "weight": weight, "misconceptions": misconceptions})
-}
-
-func (h *Handler) QuizInsights(w http.ResponseWriter, r *http.Request) {
-	quizID := chi.URLParam(r, "quizId")
-	classID := strings.TrimSpace(r.URL.Query().Get("class_id"))
-	rows, err := h.db.Query(r.Context(), `
-		SELECT le.user_id,u.display_name,le.concept_id,c.code,c.title,le.misconception_id,m.title,
-		 COUNT(*) FILTER (WHERE NOT le.is_correct),COUNT(DISTINCT le.question_id) FILTER (WHERE NOT le.is_correct),
-		 COUNT(*) FILTER (WHERE le.is_correct),
-		 COUNT(*) FILTER (WHERE NOT le.is_correct AND le.confidence_level='very_confident'),
-		 COUNT(*) FILTER (WHERE NOT le.is_correct AND le.confidence_level='pretty_sure'),
-		 COUNT(*) FILTER (WHERE NOT le.is_correct AND le.confidence_level='not_sure'),
-		 COUNT(*) FILTER (WHERE NOT le.is_correct AND le.confidence_level IS NULL),MAX(le.occurred_at)
-		FROM learning_evidence le JOIN users u ON u.id=le.user_id JOIN curriculum_concepts c ON c.id=le.concept_id
-		LEFT JOIN misconceptions m ON m.id=le.misconception_id JOIN quiz_attempts qa ON qa.id=le.attempt_id
-		JOIN quizzes q ON q.id=qa.quiz_id
-		WHERE q.id=$1 AND q.created_by=$2 AND le.institution_id=$3
-		  AND ($4='' OR (
-		    EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id::text=$4 AND gt.user_id=$2)
-		    AND EXISTS(SELECT 1 FROM group_students gs WHERE gs.group_id::text=$4 AND gs.user_id=le.user_id)
-		  ))
-		GROUP BY le.user_id,u.display_name,le.concept_id,c.code,c.title,le.misconception_id,m.title
-		ORDER BY MAX(le.occurred_at) DESC LIMIT 500`, quizID, middleware.GetUserID(r), middleware.GetInstitutionID(r), classID)
-	if err != nil {
-		middleware.BadRequest(w, "quiz insights unavailable")
+	if err := rows.Err(); err != nil {
+		middleware.InternalError(w)
 		return
 	}
-	defer rows.Close()
-	result := []map[string]interface{}{}
-	for rows.Next() {
-		var studentID, studentName, conceptID, conceptCode, conceptTitle string
-		var misconceptionID, misconceptionTitle *string
-		var errors, distinct, correct, high, middle, low, unknown int
-		var latest interface{}
-		if err := rows.Scan(&studentID, &studentName, &conceptID, &conceptCode, &conceptTitle, &misconceptionID, &misconceptionTitle, &errors, &distinct, &correct, &high, &middle, &low, &unknown, &latest); err != nil {
-			middleware.InternalError(w)
-			return
-		}
-		status := insightStatus(misconceptionID != nil, distinct, high)
-		result = append(result, map[string]interface{}{"student_id": studentID, "student_name": studentName, "concept_id": conceptID, "concept_code": conceptCode, "concept_title": conceptTitle, "misconception_id": misconceptionID, "misconception_title": misconceptionTitle, "status": status, "error_count": errors, "distinct_questions": distinct, "contradictory_correct": correct, "confidence": map[string]int{"very_confident": high, "pretty_sure": middle, "not_sure": low, "unknown": unknown}, "latest_evidence_at": latest})
+	if err := mrows.Err(); err != nil {
+		middleware.InternalError(w)
+		return
 	}
-	middleware.JSON(w, http.StatusOK, result)
+	var mappings json.RawMessage
+	if err = h.db.QueryRow(r.Context(), `SELECT COALESCE(jsonb_agg(jsonb_build_object('option_id',option_id,'misconception_id',misconception_id) ORDER BY option_id,misconception_id),'[]'::jsonb) FROM question_misconception_options WHERE question_id=$1`, questionID).Scan(&mappings); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]interface{}{"question_id": questionID, "options": options, "concept_id": conceptID, "weight": weight, "misconceptions": misconceptions, "option_mappings": mappings})
 }
 
 func (h *Handler) StudentSummary(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Query(r.Context(), `SELECT c.id,c.code,c.title,
 		COUNT(*) FILTER(WHERE le.is_correct),COUNT(*) FILTER(WHERE NOT le.is_correct),COUNT(DISTINCT le.question_id),MAX(le.occurred_at)
 		FROM learning_evidence le JOIN curriculum_concepts c ON c.id=le.concept_id
-		WHERE le.user_id=$1 GROUP BY c.id,c.code,c.title ORDER BY MAX(le.occurred_at) DESC LIMIT 50`, middleware.GetUserID(r))
+		WHERE le.user_id=$1 AND NOT le.timed_out GROUP BY c.id,c.code,c.title ORDER BY MAX(le.occurred_at) DESC LIMIT 50`, middleware.GetUserID(r))
 	if err != nil {
 		middleware.BadRequest(w, "learning summary unavailable")
 		return
@@ -284,7 +265,7 @@ func (h *Handler) StudentSummary(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) InstitutionSummary(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Query(r.Context(), `SELECT c.id,c.code,c.title,COUNT(DISTINCT le.user_id),COUNT(*) FILTER(WHERE le.is_correct),COUNT(*) FILTER(WHERE NOT le.is_correct),COUNT(*) FILTER(WHERE le.confidence_level IS NULL),MAX(le.occurred_at)
-		FROM learning_evidence le JOIN curriculum_concepts c ON c.id=le.concept_id WHERE le.institution_id=$1 GROUP BY c.id,c.code,c.title ORDER BY COUNT(*) FILTER(WHERE NOT le.is_correct) DESC LIMIT 200`, middleware.GetInstitutionID(r))
+		FROM learning_evidence le JOIN curriculum_concepts c ON c.id=le.concept_id WHERE le.institution_id=$1 AND NOT le.timed_out GROUP BY c.id,c.code,c.title ORDER BY COUNT(*) FILTER(WHERE NOT le.is_correct) DESC LIMIT 200`, middleware.GetInstitutionID(r))
 	if err != nil {
 		middleware.BadRequest(w, "learning summary unavailable")
 		return
@@ -317,7 +298,7 @@ func (h *Handler) TeacherClassSummary(w http.ResponseWriter, r *http.Request) {
 		       MAX(le.occurred_at) AS latest_evidence_at
 		FROM learning_evidence le
 		JOIN curriculum_concepts c ON c.id=le.concept_id
-		WHERE le.institution_id=$1
+		WHERE le.institution_id=$1 AND NOT le.timed_out
 		  AND EXISTS (
 		    SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id
 		    WHERE gs.user_id=le.user_id AND gt.user_id=$2 AND ($3='' OR gs.group_id::text=$3)
@@ -366,7 +347,7 @@ func (h *Handler) TeacherClassMatrix(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "class_id is required")
 		return
 	}
-	rows, err := h.db.Query(r.Context(), `SELECT u.id,u.display_name,c.id,c.code,c.title,COUNT(*) FILTER(WHERE le.is_correct),COUNT(*) FILTER(WHERE NOT le.is_correct),COUNT(DISTINCT le.question_id),MAX(le.occurred_at) FROM group_teachers gt JOIN group_students gs ON gs.group_id=gt.group_id JOIN users u ON u.id=gs.user_id JOIN learning_evidence le ON le.user_id=u.id AND le.institution_id=$3 JOIN curriculum_concepts c ON c.id=le.concept_id WHERE gt.user_id=$1 AND gt.group_id::text=$2 GROUP BY u.id,u.display_name,c.id,c.code,c.title ORDER BY u.display_name,c.title`, middleware.GetUserID(r), classID, middleware.GetInstitutionID(r))
+	rows, err := h.db.Query(r.Context(), `SELECT u.id,u.display_name,c.id,c.code,c.title,COUNT(*) FILTER(WHERE le.is_correct),COUNT(*) FILTER(WHERE NOT le.is_correct),COUNT(DISTINCT le.question_id),MAX(le.occurred_at) FROM group_teachers gt JOIN group_students gs ON gs.group_id=gt.group_id JOIN users u ON u.id=gs.user_id JOIN learning_evidence le ON le.user_id=u.id AND le.institution_id=$3 AND NOT le.timed_out JOIN curriculum_concepts c ON c.id=le.concept_id WHERE gt.user_id=$1 AND gt.group_id::text=$2 GROUP BY u.id,u.display_name,c.id,c.code,c.title ORDER BY u.display_name,c.title`, middleware.GetUserID(r), classID, middleware.GetInstitutionID(r))
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -756,7 +737,7 @@ func (h *Handler) FollowUpOutcomes(w http.ResponseWriter, r *http.Request) {
 		  SELECT a.id AS assignment_id,ar.student_id,le.id,le.question_id,le.is_correct,le.occurred_at
 		  FROM scoped a
 		  JOIN learning_assignment_recipients ar ON ar.assignment_id=a.id
-		  LEFT JOIN learning_evidence le ON le.institution_id=a.institution_id
+		  LEFT JOIN learning_evidence le ON le.institution_id=a.institution_id AND NOT le.timed_out
 		    AND le.user_id=ar.student_id AND le.concept_id=a.source_concept_id
 		    AND le.occurred_at>=a.created_at-interval '90 days' AND le.occurred_at<a.comparison_ends_at
 		), paired AS (
@@ -887,8 +868,10 @@ func (h *Handler) Review(w http.ResponseWriter, r *http.Request) {
 	}
 	studentID, misconceptionID := chi.URLParam(r, "studentId"), chi.URLParam(r, "misconceptionId")
 	var allowed bool
-	err := h.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM learning_evidence le JOIN misconceptions m ON m.id=$2
-		WHERE le.user_id=$1 AND le.misconception_id=$2 AND le.institution_id=$3 AND
+	err := h.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM learning_evidence le
+        JOIN learning_evidence_misconceptions em ON em.evidence_id=le.id AND em.misconception_id=$2
+        JOIN misconceptions m ON m.id=em.misconception_id AND m.institution_id=$3
+        WHERE le.user_id=$1 AND le.institution_id=$3 AND NOT le.is_correct AND NOT le.timed_out AND
 		(NOT EXISTS(SELECT 1 FROM group_teachers WHERE user_id=$4) OR EXISTS(SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id WHERE gs.user_id=$1 AND gt.user_id=$4)))`, studentID, misconceptionID, middleware.GetInstitutionID(r), middleware.GetUserID(r)).Scan(&allowed)
 	if err != nil || !allowed {
 		middleware.NotFound(w, "insight")

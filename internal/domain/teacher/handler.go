@@ -419,7 +419,7 @@ func (h *Handler) StudentLearningEvidence(w http.ResponseWriter, r *http.Request
 		middleware.NotFound(w, "student")
 		return
 	}
-	rows, err := h.db.Query(r.Context(), `SELECT le.concept_id,c.code,c.title,date_trunc('month',le.occurred_at),COUNT(*) FILTER(WHERE le.is_correct),COUNT(*) FILTER(WHERE NOT le.is_correct),COUNT(DISTINCT le.question_id) FROM learning_evidence le JOIN curriculum_concepts c ON c.id=le.concept_id WHERE le.institution_id=$1 AND le.user_id=$2 GROUP BY le.concept_id,c.code,c.title,date_trunc('month',le.occurred_at) ORDER BY date_trunc('month',le.occurred_at),c.title`, instID, studentID)
+	rows, err := h.db.Query(r.Context(), `SELECT le.concept_id,c.code,c.title,date_trunc('month',le.occurred_at),COUNT(*) FILTER(WHERE le.is_correct),COUNT(*) FILTER(WHERE NOT le.is_correct),COUNT(DISTINCT le.question_id) FROM learning_evidence le JOIN curriculum_concepts c ON c.id=le.concept_id WHERE le.institution_id=$1 AND le.user_id=$2 AND NOT le.timed_out GROUP BY le.concept_id,c.code,c.title,date_trunc('month',le.occurred_at) ORDER BY date_trunc('month',le.occurred_at),c.title`, instID, studentID)
 	if err != nil {
 		middleware.InternalError(w)
 		return

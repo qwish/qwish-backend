@@ -97,6 +97,10 @@ func seedFixture(t *testing.T, pool *pgxpool.Pool) fixture {
 		ctx := context.Background()
 		users := []string{f.TeacherID, f.LonerTeacherID, f.StudentID, f.SoloStudentID}
 		insts := []string{f.InstitutionID, f.OtherInstitutionID}
+		pool.Exec(ctx, `DELETE FROM admission_requests WHERE institution_id = ANY($1)`, insts)
+		pool.Exec(ctx, `DELETE FROM admission_policies WHERE institution_id = ANY($1)`, insts)
+		pool.Exec(ctx, `DELETE FROM audit_log WHERE institution_id = ANY($1)`, insts)
+		pool.Exec(ctx, `DELETE FROM group_students WHERE group_id IN (SELECT id FROM groups WHERE institution_id = ANY($1))`, insts)
 		pool.Exec(ctx, `DELETE FROM student_edit_requests WHERE enrollment_id IN
 			(SELECT id FROM enrollments WHERE institution_id = ANY($1))`, insts)
 		pool.Exec(ctx, `DELETE FROM enrollments WHERE institution_id = ANY($1)`, insts)

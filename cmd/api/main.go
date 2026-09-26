@@ -526,8 +526,10 @@ func main() {
 				// A student with neither is institution-less and stays valid.
 				r.With(mw.RequireRole("student")).Post("/students/join/preview", enrollmentStudentH.PreviewJoin)
 				r.With(mw.RequireRole("student")).Post("/students/join/confirm", enrollmentStudentH.ConfirmJoin)
-				r.Post("/students/claim", enrollmentStudentH.Claim)
-				r.Post("/students/join-class", enrollmentStudentH.JoinClass)
+				r.With(mw.RequireRole("student")).Get("/students/join/requests", enrollmentStudentH.AdmissionRequests)
+				r.With(mw.RequireRole("student")).Patch("/students/join/requests/{requestId}", enrollmentStudentH.ActOnAdmission)
+				r.With(mw.RequireRole("student")).Post("/students/claim", enrollmentStudentH.Claim)
+				r.With(mw.RequireRole("student")).Post("/students/join-class", enrollmentStudentH.JoinClass)
 				r.Get("/users/me/enrollment", enrollmentStudentH.Mine)
 
 				// Social: batchmate follows
@@ -687,6 +689,10 @@ func main() {
 					r.Post("/promotions", enrollmentInstH.CreatePromotion)
 					r.Get("/promotions", enrollmentInstH.ListPromotions)
 					r.Post("/promotions/{batchId}/revert", enrollmentInstH.RevertPromotion)
+					r.Get("/admissions/policy", enrollmentInstH.AdmissionPolicy)
+					r.Put("/admissions/policy", enrollmentInstH.SaveAdmissionPolicy)
+					r.Get("/admissions/requests", enrollmentInstH.AdmissionRequests)
+					r.Patch("/admissions/requests/{requestId}", enrollmentInstH.ReviewAdmission)
 					r.Get("/edit-requests", editRequestH.ListForReview)
 					r.Patch("/edit-requests/{requestId}", editRequestH.Review)
 					r.Get("/students/{userId}", institutionH.GetStudent)

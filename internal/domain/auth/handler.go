@@ -281,6 +281,10 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 			middleware.BadRequest(w, "invalid or inactive referral code")
 			return
 		}
+		if assignedRole == "student" {
+			middleware.Error(w, 409, "JOIN_FLOW_REQUIRED", "Create your account without a referral code, then open Join a class to review your invitation.")
+			return
+		}
 		instID = &id
 		role = assignedRole
 		if role == "teacher" {
@@ -476,7 +480,7 @@ func (h *Handler) UpdateReferralCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.svc.UpdateUserInstitution(r.Context(), middleware.GetUserID(r), req.ReferralCode); err != nil {
-		middleware.BadRequest(w, "invalid or inactive referral code")
+		middleware.Error(w, 409, "JOIN_FLOW_REQUIRED", "Use Join a class to request institute membership or a transfer. Referral codes cannot change your account role.")
 		return
 	}
 

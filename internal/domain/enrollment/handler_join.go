@@ -32,7 +32,17 @@ func readJoinRequest(w http.ResponseWriter, r *http.Request) (joinRequest, bool)
 
 func joinError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, ErrJoinCodeInvalid):
+	case errors.Is(err, ErrAdmissionPending):
+		middleware.Error(w, 409, "ADMISSION_PENDING", "Your request is awaiting approval. Open Join a class to track it.")
+	case errors.Is(err, ErrPendingElsewhere):
+		middleware.Error(w, 409, "ADMISSION_ELSEWHERE", "You have an open request at another institute. Cancel it in Join a class before requesting this institute.")
+	case errors.Is(err, ErrRequestClosed):
+		middleware.Error(w, 409, "ADMISSION_CLOSED", "This request has changed. Refresh its status.")
+	case errors.Is(err, ErrNotFound):
+		middleware.NotFound(w, "admission request")
+	case errors.Is(err, ErrAdmissionRules):
+		middleware.BadRequest(w, "Choose a valid admission mode and at least one valid rule for custom admissions.")
+	case errors.Is(err, ErrJoinCodeInvalid), errors.Is(err, ErrClaimCodeInvalid), errors.Is(err, ErrClassCodeInvalid):
 		middleware.Error(w, 400, "JOIN_CODE_INVALID", "We couldn't identify that code. Check it with your institution and try again.")
 	case errors.Is(err, ErrClaimCodeUsed):
 		middleware.Error(w, 409, "CLAIM_CODE_USED", "This enrollment is already connected. Sign in to the account you used, or ask your institution for help.")

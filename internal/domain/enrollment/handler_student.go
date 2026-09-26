@@ -1,7 +1,6 @@
 package enrollment
 
 import (
-	"errors"
 	"log"
 	"net/http"
 
@@ -24,20 +23,8 @@ func (h *StudentHandler) Claim(w http.ResponseWriter, r *http.Request) {
 	}
 
 	e, err := h.svc.Claim(r.Context(), middleware.GetUserID(r), req.ClaimCode)
-	switch {
-	case errors.Is(err, ErrClaimCodeInvalid):
-		middleware.Error(w, http.StatusBadRequest, "CLAIM_CODE_INVALID", "this code is not valid")
-		return
-	case errors.Is(err, ErrClaimCodeUsed):
-		middleware.Error(w, http.StatusConflict, "CLAIM_CODE_USED", "this code has already been used")
-		return
-	case errors.Is(err, ErrEnrollmentExists):
-		middleware.Error(w, http.StatusConflict, "ENROLLMENT_EXISTS",
-			"you are already enrolled at an institution; leave it before joining another")
-		return
-	case err != nil:
-		log.Printf("Claim: %v", err)
-		middleware.InternalError(w)
+	if err != nil {
+		joinError(w, err)
 		return
 	}
 	middleware.JSON(w, http.StatusOK, e)
@@ -54,17 +41,8 @@ func (h *StudentHandler) JoinClass(w http.ResponseWriter, r *http.Request) {
 	}
 
 	e, err := h.svc.JoinByClassCode(r.Context(), middleware.GetUserID(r), req.InviteCode)
-	switch {
-	case errors.Is(err, ErrClassCodeInvalid):
-		middleware.Error(w, http.StatusBadRequest, "CLAIM_CODE_INVALID", "this class code is not valid")
-		return
-	case errors.Is(err, ErrEnrollmentExists):
-		middleware.Error(w, http.StatusConflict, "ENROLLMENT_EXISTS",
-			"you are already enrolled at an institution; leave it before joining another")
-		return
-	case err != nil:
-		log.Printf("JoinClass: %v", err)
-		middleware.InternalError(w)
+	if err != nil {
+		joinError(w, err)
 		return
 	}
 	middleware.JSON(w, http.StatusOK, e)

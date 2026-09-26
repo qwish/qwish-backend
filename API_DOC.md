@@ -3990,3 +3990,7 @@ institution keeps its historical roster count.
 | `IMPORT_VALIDATION_FAILED` | 422 | Commit refused; body carries per-row detail |
 | `NOT_IN_YOUR_CLASS` | 403 | Teacher acting outside their class scope |
 | `EDIT_REQUEST_RESOLVED` | 409 | Reviewing an already-decided request |
+
+### Class joining and admissions
+
+The class join flow now supports institute admission policies, grouped approval requests, and explicitly confirmed transfers. See [the admission API and rollout guide](docs/ADMISSIONS.md) for contracts, compatibility behavior, and migration order.

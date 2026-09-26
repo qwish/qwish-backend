@@ -156,116 +156,41 @@ func (s *Service) addProfileContext(ctx context.Context, e *Enrollment) error {
 // Import-supplied personal values are copied onto the users row only where the
 // student left the field blank — the student's own entry always wins.
 func (s *Service) Claim(ctx context.Context, userID, code string) (Enrollment, error) {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return Enrollment{}, err
+	e, err := s.legacyJoin(ctx, userID, code, "claim")
+	if errors.Is(err, ErrJoinCodeInvalid) {
+		err = ErrClaimCodeInvalid
 	}
-	defer tx.Rollback(ctx)
-
-	var id, status string
-	err = tx.QueryRow(ctx,
-		`SELECT id, status FROM enrollments WHERE claim_code=$1 FOR UPDATE`, code).Scan(&id, &status)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Enrollment{}, ErrClaimCodeInvalid
-	}
-	if err != nil {
-		return Enrollment{}, err
-	}
-	if status != "pending_claim" {
-		return Enrollment{}, ErrClaimCodeUsed
-	}
-
-	var live int
-	tx.QueryRow(ctx,
-		`SELECT COUNT(*) FROM enrollments
-		 WHERE user_id=$1 AND status IN ('active','suspended')`, userID).Scan(&live)
-	if live > 0 {
-		return Enrollment{}, ErrEnrollmentExists
-	}
-
-	e, err := scanEnrollment(tx.QueryRow(ctx,
-		`UPDATE enrollments
-		    SET user_id=$1, status='active', joined_at=now(), updated_at=now()
-		  WHERE id=$2
-		  RETURNING `+selectCols, userID, id))
-	if err != nil {
-		return Enrollment{}, err
-	}
-
-	// NULLIF('' ,'') collapses empty strings to NULL so blank-but-present
-	// values are treated as blanks, not as the student's answer.
-	if _, err := tx.Exec(ctx, `
-		UPDATE users u SET
-			institution_id = e.institution_id,
-			phone          = COALESCE(NULLIF(u.phone,''),          e.import_phone),
-			guardian_name  = COALESCE(NULLIF(u.guardian_name,''),  e.import_guardian_name),
-			guardian_phone = COALESCE(NULLIF(u.guardian_phone,''), e.import_guardian_phone),
-			guardian_email = COALESCE(NULLIF(u.guardian_email,''), e.import_guardian_email),
-			updated_at     = now()
-		FROM enrollments e
-		WHERE u.id=$1 AND e.id=$2`, userID, id); err != nil {
-		return Enrollment{}, err
-	}
-
-	return e, tx.Commit(ctx)
+	return e, err
 }
 
 // JoinByClassCode is the self-signup path: a student with no institution joins
 // a class directly. Academic fields stay blank for an admin to fill in later.
 func (s *Service) JoinByClassCode(ctx context.Context, userID, inviteCode string) (Enrollment, error) {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return Enrollment{}, err
+	e, err := s.legacyJoin(ctx, userID, inviteCode, "class")
+	if errors.Is(err, ErrJoinCodeInvalid) {
+		err = ErrClassCodeInvalid
 	}
-	defer tx.Rollback(ctx)
-
-	var groupID, instID string
-	err = tx.QueryRow(ctx,
-		`SELECT id, institution_id FROM groups WHERE invite_code=$1 AND archived_at IS NULL`,
-		inviteCode).Scan(&groupID, &instID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Enrollment{}, ErrClassCodeInvalid
-	}
-	if err != nil {
-		return Enrollment{}, err
-	}
-
-	var live int
-	tx.QueryRow(ctx,
-		`SELECT COUNT(*) FROM enrollments
-		 WHERE user_id=$1 AND status IN ('active','suspended')`, userID).Scan(&live)
-	if live > 0 {
-		return Enrollment{}, ErrEnrollmentExists
-	}
-
-	var fullName string
-	if err := tx.QueryRow(ctx, `SELECT full_name FROM users WHERE id=$1`, userID).Scan(&fullName); err != nil {
-		return Enrollment{}, err
-	}
-
-	e, err := scanEnrollment(tx.QueryRow(ctx,
-		`INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at)
-		 VALUES ($1, $2, $3, 'active', now())
-		 RETURNING `+selectCols, instID, userID, fullName))
-	if err != nil {
-		return Enrollment{}, err
-	}
-
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO group_students (group_id, user_id) VALUES ($1,$2)
-		 ON CONFLICT DO NOTHING`, groupID, userID); err != nil {
-		return Enrollment{}, err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE users SET institution_id=$1, updated_at=now() WHERE id=$2`, instID, userID); err != nil {
-		return Enrollment{}, err
-	}
-
-	return e, tx.Commit(ctx)
+	return e, err
 }
 
-// CreateRosterEntry pre-provisions a student the institution knows about but
-// who has not signed up yet. The claim code is what the student later redeems.
+func (s *Service) legacyJoin(ctx context.Context, user, code, kind string) (Enrollment, error) {
+	p, err := s.PreviewJoin(ctx, user, code)
+	if err != nil {
+		return Enrollment{}, err
+	}
+	if p.Kind != kind {
+		return Enrollment{}, ErrJoinCodeInvalid
+	}
+	r, err := s.ConfirmJoin(ctx, user, code, p.Kind, p.TargetID)
+	if err != nil {
+		return Enrollment{}, err
+	}
+	if r.Status != "joined" {
+		return Enrollment{}, ErrAdmissionPending
+	}
+	return *r.Enrollment, nil
+}
+
 func (s *Service) CreateRosterEntry(ctx context.Context, instID string, in RosterInput) (Enrollment, error) {
 	code, err := GenerateClaimCode()
 	if err != nil {
@@ -333,6 +258,22 @@ func (s *Service) SetStatus(ctx context.Context, instID, enrollmentID, status st
 	defer tx.Rollback(ctx)
 
 	var userID *string
+	var current *string
+	err = tx.QueryRow(ctx, `SELECT user_id FROM enrollments WHERE id=$1 AND institution_id=$2`, enrollmentID, instID).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if userID != nil {
+		if err = tx.QueryRow(ctx, `SELECT institution_id::text FROM users WHERE id=$1 FOR UPDATE`, *userID).Scan(&current); err != nil {
+			return err
+		}
+		if current != nil && *current != instID {
+			return ErrEnrollmentExists
+		}
+	}
 	err = tx.QueryRow(ctx,
 		`UPDATE enrollments
 		    SET status=$1,
@@ -350,6 +291,9 @@ func (s *Service) SetStatus(ctx context.Context, instID, enrollmentID, status st
 	// Unclaimed roster rows have no user to mirror onto.
 	if userID != nil {
 		if terminalStatuses[status] {
+			if _, err = tx.Exec(ctx, `DELETE FROM group_students gs USING groups g WHERE gs.group_id=g.id AND gs.user_id=$1 AND g.institution_id=$2`, *userID, instID); err != nil {
+				return err
+			}
 			_, err = tx.Exec(ctx,
 				`UPDATE users SET institution_id=NULL, status='active', updated_at=now() WHERE id=$1`, *userID)
 		} else {

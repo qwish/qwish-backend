@@ -61,98 +61,20 @@ func seedSwitchFixture(t *testing.T, pool *pgxpool.Pool) switchFixture {
 	return f
 }
 
-// Joining by referral code must create an enrollment. Setting users.institution_id
-// alone leaves the student invisible to their institution's roster, which is
-// built from enrollments.
-func TestUpdateUserInstitutionCreatesEnrollment(t *testing.T) {
+// Student referral endpoints may never bypass admissions or silently transfer.
+func TestUpdateUserInstitutionRequiresStudentJoinFlow(t *testing.T) {
 	pool := openTestDB(t)
 	f := seedSwitchFixture(t, pool)
 	svc := &Service{db: pool}
 	ctx := context.Background()
-
-	if err := svc.UpdateUserInstitution(ctx, f.StudentID, f.FromCode); err != nil {
-		t.Fatalf("UpdateUserInstitution: %v", err)
+	for _, code := range []string{f.FromCode, f.ToCode, "T" + f.FromCode} {
+		if err := svc.UpdateUserInstitution(ctx, f.StudentID, code); err == nil {
+			t.Fatal("legacy student join unexpectedly allowed")
+		}
 	}
-
-	var status string
-	err := pool.QueryRow(ctx,
-		`SELECT status FROM enrollments WHERE user_id=$1 AND institution_id=$2`,
-		f.StudentID, f.FromInstitutionID).Scan(&status)
-	if err != nil {
-		t.Fatalf("no enrollment created: %v", err)
-	}
-	if status != "active" {
-		t.Fatalf("status = %q, want active", status)
-	}
-
-	var instID *string
-	pool.QueryRow(ctx, `SELECT institution_id FROM users WHERE id=$1`, f.StudentID).Scan(&instID)
-	if instID == nil || *instID != f.FromInstitutionID {
-		t.Fatalf("users.institution_id = %v, want %s", instID, f.FromInstitutionID)
-	}
-}
-
-// Moving ends the old enrollment rather than leaving two live ones, which the
-// enrollments_one_active_per_user index would reject outright.
-func TestUpdateUserInstitutionEndsThePreviousEnrollment(t *testing.T) {
-	pool := openTestDB(t)
-	f := seedSwitchFixture(t, pool)
-	svc := &Service{db: pool}
-	ctx := context.Background()
-
-	if err := svc.UpdateUserInstitution(ctx, f.StudentID, f.FromCode); err != nil {
-		t.Fatalf("first join: %v", err)
-	}
-	if err := svc.UpdateUserInstitution(ctx, f.StudentID, f.ToCode); err != nil {
-		t.Fatalf("move: %v", err)
-	}
-
-	var oldStatus string
-	var oldEnded *time.Time
-	pool.QueryRow(ctx,
-		`SELECT status, ended_at FROM enrollments WHERE user_id=$1 AND institution_id=$2`,
-		f.StudentID, f.FromInstitutionID).Scan(&oldStatus, &oldEnded)
-	if oldStatus != "transferred" || oldEnded == nil {
-		t.Fatalf("old enrollment status=%q ended_at=%v, want transferred with an end date", oldStatus, oldEnded)
-	}
-
-	var live int
-	pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM enrollments WHERE user_id=$1 AND status IN ('active','suspended')`,
-		f.StudentID).Scan(&live)
-	if live != 1 {
-		t.Fatalf("live enrollments = %d, want exactly 1", live)
-	}
-
-	var newInst string
-	pool.QueryRow(ctx,
-		`SELECT institution_id FROM enrollments
-		  WHERE user_id=$1 AND status='active'`, f.StudentID).Scan(&newInst)
-	if newInst != f.ToInstitutionID {
-		t.Fatalf("live enrollment is at %s, want %s", newInst, f.ToInstitutionID)
-	}
-}
-
-// Re-entering the code for the institution the student is already at must be a
-// no-op, not a transfer out and back in that litters history with a dead row.
-func TestUpdateUserInstitutionIsIdempotentForTheSameInstitution(t *testing.T) {
-	pool := openTestDB(t)
-	f := seedSwitchFixture(t, pool)
-	svc := &Service{db: pool}
-	ctx := context.Background()
-
-	if err := svc.UpdateUserInstitution(ctx, f.StudentID, f.FromCode); err != nil {
-		t.Fatalf("first join: %v", err)
-	}
-	if err := svc.UpdateUserInstitution(ctx, f.StudentID, f.FromCode); err != nil {
-		t.Fatalf("repeat join: %v", err)
-	}
-
-	var rows int
-	pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM enrollments WHERE user_id=$1`, f.StudentID).Scan(&rows)
-	if rows != 1 {
-		t.Fatalf("enrollment rows = %d, want 1 — the repeat should not have created another", rows)
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM enrollments WHERE user_id=$1`, f.StudentID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("enrollments=%d err=%v", count, err)
 	}
 }
 

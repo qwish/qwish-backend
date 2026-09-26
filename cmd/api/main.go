@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"net/http/pprof"
 	"strings"
 	"time"
 
@@ -191,7 +192,7 @@ func main() {
 			r.Get("/users/me/notifications/stream", notifH.Stream)
 		})
 
-		// ---- Query profiling (EXPLAIN ANALYZE on the real list queries) ----
+		// ---- Internal profiling (query plans and goroutine leaks) ----
 		// Authenticated by CRON_SECRET only, so it sits outside the Supabase
 		// auth group — an ops/cron caller has no JWT. Runs in production too,
 		// since that is where the data lives, and is registered ONLY when
@@ -199,11 +200,13 @@ func main() {
 		// header against the configured value, so an empty secret would leave
 		// the endpoint unauthenticated.
 		// Outside the 30s timeout group as well — EXPLAIN ANALYZE executes
-		// every query and the handler enforces its own 60s budget.
+		// every query and the handler enforces its own 60s budget. The runtime
+		// leak profile is a point-in-time snapshot.
 		if cfg.CronSecret != "" {
 			r.Route("/internal/profile", func(r chi.Router) {
 				r.Use(mw.RequireCronSecret(cfg.CronSecret))
 				r.Get("/quiz-list", quizH.Profile)
+				r.Get("/goroutine-leak", pprof.Handler("goroutineleak").ServeHTTP)
 			})
 		}
 
@@ -904,11 +907,12 @@ func main() {
 	log.Printf("qwish-backend listening on %s", addr)
 
 	srv := &http.Server{
-		Addr:         addr,
-		Handler:      r,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:                addr,
+		Handler:             r,
+		ReadTimeout:         15 * time.Second,
+		WriteTimeout:        30 * time.Second,
+		IdleTimeout:         60 * time.Second,
+		MaxHeaderValueCount: 100,
 	}
 
 	// Scheduling lives outside this process: the Render cron services in

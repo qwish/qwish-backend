@@ -1,11 +1,11 @@
 package push
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -25,7 +25,7 @@ type registerReq struct {
 // POST /api/v1/users/me/devices — register or refresh an FCM token.
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	var req registerReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Token == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Token == "" {
 		middleware.BadRequest(w, "token is required")
 		return
 	}

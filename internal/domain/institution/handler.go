@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -16,6 +15,7 @@ import (
 	"github.com/qwish/backend/internal/domain/auth"
 	"github.com/qwish/backend/internal/domain/enrollment"
 	"github.com/qwish/backend/internal/domain/notification"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -354,7 +354,7 @@ func (h *Handler) UpdateStudentStatus(w http.ResponseWriter, r *http.Request) {
 		Action string `json:"action"` // suspend | reactivate
 		Reason string `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request")
 		return
 	}
@@ -482,7 +482,7 @@ func (h *Handler) UpdateTeacherStatus(w http.ResponseWriter, r *http.Request) {
 		Action string `json:"action"`
 		Reason string `json:"reason"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	jsonx.NewDecoder(r.Body).Decode(&req)
 
 	var teacherName, teacherEmail, curStatus string
 	err := h.db.QueryRow(r.Context(),
@@ -548,7 +548,7 @@ func (h *Handler) InviteTeacher(w http.ResponseWriter, r *http.Request) {
 		Email string `json:"email"`
 		Name  string `json:"name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
 		middleware.BadRequest(w, "email is required")
 		return
 	}
@@ -659,7 +659,7 @@ func (h *Handler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 		Name        string  `json:"name"`
 		Description *string `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 		middleware.BadRequest(w, "name is required")
 		return
 	}
@@ -772,7 +772,7 @@ func (h *Handler) AddStudentToGroup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		UserID string `json:"user_id"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	jsonx.NewDecoder(r.Body).Decode(&req)
 	if _, err := h.db.Exec(r.Context(),
 		`INSERT INTO group_students (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, groupID, req.UserID); err != nil {
 		middleware.InternalError(w)
@@ -800,7 +800,7 @@ func (h *Handler) AddTeacherToGroup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		UserID string `json:"user_id"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	jsonx.NewDecoder(r.Body).Decode(&req)
 	if _, err := h.db.Exec(r.Context(),
 		`INSERT INTO group_teachers (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, groupID, req.UserID); err != nil {
 		middleware.InternalError(w)
@@ -829,7 +829,7 @@ func (h *Handler) UpdateGroup(w http.ResponseWriter, r *http.Request) {
 		Name        string  `json:"name"`
 		Description *string `json:"description"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	jsonx.NewDecoder(r.Body).Decode(&req)
 	if _, err := h.db.Exec(r.Context(),
 		`UPDATE groups SET name=$1, description=$2 WHERE id=$3`, req.Name, req.Description, groupID); err != nil {
 		middleware.InternalError(w)
@@ -928,7 +928,7 @@ func (h *Handler) RequestReferralCodeReset(w http.ResponseWriter, r *http.Reques
 		CodeType string `json:"code_type"`
 		Reason   string `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request")
 		return
 	}
@@ -1016,7 +1016,7 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		Timezone string `json:"timezone"`
 		Type     string `json:"type"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request")
 		return
 	}
@@ -1043,7 +1043,7 @@ func (h *Handler) UpdatePointRules(w http.ResponseWriter, r *http.Request) {
 		PlayWinScoreHidden *bool    `json:"play_win_score_hidden"`
 		PointExpiryMonths  *int     `json:"point_expiry_months"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request")
 		return
 	}

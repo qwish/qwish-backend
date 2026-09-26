@@ -1,12 +1,12 @@
 package enrollment
 
 import (
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -37,7 +37,7 @@ func (h *TeacherHandler) AddStudent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		UserID string `json:"user_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
 		middleware.BadRequest(w, "user_id is required")
 		return
 	}

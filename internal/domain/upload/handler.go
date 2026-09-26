@@ -1,10 +1,10 @@
 package upload
 
 import (
-	"encoding/json"
 	"net/http"
 	"time"
 
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 	"github.com/qwish/backend/internal/storage"
 )
@@ -27,7 +27,7 @@ type presignReq struct {
 // POST /api/v1/upload/presign
 func (h *Handler) PresignUpload(w http.ResponseWriter, r *http.Request) {
 	var req presignReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}

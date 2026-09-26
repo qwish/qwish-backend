@@ -2,13 +2,13 @@ package parent
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -46,7 +46,7 @@ func (h *Handler) Link(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		InviteCode string `json:"invite_code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.InviteCode == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.InviteCode == "" {
 		middleware.BadRequest(w, "invite_code is required")
 		return
 	}

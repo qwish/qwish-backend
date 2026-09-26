@@ -1,12 +1,12 @@
 package featureonboarding
 
 import (
-	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -66,7 +66,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		Status   string `json:"status"`
 		LastStep int    `json:"last_step"`
 	}
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	decoder := jsonx.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&in) != nil || (in.Status != "started" && in.Status != "dismissed" && in.Status != "completed") || in.LastStep < 0 || in.LastStep > 50 {
 		middleware.BadRequest(w, "status and a valid last_step are required")

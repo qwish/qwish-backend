@@ -2,7 +2,6 @@ package enrollment
 
 import (
 	"encoding/csv"
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -47,7 +47,7 @@ func (r rosterRequest) toInput() RosterInput {
 // POST /api/v1/institution/students
 func (h *InstitutionHandler) CreateStudent(w http.ResponseWriter, r *http.Request) {
 	var req rosterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -73,7 +73,7 @@ func (h *InstitutionHandler) CreateStudent(w http.ResponseWriter, r *http.Reques
 // PATCH /api/v1/institution/enrollments/{enrollmentId}
 func (h *InstitutionHandler) UpdateStudent(w http.ResponseWriter, r *http.Request) {
 	var req rosterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -177,7 +177,7 @@ func (h *InstitutionHandler) SetStudentStatus(w http.ResponseWriter, r *http.Req
 		Status string `json:"status"` // active | suspended | graduated | transferred
 		Reason string `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -205,7 +205,7 @@ func (h *InstitutionHandler) PromoteStudents(w http.ResponseWriter, r *http.Requ
 		ToGrade     string `json:"to_grade"`
 		ToSection   string `json:"to_section"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}

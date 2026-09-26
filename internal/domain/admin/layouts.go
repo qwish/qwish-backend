@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -311,7 +312,7 @@ func validLayoutJSON(raw json.RawMessage) bool {
 func decodeLayoutBody(w http.ResponseWriter, r *http.Request) (layoutBody, bool) {
 	var body layoutBody
 	// Cap the read so an oversized payload is rejected before it is buffered.
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxLayoutBytes+1024)).Decode(&body); err != nil {
+	if err := jsonx.NewDecoder(http.MaxBytesReader(w, r.Body, maxLayoutBytes+1024)).Decode(&body); err != nil {
 		middleware.BadRequest(w, "invalid JSON body")
 		return body, false
 	}
@@ -407,7 +408,7 @@ func (h *LayoutsHandler) Reorder(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		IDs []string `json:"ids"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.IDs) == 0 {
+	if err := jsonx.NewDecoder(r.Body).Decode(&body); err != nil || len(body.IDs) == 0 {
 		middleware.BadRequest(w, "ids must be a non-empty array of layout ids")
 		return
 	}

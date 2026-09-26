@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -244,7 +245,7 @@ func (h *Handler) GetMyEducation(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/users/me/education
 func (h *Handler) AddMyEducation(w http.ResponseWriter, r *http.Request) {
 	var req Education
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -288,7 +289,7 @@ func (h *Handler) AddMySkill(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Skill string `json:"skill"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Skill == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Skill == "" {
 		middleware.BadRequest(w, "skill is required")
 		return
 	}
@@ -316,7 +317,7 @@ func (h *Handler) UpdateMyDomain(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Domain string `json:"domain"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -355,7 +356,7 @@ func (h *Handler) UpdateMySettings(w http.ResponseWriter, r *http.Request) {
 		ProfilePrivate   *bool   `json:"profile_private"`
 		RecruiterVisible *bool   `json:"recruiter_visible"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -384,7 +385,7 @@ func (h *Handler) GetMyNotifPrefs(w http.ResponseWriter, r *http.Request) {
 // PATCH /api/v1/users/me/notification-preferences
 func (h *Handler) UpdateMyNotifPrefs(w http.ResponseWriter, r *http.Request) {
 	var raw map[string]bool
-	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&raw); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -460,7 +461,7 @@ func (h *Handler) RecordMyContentEvent(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "invalid content or event")
 		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "event is required")
 		return
 	}
@@ -527,7 +528,7 @@ func (h *Handler) SetFeaturedQuizzes(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		QuizIDs []string `json:"quiz_ids"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -554,7 +555,7 @@ func (h *Handler) GetMyLearningPreferences(w http.ResponseWriter, r *http.Reques
 func (h *Handler) UpdateMyLearningPreferences(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	var req LearningPreferences
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}

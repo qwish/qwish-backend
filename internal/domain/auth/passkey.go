@@ -13,6 +13,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -491,7 +492,7 @@ func (h *Handler) PasskeyRegisterFinish(w http.ResponseWriter, r *http.Request) 
 		Name     string          `json:"name"`
 		Response json.RawMessage `json:"response"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Response) == 0 {
+	if err := jsonx.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Response) == 0 {
 		middleware.BadRequest(w, "response is required")
 		return
 	}
@@ -545,7 +546,7 @@ func (h *Handler) PasskeyLoginBegin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email string `json:"email"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
 		middleware.BadRequest(w, "email is required")
 		return
 	}
@@ -589,7 +590,7 @@ func (h *Handler) PasskeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 		Email    string          `json:"email"`
 		Response json.RawMessage `json:"response"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Email == "" || len(body.Response) == 0 {
+	if err := jsonx.NewDecoder(r.Body).Decode(&body); err != nil || body.Email == "" || len(body.Response) == 0 {
 		middleware.BadRequest(w, "email and response are required")
 		return
 	}
@@ -719,7 +720,7 @@ func (h *Handler) PasskeyRename(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name string `json:"name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || id == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&body); err != nil || id == "" {
 		middleware.BadRequest(w, "id and name are required")
 		return
 	}
@@ -797,7 +798,7 @@ func (h *Handler) PasskeyLoginFinishDiscoverable(w http.ResponseWriter, r *http.
 	var body struct {
 		Response json.RawMessage `json:"response"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Response) == 0 {
+	if err := jsonx.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Response) == 0 {
 		middleware.BadRequest(w, "response is required")
 		return
 	}

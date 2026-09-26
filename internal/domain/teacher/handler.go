@@ -1,7 +1,6 @@
 package teacher
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -10,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -468,7 +468,7 @@ func (h *Handler) UpdateStudentSupport(w http.ResponseWriter, r *http.Request) {
 		Status   string  `json:"status"`
 		ReviewOn *string `json:"review_on"`
 	}
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+	decoder := jsonx.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&in) != nil || len(in.Note) > 4000 || len(in.Plan) > 4000 || (in.Status != "monitoring" && in.Status != "supporting" && in.Status != "resolved") {
 		middleware.BadRequest(w, "valid status and notes up to 4000 characters are required")

@@ -11,9 +11,9 @@ services:
         value: 8080
       - key: APP_ENV
         value: production
-      # go.mod requires 1.26.1; Render's default toolchain lags, so pin it.
+      # go.mod requires 1.27.1; Render's default toolchain lags, so pin it.
       - key: GO_VERSION
-        value: 1.26.1
+        value: 1.27.1
       # The five below are mustEnv in internal/config/config.go — the process
       # log.Fatalf's on boot if any is unset.
       - key: DATABASE_URL

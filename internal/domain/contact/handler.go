@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/domain/notification"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -58,7 +59,7 @@ func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 		Metadata  json.RawMessage `json:"metadata"` // optional topic-specific fields
 		Turnstile string          `json:"turnstileToken"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -213,7 +214,7 @@ func (h *Handler) Resolve(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Status string `json:"status"` // resolved | spam | in_progress
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}

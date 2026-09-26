@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -66,7 +67,7 @@ func validQuestion(q questionInput) bool {
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var in createInput
-	d := json.NewDecoder(r.Body)
+	d := jsonx.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if d.Decode(&in) != nil || strings.TrimSpace(in.Title) == "" || len(in.Title) > 160 || len(in.Questions) == 0 || len(in.Questions) > 100 {
 		middleware.BadRequest(w, "invalid survey payload")
@@ -177,7 +178,7 @@ func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 		Receipt string        `json:"receipt"`
 		Answers []answerInput `json:"answers"`
 	}
-	d := json.NewDecoder(r.Body)
+	d := jsonx.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if d.Decode(&in) != nil || len(in.Receipt) < 16 || len(in.Receipt) > 200 {
 		middleware.BadRequest(w, "invalid response")
@@ -334,7 +335,7 @@ func (h *Handler) SetStatus(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Status string `json:"status"`
 	}
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&in) != nil ||
+	if jsonx.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&in) != nil ||
 		(in.Status != "published" && in.Status != "closed" && in.Status != "archived") {
 		middleware.BadRequest(w, "status must be published, closed or archived")
 		return

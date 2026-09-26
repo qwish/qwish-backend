@@ -1,7 +1,6 @@
 package quiz
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -150,7 +150,7 @@ func (h *Handler) ReportQuiz(w http.ResponseWriter, r *http.Request) {
 		Reason      string `json:"reason"`
 		Description string `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Reason == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Reason == "" {
 		middleware.BadRequest(w, "reason is required")
 		return
 	}
@@ -168,7 +168,7 @@ func (h *Handler) ReportQuestion(w http.ResponseWriter, r *http.Request) {
 		Reason      string `json:"reason"`
 		Description string `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Reason == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Reason == "" {
 		middleware.BadRequest(w, "reason is required")
 		return
 	}
@@ -238,7 +238,7 @@ func (h *Handler) TeacherUnfavorite(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) TeacherCreate(w http.ResponseWriter, r *http.Request) {
 	var req CreateQuizReq
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
-	decoder := json.NewDecoder(r.Body)
+	decoder := jsonx.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil || strings.TrimSpace(req.Title) == "" || len(req.Title) > 160 ||
 		(req.Type != "knowledge_check" && req.Type != "play_and_win") {
@@ -289,7 +289,7 @@ func (h *Handler) TeacherCreate(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) TeacherDuplicate(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 2048)
 	var req DuplicateQuizReq
-	decoder := json.NewDecoder(r.Body)
+	decoder := jsonx.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid duplicate request")
@@ -321,7 +321,7 @@ func (h *Handler) TeacherDuplicate(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) AdminCreate(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var req AdminCreateQuizReq
-	decoder := json.NewDecoder(r.Body)
+	decoder := jsonx.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid quiz payload")
@@ -351,7 +351,7 @@ func (h *Handler) AdminGet(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) AdminUpdate(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	var req AdminCreateQuizReq
-	decoder := json.NewDecoder(r.Body)
+	decoder := jsonx.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid quiz payload")
@@ -383,7 +383,7 @@ func (h *Handler) GetTaxonomy(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) TeacherUpdate(w http.ResponseWriter, r *http.Request) {
 	var req CreateQuizReq
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
-	decoder := json.NewDecoder(r.Body)
+	decoder := jsonx.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil || strings.TrimSpace(req.Title) == "" || len(req.Title) > 160 ||
 		(req.Type != "knowledge_check" && req.Type != "play_and_win") ||
@@ -431,7 +431,7 @@ func (h *Handler) TeacherUpdate(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/teacher/quizzes/:quizId/questions
 func (h *Handler) TeacherAddQuestion(w http.ResponseWriter, r *http.Request) {
 	var req AddQuestionReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Prompt == "" || req.Type == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Prompt == "" || req.Type == "" {
 		middleware.BadRequest(w, "prompt and type are required")
 		return
 	}
@@ -472,7 +472,7 @@ func (h *Handler) TeacherGetQuestions(w http.ResponseWriter, r *http.Request) {
 // PATCH /api/v1/teacher/quizzes/:quizId/questions/:questionId
 func (h *Handler) TeacherUpdateQuestion(w http.ResponseWriter, r *http.Request) {
 	var req AddQuestionReq
-	json.NewDecoder(r.Body).Decode(&req)
+	jsonx.NewDecoder(r.Body).Decode(&req)
 	if err := h.svc.UpdateQuestion(r.Context(),
 		chi.URLParam(r, "quizId"), chi.URLParam(r, "questionId"), middleware.GetUserID(r), req); err != nil {
 		middleware.Error(w, http.StatusForbidden, "FORBIDDEN", err.Error())
@@ -524,7 +524,7 @@ func (h *Handler) TeacherReorderQuestions(w http.ResponseWriter, r *http.Request
 	var req struct {
 		Order []string `json:"order"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Order) == 0 {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Order) == 0 {
 		middleware.BadRequest(w, "order array is required")
 		return
 	}

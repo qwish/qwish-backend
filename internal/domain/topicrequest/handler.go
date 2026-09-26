@@ -1,13 +1,13 @@
 package topicrequest
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -42,7 +42,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		Subject     *string `json:"subject"`
 		Description *string `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Topic == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Topic == "" {
 		middleware.BadRequest(w, "topic is required")
 		return
 	}
@@ -136,7 +136,7 @@ func (h *Handler) TeacherList(w http.ResponseWriter, r *http.Request) {
 // PATCH /api/v1/teacher/topic-requests/:requestId
 func (h *Handler) TeacherUpdate(w http.ResponseWriter, r *http.Request) {
 	var req updateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request")
 		return
 	}
@@ -174,7 +174,7 @@ func (h *Handler) TeacherUpdate(w http.ResponseWriter, r *http.Request) {
 // PATCH /api/v1/institution/topic-requests/:requestId
 func (h *Handler) InstitutionUpdate(w http.ResponseWriter, r *http.Request) {
 	var req updateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request")
 		return
 	}

@@ -1,7 +1,6 @@
 package learning
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/domain/curriculum"
 	"github.com/qwish/backend/internal/domain/notification"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -42,7 +42,7 @@ type misconceptionInput struct {
 
 func (h *Handler) CreateMisconception(w http.ResponseWriter, r *http.Request) {
 	var in misconceptionInput
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+	decoder := jsonx.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&in) != nil || in.ConceptID == "" || strings.TrimSpace(in.Code) == "" || strings.TrimSpace(in.Title) == "" || len(in.Code) > 80 || len(in.Title) > 200 || len(in.Description) > 2000 {
 		middleware.BadRequest(w, "concept_id, code and title are required")
@@ -76,7 +76,7 @@ type mapInput struct {
 
 func (h *Handler) MapQuestion(w http.ResponseWriter, r *http.Request) {
 	var in mapInput
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
+	decoder := jsonx.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&in) != nil || len(in.Options) > 20 {
 		middleware.BadRequest(w, "invalid learning map")
@@ -621,7 +621,7 @@ func (h *Handler) ListAssignments(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) CreateAssignment(w http.ResponseWriter, r *http.Request) {
 	var in assignmentInput
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+	decoder := jsonx.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&in) != nil || in.GroupID == "" || in.QuizID == "" || (in.Purpose != "baseline" && in.Purpose != "practice" && in.Purpose != "follow_up" && in.Purpose != "diagnostic") {
 		middleware.BadRequest(w, "group_id, quiz_id and a valid purpose are required")
@@ -828,7 +828,7 @@ type followUpReviewInput struct {
 
 func (h *Handler) ReviewFollowUp(w http.ResponseWriter, r *http.Request) {
 	var in followUpReviewInput
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	decoder := jsonx.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&in) != nil || (in.Status != "continue_support" && in.Status != "resolved") {
 		middleware.BadRequest(w, "status must be continue_support or resolved")
@@ -879,7 +879,7 @@ type reviewInput struct {
 
 func (h *Handler) Review(w http.ResponseWriter, r *http.Request) {
 	var in reviewInput
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+	decoder := jsonx.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&in) != nil || (in.Status != "confirmed" && in.Status != "dismissed") || strings.TrimSpace(in.Reason) == "" || len(in.Reason) > 1000 {
 		middleware.BadRequest(w, "status and reason are required")

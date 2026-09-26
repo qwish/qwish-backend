@@ -1,13 +1,13 @@
 package demo
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -48,7 +48,7 @@ func (h *Handler) Score(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Answers []Answer `json:"answers"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "answers are required")
 		return
 	}
@@ -80,7 +80,7 @@ func (h *Handler) AdminList(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) AdminCreate(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req CreateReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Title == "" || len(req.Questions) == 0 {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Title == "" || len(req.Questions) == 0 {
 		middleware.BadRequest(w, "title and at least one question are required")
 		return
 	}
@@ -136,7 +136,7 @@ func (h *Handler) AdminSetLive(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Live *bool `json:"live"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Live == nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Live == nil {
 		middleware.BadRequest(w, "live is required")
 		return
 	}

@@ -1,12 +1,12 @@
 package enrollment
 
 import (
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"strings"
 
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -18,7 +18,7 @@ type joinRequest struct {
 
 func readJoinRequest(w http.ResponseWriter, r *http.Request) (joinRequest, bool) {
 	var req joinRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2048)).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(http.MaxBytesReader(w, r.Body, 2048)).Decode(&req); err != nil {
 		middleware.BadRequest(w, "enter the code your institution shared")
 		return req, false
 	}

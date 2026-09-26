@@ -1,12 +1,12 @@
 package studygroup
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -24,7 +24,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		Name        string  `json:"name"`
 		Description *string `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -70,7 +70,7 @@ func (h *Handler) Join(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		InviteCode string `json:"invite_code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.InviteCode) == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.InviteCode) == "" {
 		middleware.BadRequest(w, "invite_code is required")
 		return
 	}

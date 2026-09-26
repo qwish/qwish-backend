@@ -2,11 +2,11 @@ package onboarding
 
 import (
 	"crypto/rand"
-	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -40,7 +40,7 @@ func (h *Handler) RegisterInstitution(w http.ResponseWriter, r *http.Request) {
 
 		Turnstile string `json:"turnstileToken"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}

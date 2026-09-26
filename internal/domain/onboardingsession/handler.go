@@ -1,13 +1,13 @@
 package onboardingsession
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -65,7 +65,7 @@ func respond(w http.ResponseWriter, err error) {
 // POST /api/v1/onboarding/session
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	var req prefsReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -94,7 +94,7 @@ func (h *Handler) UpdatePrefs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req prefsReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -143,7 +143,7 @@ func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 		QuizID  string   `json:"quiz_id"`
 		Answers []Answer `json:"answers"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.QuizID == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.QuizID == "" {
 		middleware.BadRequest(w, "quiz_id and answers are required")
 		return
 	}

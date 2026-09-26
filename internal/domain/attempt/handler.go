@@ -1,11 +1,11 @@
 package attempt
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 	"github.com/qwish/backend/internal/playintegrity"
 )
@@ -31,7 +31,7 @@ func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 	// A body is optional for ordinary catalogue quizzes. When present, reject
 	// malformed JSON rather than silently dropping assignment context.
 	if r.Body != nil && r.ContentLength != 0 {
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+		decoder := jsonx.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&input); err != nil {
 			middleware.BadRequest(w, "invalid attempt context")
@@ -50,7 +50,7 @@ func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/attempts/:attemptId/answers
 func (h *Handler) SubmitAnswer(w http.ResponseWriter, r *http.Request) {
 	var req AnswerReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.QuestionID == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.QuestionID == "" {
 		middleware.BadRequest(w, "question_id and answer are required")
 		return
 	}
@@ -66,7 +66,7 @@ func (h *Handler) SubmitAnswer(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/attempts/:attemptId/behavior
 func (h *Handler) RecordBehavior(w http.ResponseWriter, r *http.Request) {
 	var req BehaviorBatch
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	decoder := jsonx.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid behavior event payload")
@@ -99,7 +99,7 @@ func (h *Handler) Complete(w http.ResponseWriter, r *http.Request) {
 			IntegrityToken string `json:"integrity_token"`
 		}
 		if r.Body != nil && r.ContentLength != 0 {
-			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
+			decoder := jsonx.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
 			decoder.DisallowUnknownFields()
 			if err := decoder.Decode(&input); err != nil {
 				middleware.BadRequest(w, "invalid completion payload")

@@ -1,9 +1,9 @@
 package offline
 
 import (
-	"encoding/json"
 	"net/http"
 
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -36,7 +36,7 @@ func (h *Handler) Sync(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Results []SyncResult `json:"results"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}

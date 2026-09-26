@@ -2,7 +2,6 @@ package admin
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -167,7 +167,7 @@ func (h *StudentAdminHandler) Merge(w http.ResponseWriter, r *http.Request) {
 		KeepUserID  string `json:"keep_user_id"`
 		MergeUserID string `json:"merge_user_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil ||
 		req.KeepUserID == "" || req.MergeUserID == "" {
 		middleware.BadRequest(w, "keep_user_id and merge_user_id are required")
 		return

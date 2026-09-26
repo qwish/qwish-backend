@@ -3,13 +3,13 @@ package auth
 import (
 	"context"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -32,7 +32,7 @@ func (h *Handler) RecruiterTestLogin(w http.ResponseWriter, r *http.Request) {
 		Secret string `json:"secret"`
 		Email  string `json:"email"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -80,7 +80,7 @@ func (h *Handler) SendOTP(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email string `json:"email"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
 		middleware.BadRequest(w, "email is required")
 		return
 	}
@@ -108,7 +108,7 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		Email string `json:"email"`
 		OTP   string `json:"otp"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -234,7 +234,7 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 		InviteToken       string `json:"invite_token"`       // teacher email-invite token
 		OnboardingSession string `json:"onboarding_session"` // pre-signup calibration
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -386,7 +386,7 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RefreshToken string `json:"refresh_token"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RefreshToken == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.RefreshToken == "" {
 		middleware.BadRequest(w, "refresh_token is required")
 		return
 	}
@@ -470,7 +470,7 @@ func (h *Handler) UpdateReferralCode(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ReferralCode string `json:"referral_code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ReferralCode == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.ReferralCode == "" {
 		middleware.BadRequest(w, "referral_code is required")
 		return
 	}

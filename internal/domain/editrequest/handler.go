@@ -1,12 +1,12 @@
 package editrequest
 
 import (
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -23,7 +23,7 @@ func (h *Handler) Propose(w http.ResponseWriter, r *http.Request) {
 		ProposedValue string `json:"proposed_value"`
 		Note          string `json:"note"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -76,7 +76,7 @@ func (h *Handler) Review(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Decision string `json:"decision"` // approved | rejected
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}

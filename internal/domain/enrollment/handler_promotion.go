@@ -1,13 +1,13 @@
 package enrollment
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -33,7 +33,7 @@ func (h *InstitutionHandler) CreatePromotion(w http.ResponseWriter, r *http.Requ
 			Reason       string `json:"reason"`
 		} `json:"retained"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}

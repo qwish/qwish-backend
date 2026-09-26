@@ -1,11 +1,11 @@
 package enrollment
 
 import (
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -18,7 +18,7 @@ func (h *StudentHandler) Claim(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ClaimCode string `json:"claim_code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ClaimCode == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.ClaimCode == "" {
 		middleware.BadRequest(w, "claim_code is required")
 		return
 	}
@@ -48,7 +48,7 @@ func (h *StudentHandler) JoinClass(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		InviteCode string `json:"invite_code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.InviteCode == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.InviteCode == "" {
 		middleware.BadRequest(w, "invite_code is required")
 		return
 	}

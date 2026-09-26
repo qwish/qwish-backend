@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -174,7 +175,7 @@ func (h *Handler) SetInstitutionMultiplier(w http.ResponseWriter, r *http.Reques
 		Value  float64 `json:"value"`
 		Reason string  `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -560,7 +561,7 @@ func (h *Handler) UpdateContactSubmission(w http.ResponseWriter, r *http.Request
 		AssigneeID   *string `json:"assignee_id"`
 		InternalNote *string `json:"internal_note"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -771,7 +772,7 @@ func (h *Handler) PutSecurityPolicy(w http.ResponseWriter, r *http.Request) {
 		Require *bool  `json:"require_admin_passkeys"`
 		Reason  string `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Require == nil || strings.TrimSpace(req.Reason) == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Require == nil || strings.TrimSpace(req.Reason) == "" {
 		middleware.BadRequest(w, "require_admin_passkeys and a reason are required")
 		return
 	}
@@ -800,7 +801,7 @@ func (h *Handler) ResetAdminPasskeys(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	if json.NewDecoder(r.Body).Decode(&req) != nil || strings.TrimSpace(req.Reason) == "" {
+	if jsonx.NewDecoder(r.Body).Decode(&req) != nil || strings.TrimSpace(req.Reason) == "" {
 		middleware.BadRequest(w, "a reason is required")
 		return
 	}
@@ -840,7 +841,7 @@ func (h *Handler) PutPointsReserve(w http.ResponseWriter, r *http.Request) {
 		WarnPct *float64 `json:"warn_pct"`
 		Reason  string   `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Reason) == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Reason) == "" {
 		middleware.BadRequest(w, "a reason is required")
 		return
 	}
@@ -949,7 +950,7 @@ func (h *Handler) EstimateAnnouncementReach(w http.ResponseWriter, r *http.Reque
 		Audience       string   `json:"audience"`
 		InstitutionIDs []string `json:"institution_ids"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}

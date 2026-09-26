@@ -22,6 +22,7 @@ import (
 	"github.com/qwish/backend/internal/domain/auth"
 	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/domain/scoring"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 	"github.com/qwish/backend/internal/supabase"
 )
@@ -388,7 +389,7 @@ func (h *Handler) RejectInstitution(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	jsonx.NewDecoder(r.Body).Decode(&req)
 	h.db.Exec(r.Context(), `DELETE FROM institutions WHERE id=$1 AND status='pending'`, instID)
 	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "reject_institution", "institution", instID, req.Reason)
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "institution rejected"})
@@ -463,7 +464,7 @@ func (h *Handler) SuspendInstitution(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	jsonx.NewDecoder(r.Body).Decode(&req)
 	h.db.Exec(r.Context(), `UPDATE institutions SET status='suspended', updated_at=now() WHERE id=$1`, instID)
 	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "suspend_institution", "institution", instID, req.Reason)
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "institution suspended"})
@@ -723,7 +724,7 @@ func (h *Handler) SuspendUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	jsonx.NewDecoder(r.Body).Decode(&req)
 	h.db.Exec(r.Context(), `UPDATE users SET status='suspended', suspension_reason=$1, updated_at=now() WHERE id=$2`, req.Reason, userID)
 	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "suspend_user", "user", userID, req.Reason)
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "user suspended"})
@@ -754,7 +755,7 @@ func (h *Handler) AdjustPoints(w http.ResponseWriter, r *http.Request) {
 		Amount int64  `json:"amount"`
 		Reason string `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Reason == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Reason == "" {
 		middleware.BadRequest(w, "amount and reason are required")
 		return
 	}
@@ -937,7 +938,7 @@ func (h *Handler) RejectQuiz(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	jsonx.NewDecoder(r.Body).Decode(&req)
 	h.db.Exec(r.Context(),
 		`UPDATE quizzes SET status='rejected', rejection_reason=$1, updated_at=now() WHERE id=$2`, req.Reason, quizID)
 	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "reject_quiz", "quiz", quizID, req.Reason)
@@ -950,7 +951,7 @@ func (h *Handler) UnpublishQuiz(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	jsonx.NewDecoder(r.Body).Decode(&req)
 	h.db.Exec(r.Context(), `UPDATE quizzes SET status='closed', updated_at=now() WHERE id=$1`, quizID)
 	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "unpublish_quiz", "quiz", quizID, req.Reason)
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "quiz unpublished"})
@@ -1062,7 +1063,7 @@ func (h *Handler) ResolveReport(w http.ResponseWriter, r *http.Request) {
 		Resolution string `json:"resolution"`
 		Note       string `json:"note"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -1142,7 +1143,7 @@ func (h *Handler) UpdatePointEconomy(w http.ResponseWriter, r *http.Request) {
 		Value  json.RawMessage `json:"value"`
 		Reason string          `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "value is required")
 		return
 	}
@@ -1185,7 +1186,7 @@ func (h *Handler) CreateAnnouncement(w http.ResponseWriter, r *http.Request) {
 		InstitutionIDs []string   `json:"institution_ids"`
 		ScheduledAt    *time.Time `json:"scheduled_at"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.Body) == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.Body) == "" {
 		middleware.BadRequest(w, "title and body are required")
 		return
 	}
@@ -1346,7 +1347,7 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 		Email string `json:"email"`
 		Role  string `json:"role"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.Email == "" || req.Role == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.Email == "" || req.Role == "" {
 		middleware.BadRequest(w, "name, email, and role are required")
 		return
 	}
@@ -1500,7 +1501,7 @@ func (h *Handler) UpdateAdminAccount(w http.ResponseWriter, r *http.Request) {
 		Status *string `json:"status"`
 		Reason string  `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.Role == nil && req.Status == nil) {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || (req.Role == nil && req.Status == nil) {
 		middleware.BadRequest(w, "role or status is required")
 		return
 	}
@@ -1680,7 +1681,7 @@ func (h *Handler) RequestEdits(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Feedback string `json:"feedback"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Feedback == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Feedback == "" {
 		middleware.BadRequest(w, "feedback is required")
 		return
 	}
@@ -1912,7 +1913,7 @@ func (h *Handler) CreatePromo(w http.ResponseWriter, r *http.Request) {
 		InstitutionIDs []string   `json:"institution_ids"`
 		Status         string     `json:"status"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Title) == "" || req.Placement == "" || req.Target == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Title) == "" || req.Placement == "" || req.Target == "" {
 		middleware.BadRequest(w, "title, placement, and target are required")
 		return
 	}
@@ -1990,7 +1991,7 @@ func (h *Handler) UpdatePromoStatus(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Status string `json:"status"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.Status != "active" && req.Status != "inactive" && req.Status != "draft") {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || (req.Status != "active" && req.Status != "inactive" && req.Status != "draft") {
 		middleware.BadRequest(w, "status is required")
 		return
 	}
@@ -2133,7 +2134,7 @@ func (h *Handler) CreateBrand(w http.ResponseWriter, r *http.Request) {
 		Website      *string `json:"website"`
 		RewardPool   float64 `json:"reward_pool"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 		middleware.BadRequest(w, "name is required")
 		return
 	}
@@ -2246,7 +2247,7 @@ func (h *Handler) RejectSponsorshipRequest(w http.ResponseWriter, r *http.Reques
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	jsonx.NewDecoder(r.Body).Decode(&req)
 	adminID := middleware.GetAdminID(r)
 	tag, err := h.db.Exec(r.Context(),
 		`UPDATE sponsorship_requests SET status='rejected', reason=$1, reviewed_by=$2, reviewed_at=now()
@@ -2387,7 +2388,7 @@ func (h *Handler) ProvisionAdmin(w http.ResponseWriter, r *http.Request) {
 		AdminName  string `json:"admin_name"`  // overrides onboarding_admin_name if provided
 		AdminEmail string `json:"admin_email"` // overrides contact_email if provided
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	jsonx.NewDecoder(r.Body).Decode(&req)
 
 	res, err := h.provisionInstitutionAdmin(r.Context(), instID, req.AdminName, req.AdminEmail)
 	if err != nil {

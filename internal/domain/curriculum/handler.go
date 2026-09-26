@@ -1,7 +1,6 @@
 package curriculum
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -78,7 +78,7 @@ func pathID(w http.ResponseWriter, r *http.Request, key string) (string, bool) {
 
 func decode(w http.ResponseWriter, r *http.Request, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
-	d := json.NewDecoder(r.Body)
+	d := jsonx.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(target); err != nil {
 		middleware.BadRequest(w, "invalid JSON body or unsupported fields")

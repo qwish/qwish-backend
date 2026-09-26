@@ -1,13 +1,13 @@
 package user
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -76,7 +76,7 @@ type profileEntryInput struct {
 // POST /api/v1/users/me/profile-entries
 func (h *ProfileEntryHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var in profileEntryInput
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&in); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
@@ -105,7 +105,7 @@ func (h *ProfileEntryHandler) Create(w http.ResponseWriter, r *http.Request) {
 // PATCH /api/v1/users/me/profile-entries/{entryId}
 func (h *ProfileEntryHandler) Update(w http.ResponseWriter, r *http.Request) {
 	var in profileEntryInput
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&in); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}

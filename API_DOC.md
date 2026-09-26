@@ -4007,3 +4007,16 @@ Apply `075_misconception_evidence_integrity.sql` before deploying this API versi
 - `GET /teacher/questions/{questionId}/learning-map` adds `option_mappings: [{option_id, misconception_id}]`. Send that array as `options` when replacing the map. Correct options, inactive misconceptions, and single-option mappings for ordered-answer questions are rejected; failed replacements leave the previous map intact.
 
 Historical repair is limited to information that was actually recorded: the migration separates recoverable timeout/correctness data and preserves existing diagnostic tags. It cannot recover tags previously discarded by the old uniqueness constraint or reconstruct past mapping edits. Pre-migration attempts retain their question/option snapshots but receive an empty diagnostic mapping; newly started attempts capture the full context. Historical game scores are not rewritten. Coordinate the migration and API rollout so old API processes do not continue writing legacy-only diagnostic tags after migration.
+
+## Membership consistency (migration 076)
+
+Deploy migration 076 with the backend before deploying the updated dashboards.
+
+- Student enrollment is authoritative for institute rosters and account institute labels.
+- `GET /api/v1/admin/institutions/{institutionId}/students` returns the same paginated enrollment rows and metadata as `GET /api/v1/institution/students`. It uses the existing platform-admin authentication gate. A roster row can have a null account `id` until claimed.
+- Default rosters include active, suspended and pending-claim entries. Explicit graduated/transferred filters return historical rows. Deleted accounts and nonstudents are excluded.
+- Pending admission requests remain in Admissions; they become roster entries only after admission completes.
+- Migration 076 removes existing super-admin memberships, cancels their open admissions and preserves ended enrollment history. Constraints prevent super-admin institute assignment and class membership; only students may hold live enrollments.
+- Legacy affiliated student accounts missing enrollments are backfilled (or linked to a unique matching unclaimed roster row). Historical enrollments and open admissions are not automatically reactivated/approved. Existing live enrollments reconcile stale account institute pointers.
+- Both student screens refresh every 30 seconds while visible and on tab focus, reject stale network responses, and offer manual refresh. The platform roster supports pagination beyond 50 students.
+- NumPie recognizes platform roles explicitly; unknown roles no longer become students and nonstudents cannot enter the join flow.

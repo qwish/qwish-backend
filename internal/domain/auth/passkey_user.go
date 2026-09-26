@@ -516,7 +516,7 @@ func (h *Handler) UserPasskeyLoginFinish(w http.ResponseWriter, r *http.Request)
 	}
 
 	h.svc.touchUserCredential(r.Context(), cred)
-	h.writeUserPasskeySession(w, u)
+	h.writeUserPasskeySession(w, r, u)
 }
 
 // UserPasskeyLoginBeginDiscoverable starts a usernameless assertion.
@@ -589,11 +589,14 @@ func (h *Handler) UserPasskeyLoginFinishDiscoverable(w http.ResponseWriter, r *h
 	}
 
 	h.svc.touchUserCredential(r.Context(), cred)
-	h.writeUserPasskeySession(w, resolved)
+	h.writeUserPasskeySession(w, r, resolved)
 }
 
 // writeUserPasskeySession mints a session for the verified user.
-func (h *Handler) writeUserPasskeySession(w http.ResponseWriter, u *userAccount) {
+func (h *Handler) writeUserPasskeySession(w http.ResponseWriter, r *http.Request, u *userAccount) {
+	if h.rejectAppLogin(w, r, u.Role, u.Email) {
+		return
+	}
 	access, refresh, err := h.svc.mintSession(u.SupabaseUID, u.Email, u.TokenGeneration)
 	if err != nil {
 		middleware.InternalError(w)

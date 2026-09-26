@@ -246,9 +246,9 @@ func (h *Handler) ListInstitutions(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.db.Query(r.Context(),
 		`SELECT id, name, type, status, contact_email, verified_at, created_at,
-			(SELECT COUNT(*) FROM enrollments e
-			 WHERE e.institution_id = i.id
-			   AND e.status IN ('pending_claim','active','suspended')) AS student_count,
+			(SELECT COUNT(*) FROM enrollments e LEFT JOIN users su ON su.id=e.user_id
+ WHERE e.institution_id=i.id AND e.status IN ('pending_claim','active','suspended')
+ AND (e.user_id IS NULL OR (su.role='student' AND su.deleted_at IS NULL))) AS student_count,
 			(SELECT COUNT(*) FROM users u WHERE u.institution_id = i.id AND u.role='teacher') AS teacher_count,
 			(SELECT COUNT(*) FROM quizzes q WHERE q.institution_id = i.id AND q.deleted_at IS NULL) AS quiz_count,
 			(SELECT COUNT(*) FROM quizzes q WHERE q.institution_id = i.id AND q.deleted_at IS NULL AND q.status='published') AS active_quizzes,
@@ -418,12 +418,12 @@ func (h *Handler) GetInstitution(w http.ResponseWriter, r *http.Request) {
 	var studentCount, teacherCount, quizCount, activeQuizzes, sJoined, tJoined int
 	var avgStreak *float64
 	h.db.QueryRow(r.Context(), `SELECT
-		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='student' AND deleted_at IS NULL),
+		(SELECT COUNT(*) FROM enrollments e LEFT JOIN users u ON u.id=e.user_id WHERE e.institution_id=$1 AND e.status IN ('pending_claim','active','suspended') AND (e.user_id IS NULL OR (u.role='student' AND u.deleted_at IS NULL))),
 		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher' AND deleted_at IS NULL),
 		(SELECT COUNT(*) FROM quizzes WHERE institution_id=$1 AND deleted_at IS NULL),
 		(SELECT COUNT(*) FROM quizzes WHERE institution_id=$1 AND deleted_at IS NULL AND status='published'),
 		(SELECT AVG(current_streak) FROM users WHERE institution_id=$1 AND role='student' AND status='active'),
-		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='student'),
+		(SELECT COUNT(*) FROM enrollments e JOIN users u ON u.id=e.user_id WHERE e.institution_id=$1 AND e.status IN ('active','suspended') AND u.role='student' AND u.deleted_at IS NULL),
 		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher')`, instID,
 	).Scan(&studentCount, &teacherCount, &quizCount, &activeQuizzes, &avgStreak, &sJoined, &tJoined)
 
@@ -575,6 +575,8 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	args := []interface{}{}
 	// Only end-user roles are managed here; platform staff (moderator,
 	// support_agent, super_admin) are administered on the Admin Accounts page.
+	from := ` FROM users u LEFT JOIN enrollments e ON e.user_id=u.id AND e.status IN ('active','suspended')
+	 LEFT JOIN institutions i ON i.id=CASE WHEN u.role='student' THEN e.institution_id ELSE u.institution_id END `
 	where := `u.deleted_at IS NULL AND u.role IN ('student','teacher','parent','institution_admin')`
 	n := 1
 	if s := q.Get("search"); s != "" {
@@ -593,34 +595,31 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 		n++
 	}
 	if v := q.Get("institution_id"); v != "" {
-		where += fmt.Sprintf(` AND u.institution_id=$%d`, n)
+		where += fmt.Sprintf(` AND (CASE WHEN u.role='student' THEN e.institution_id ELSE u.institution_id END)=$%d`, n)
 		args = append(args, v)
 		n++
 	}
-	// The institution-scoped student view must agree with the institute
-	// roster, which is enrollment-backed. Keep global user management broad,
-	// but exclude stale student accounts from a scoped student roster.
-	if q.Get("role") == "student" && q.Get("institution_id") != "" {
-		where += ` AND EXISTS (
-			SELECT 1 FROM enrollments e
-			 WHERE e.user_id=u.id
-			   AND e.institution_id=u.institution_id
-			   AND e.status IN ('pending_claim','active','suspended')
-		)`
-	}
 
 	var total int
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users u WHERE `+where, args...).Scan(&total)
+	if err := h.db.QueryRow(r.Context(), `SELECT COUNT(*)`+from+` WHERE `+where, args...).Scan(&total); err != nil {
+		middleware.InternalError(w)
+		return
+	}
 	args = append(args, limit, offset)
 
-	rows, _ := h.db.Query(r.Context(),
-		`SELECT u.id, u.display_name, u.email, u.role, COALESCE(i.name,'') as inst, u.status, u.last_active_at, u.total_points, u.current_streak
-		 FROM users u LEFT JOIN institutions i ON i.id=u.institution_id
-		 WHERE `+where+fmt.Sprintf(` ORDER BY u.created_at DESC LIMIT $%d OFFSET $%d`, n, n+1),
+	rows, err := h.db.Query(r.Context(),
+		`SELECT u.id, u.display_name, u.email, u.role, COALESCE(i.name,'') as inst, u.status, u.last_active_at, u.total_points, u.current_streak, e.id, e.roll_number
+		 `+from+` WHERE `+where+fmt.Sprintf(` ORDER BY u.created_at DESC, u.id LIMIT $%d OFFSET $%d`, n, n+1),
 		args...)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
 	defer rows.Close()
 
 	type userRow struct {
+		EnrollmentID  *string    `json:"enrollment_id"`
+		RollNumber    *string    `json:"roll_number"`
 		ID            string     `json:"id"`
 		DisplayName   string     `json:"display_name"`
 		Email         string     `json:"email"`
@@ -634,8 +633,15 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	var users []userRow
 	for rows.Next() {
 		var u userRow
-		rows.Scan(&u.ID, &u.DisplayName, &u.Email, &u.Role, &u.Institution, &u.Status, &u.LastActiveAt, &u.TotalPoints, &u.CurrentStreak)
+		if err := rows.Scan(&u.ID, &u.DisplayName, &u.Email, &u.Role, &u.Institution, &u.Status, &u.LastActiveAt, &u.TotalPoints, &u.CurrentStreak, &u.EnrollmentID, &u.RollNumber); err != nil {
+			middleware.InternalError(w)
+			return
+		}
 		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		middleware.InternalError(w)
+		return
 	}
 	if users == nil {
 		users = []userRow{}

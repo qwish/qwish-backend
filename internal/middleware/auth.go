@@ -132,6 +132,10 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 					Error(w, http.StatusForbidden, "ACCOUNT_SUSPENDED", "account is suspended")
 					return
 				}
+				if r.Header.Get("X-Qwish-Client") == "numpie" {
+					Error(w, http.StatusForbidden, "APP_LOGIN_DENIED", "Login failed")
+					return
+				}
 				ctx := context.WithValue(r.Context(), ContextKeyAdminID, adminID)
 				ctx = context.WithValue(ctx, ContextKeyUserID, adminID)
 				ctx = context.WithValue(ctx, ContextKeyRole, adminRole)
@@ -139,6 +143,10 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 				return
 			}
 
+			if r.Header.Get("X-Qwish-Client") == "numpie" && u.Role != "student" && u.Role != "parent" {
+				Error(w, http.StatusForbidden, "APP_LOGIN_DENIED", "Login failed")
+				return
+			}
 			if u.Status == "suspended" {
 				Error(w, http.StatusForbidden, "ACCOUNT_SUSPENDED", "account is suspended")
 				return

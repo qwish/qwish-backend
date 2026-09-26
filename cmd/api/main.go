@@ -165,7 +165,7 @@ func main() {
 				w.Header().Set("Vary", "Origin")
 			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Qwish-Client")
 			if req.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
 				return
@@ -784,6 +784,7 @@ func main() {
 					// Cross-institution student tooling. Search is read-only;
 					// merge and purge are irreversible, so super_admin only.
 					r.Get("/students/search", studentAdminH.Search)
+					r.Get("/institutions/{institutionId}/students", institutionH.ListStudentsForAdmin)
 					r.With(mw.RequireRole("super_admin")).Post("/students/merge", studentAdminH.Merge)
 					r.With(mw.RequireRole("super_admin")).Delete("/students/{userId}/purge", studentAdminH.Purge)
 

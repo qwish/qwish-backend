@@ -154,17 +154,20 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Organisation policy: once passkeys are required, an administrator who
-	// has one must use it. Admins without a passkey can still use a code so
-	// they can enrol one — refusing them would lock them out.
-	if h.svc.PasskeyRequiredForAdmin(r.Context(), uid) {
-		middleware.Error(w, http.StatusForbidden, "PASSKEY_REQUIRED",
-			"your organisation requires administrators to sign in with a passkey")
-		return
-	}
-
 	existingUser, err := h.svc.GetUserForLogin(r.Context(), uid, verifiedEmail)
 	if err == nil {
+		if h.rejectAppLogin(w, r, existingUser.Role, existingUser.Email) {
+			return
+		}
+		// Organisation policy: once passkeys are required, an administrator who
+		// has one must use it. Admins without a passkey can still use a code so
+		// they can enrol one — refusing them would lock them out.
+		if h.svc.PasskeyRequiredForAdmin(r.Context(), uid) {
+			middleware.Error(w, http.StatusForbidden, "PASSKEY_REQUIRED",
+				"your organisation requires administrators to sign in with a passkey")
+			return
+		}
+
 		// A teacher awaiting institution verification cannot sign in yet. Return
 		// 403 without tokens so the client can't enter the dashboard.
 		if existingUser.Role == "teacher" && existingUser.Status == "pending" {
@@ -190,6 +193,18 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 
 	// Not in users — check admin_accounts (invited admins have no users row)
 	if admin, aerr := h.svc.GetAdminForLogin(r.Context(), uid, req.Email); aerr == nil {
+		if h.rejectAppLogin(w, r, admin.Role, admin.Email) {
+			return
+		}
+		// Organisation policy: once passkeys are required, an administrator who
+		// has one must use it. Admins without a passkey can still use a code so
+		// they can enrol one — refusing them would lock them out.
+		if h.svc.PasskeyRequiredForAdmin(r.Context(), uid) {
+			middleware.Error(w, http.StatusForbidden, "PASSKEY_REQUIRED",
+				"your organisation requires administrators to sign in with a passkey")
+			return
+		}
+
 		switch admin.Status {
 		case "active":
 			// proceed
@@ -300,6 +315,10 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Header.Get("X-Qwish-Client") == "numpie" && role != "student" && role != "parent" {
+		middleware.Error(w, http.StatusForbidden, "APP_LOGIN_DENIED", "Login failed")
+		return
+	}
 	newUser, err := h.svc.CreateUser(r.Context(), uid, req.FullName, email, role, instID, status)
 	if err != nil {
 		// Lost the race to a concurrent signup between the check above and this
@@ -400,6 +419,9 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	// Non-passkey tokens fall through to the Supabase refresh path below.
 	if sub, gen, ok := h.svc.PasskeyRefreshSubject(req.RefreshToken); ok {
 		if access, refresh, ok := h.svc.TryPasskeyRefresh(r.Context(), req.RefreshToken); ok {
+			if h.rejectAppRefresh(w, r, sub) {
+				return
+			}
 			middleware.JSON(w, http.StatusOK, map[string]interface{}{
 				"access_token":  access,
 				"refresh_token": refresh,
@@ -407,6 +429,9 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if access, refresh, ok := h.svc.TryUserPasskeyRefresh(r.Context(), sub, gen); ok {
+			if h.rejectAppRefresh(w, r, sub) {
+				return
+			}
 			middleware.JSON(w, http.StatusOK, map[string]interface{}{
 				"access_token":  access,
 				"refresh_token": refresh,
@@ -421,6 +446,9 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.rejectAppRefresh(w, r, authResp.User.ID) {
+		return
+	}
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"access_token":  authResp.AccessToken,
 		"refresh_token": authResp.RefreshToken,
@@ -471,6 +499,11 @@ func (h *Handler) RevokeAllSessions(w http.ResponseWriter, r *http.Request) {
 
 // PATCH /api/v1/auth/referral-code
 func (h *Handler) UpdateReferralCode(w http.ResponseWriter, r *http.Request) {
+	role := middleware.GetRole(r)
+	if role != "student" && role != "teacher" && role != "institution_admin" {
+		middleware.Error(w, http.StatusForbidden, "JOIN_ROLE", "This account cannot join an institute.")
+		return
+	}
 	var req struct {
 		ReferralCode string `json:"referral_code"`
 	}

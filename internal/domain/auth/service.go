@@ -406,7 +406,7 @@ func (s *Service) UpdateUserInstitution(ctx context.Context, userID, code string
 	if err := s.db.QueryRow(ctx, `SELECT role FROM users WHERE id=$1`, userID).Scan(&currentRole); err != nil {
 		return err
 	}
-	if currentRole == "student" {
+	if currentRole != "teacher" && currentRole != "institution_admin" {
 		return errors.New("use Join a class to request institute membership or a transfer")
 	}
 	instID, role, err := s.FindInstitutionByReferralCode(ctx, code)

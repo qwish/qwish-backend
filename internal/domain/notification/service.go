@@ -209,3 +209,9 @@ func (s *Service) SendAdminWelcome(ctx context.Context, to, name, role string) e
 	return s.SendEmail(ctx, to, "Qwish Admin Access Granted",
 		tmplAdminWelcome(name, role, dash), "admin_welcome")
 }
+
+// SendAppLoginDenied explains a rejected, verified app login privately by email.
+func (s *Service) SendAppLoginDenied(ctx context.Context, to string) error {
+	return s.SendEmail(ctx, to, "Your Qwish app login was declined",
+		"<p>Login to the Qwish app was declined.</p><p>Administrator and teacher accounts cannot log into the student app. Please use your institute dashboard, teacher panel, or admin console with this account.</p><p>If you did not attempt this login, you can ignore this email.</p>")
+}

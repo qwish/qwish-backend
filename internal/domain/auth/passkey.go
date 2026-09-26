@@ -632,12 +632,15 @@ func (h *Handler) PasskeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 		h.svc.ActivateAdmin(r.Context(), admin.ID)
 	}
 	h.svc.touchCredential(r.Context(), cred)
-	h.writePasskeySession(w, admin)
+	h.writePasskeySession(w, r, admin)
 }
 
 // writePasskeySession mints a session for the verified admin and writes the
 // standard auth payload shared by the email and discoverable login finishers.
-func (h *Handler) writePasskeySession(w http.ResponseWriter, admin *AdminAccount) {
+func (h *Handler) writePasskeySession(w http.ResponseWriter, r *http.Request, admin *AdminAccount) {
+	if h.rejectAppLogin(w, r, admin.Role, admin.Email) {
+		return
+	}
 	access, refresh, err := h.svc.mintSession(admin.SupabaseUID, admin.Email, admin.TokenGeneration)
 	if err != nil {
 		middleware.InternalError(w)
@@ -844,7 +847,7 @@ func (h *Handler) PasskeyLoginFinishDiscoverable(w http.ResponseWriter, r *http.
 		h.svc.ActivateAdmin(r.Context(), resolved.ID)
 	}
 	h.svc.touchCredential(r.Context(), cred)
-	h.writePasskeySession(w, resolved)
+	h.writePasskeySession(w, r, resolved)
 }
 
 // sessionRevoked reports whether a console session was revoked. A lookup error

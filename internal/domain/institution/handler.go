@@ -54,6 +54,17 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		instID,
 	).Scan(&totalStudents, &activeStudents, &totalTeachers, &totalQuizzes, &avgScore, &topStudentName, &topStudentPoints)
 
+	// Work waiting on the institution: drives the overview strip and sidebar counts.
+	var pendingAdmissions, pendingEdits, unclaimed int
+	var oldestAdmission *time.Time
+	h.db.QueryRow(r.Context(), `SELECT
+		(SELECT COUNT(*) FROM admission_requests WHERE institution_id=$1 AND status='pending'),
+		(SELECT MIN(created_at) FROM admission_requests WHERE institution_id=$1 AND status='pending'),
+		(SELECT COUNT(*) FROM student_edit_requests sr JOIN enrollments e ON e.id=sr.enrollment_id WHERE e.institution_id=$1 AND sr.status='pending'),
+		(SELECT COUNT(*) FROM enrollments WHERE institution_id=$1 AND status='pending_claim')`,
+		instID,
+	).Scan(&pendingAdmissions, &oldestAdmission, &pendingEdits, &unclaimed)
+
 	// Activity chart: quizzes completed per day over last 30 days
 	rows, _ := h.db.Query(r.Context(),
 		`SELECT DATE(qa.completed_at) as day, COUNT(*)
@@ -100,6 +111,12 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		"top_student":     map[string]interface{}{"name": topStudentName, "points": topStudentPoints},
 		"activity_chart":  chart,
 		"top_quizzes":     topQuizzes,
+		"pending": map[string]interface{}{
+			"admissions":            pendingAdmissions,
+			"oldest_admission_at":   oldestAdmission,
+			"edit_requests":         pendingEdits,
+			"unclaimed_enrollments": unclaimed,
+		},
 	})
 }
 

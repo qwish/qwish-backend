@@ -2322,7 +2322,7 @@ func (h *Handler) provisionInstitutionAdmin(ctx context.Context, instID, adminNa
 	// so an institution admin is never given a Supabase auth user for a row the
 	// one_identity_per_email trigger will reject.
 	if taken := auth.EmailIdentityIn(ctx, h.db, adminEmail); taken != nil {
-		return nil, fmt.Errorf("cannot provision %s: %w", adminEmail, taken)
+		return nil, fmt.Errorf("cannot provision %s: %w", adminEmail, *taken)
 	}
 
 	// Provision the Supabase auth user via the shared invite client — same path

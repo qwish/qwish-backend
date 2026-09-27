@@ -14,7 +14,7 @@ func TestSessionLifecycle(t *testing.T) {
 	ctx := context.Background()
 	svc := NewService(pool, nil)
 
-	id, err := svc.Create(ctx, "hi", []string{"verbal", "logical"})
+	id, err := svc.Create(ctx, "hi", []string{"verbal_grammar", "logical_series"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -27,12 +27,12 @@ func TestSessionLifecycle(t *testing.T) {
 		t.Fatalf("Prefs = %q, %v, %v; want hi, 2 topics, nil", lang, topics, err)
 	}
 
-	if err := svc.UpdatePrefs(ctx, id, "en", []string{"general"}); err != nil {
+	if err := svc.UpdatePrefs(ctx, id, "en", []string{"general_mixed"}); err != nil {
 		t.Fatalf("UpdatePrefs: %v", err)
 	}
 	lang, topics, _ = svc.Prefs(ctx, id)
-	if lang != "en" || len(topics) != 1 || topics[0] != "general" {
-		t.Fatalf("after update: %q %v; want en [general]", lang, topics)
+	if lang != "en" || len(topics) != 1 || topics[0] != "general_mixed" {
+		t.Fatalf("after update: %q %v; want en [general_mixed]", lang, topics)
 	}
 }
 
@@ -156,7 +156,7 @@ func TestSubmitGradesAndIsSingleUse(t *testing.T) {
 		`INSERT INTO questions (quiz_id, position, type, prompt, options, correct_answer, time_limit_seconds)
 		 VALUES ($1,2,'multiple_choice','two','["A","B"]','"B"',60) RETURNING id`, quizID).Scan(&q2)
 
-	sess, err := svc.Create(ctx, "en", []string{"general"})
+	sess, err := svc.Create(ctx, "en", []string{"general_mixed"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

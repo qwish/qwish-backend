@@ -2,7 +2,6 @@ package curriculum
 
 import (
 	"errors"
-	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -84,12 +83,9 @@ func decode(w http.ResponseWriter, r *http.Request, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
 	d := jsonx.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
+	// jsonx reads the whole body and rejects trailing values itself.
 	if err := d.Decode(target); err != nil {
 		middleware.BadRequest(w, "invalid JSON body or unsupported fields")
-		return false
-	}
-	if err := d.Decode(new(any)); err != io.EOF {
-		middleware.BadRequest(w, "body must contain one JSON object")
 		return false
 	}
 	return true

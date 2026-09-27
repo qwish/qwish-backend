@@ -74,3 +74,20 @@ func TestDecodeRejectsOversizedBody(t *testing.T) {
 		t.Fatal("accepted oversized body")
 	}
 }
+
+// decode must accept one object and refuse anything trailing it.
+func TestDecodeAcceptsExactlyOneObject(t *testing.T) {
+	for body, want := range map[string]bool{
+		`{"name":"2026"}`:        true,
+		`{"name":"2026"}` + "\n": true,
+		`{"name":"2026"}{}`:      false,
+		`{"name":"2026"} x`:      false,
+		`{"nope":1}`:             false,
+	} {
+		var in YearInput
+		w := httptest.NewRecorder()
+		if got := decode(w, httptest.NewRequest("POST", "/", strings.NewReader(body)), &in); got != want {
+			t.Errorf("%q: got %v, want %v (%s)", body, got, want, w.Body.String())
+		}
+	}
+}

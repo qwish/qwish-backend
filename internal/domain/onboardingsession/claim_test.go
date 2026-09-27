@@ -27,7 +27,7 @@ func TestClaimAppliesPrefsAndIsSingleUse(t *testing.T) {
 	}
 	t.Cleanup(func() { pool.Exec(ctx, `DELETE FROM users WHERE id=$1`, userID) })
 
-	sess, err := svc.Create(ctx, "hi", []string{"verbal", "logical"})
+	sess, err := svc.Create(ctx, "hi", []string{"verbal_grammar", "logical_series"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestClaimReplaysCalibrationIntoAScoredAttempt(t *testing.T) {
 		pool.Exec(ctx, `DELETE FROM users WHERE id=$1`, userID)
 	})
 
-	sess, err := svc.Create(ctx, "en", []string{"general"})
+	sess, err := svc.Create(ctx, "en", []string{"general_mixed"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

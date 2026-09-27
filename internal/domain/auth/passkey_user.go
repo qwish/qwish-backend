@@ -602,6 +602,7 @@ func (h *Handler) writeUserPasskeySession(w http.ResponseWriter, r *http.Request
 		middleware.InternalError(w)
 		return
 	}
+	h.svc.recordSignIn(r.Context(), u.ID, "passkey", r)
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"user": map[string]interface{}{
 			"id":           u.ID,

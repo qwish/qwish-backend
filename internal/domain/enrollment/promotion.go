@@ -186,7 +186,15 @@ func (s *Service) PromoteBatch(ctx context.Context, instID, adminID string, req 
 type RevertResult struct {
 	Reverted int `json:"reverted"`
 	// Students left alone because someone moved them after the promotion.
-	Skipped int `json:"skipped"`
+	Skipped         int              `json:"skipped"`
+	SkippedStudents []SkippedStudent `json:"skipped_students"`
+}
+
+// SkippedStudent is a student a revert left where they are, and why.
+type SkippedStudent struct {
+	EnrollmentID string `json:"enrollment_id"`
+	Name         string `json:"name"`
+	Reason       string `json:"reason"`
 }
 
 // RevertBatch undoes a promotion, skipping any student whose position changed
@@ -225,8 +233,10 @@ func (s *Service) RevertBatch(ctx context.Context, instID, adminID, batchID stri
 	}
 
 	rows, err := tx.Query(ctx,
-		`SELECT pbs.enrollment_id, pbs.prior_group_id, pbs.prior_grade, pbs.prior_section, e.user_id
+		`SELECT pbs.enrollment_id, pbs.prior_group_id, pbs.prior_grade, pbs.prior_section, e.user_id,
+		        COALESCE(NULLIF(u.display_name,''), e.full_name)
 		   FROM promotion_batch_students pbs
+		   LEFT JOIN users u ON u.id = (SELECT user_id FROM enrollments WHERE id = pbs.enrollment_id)
 		   JOIN enrollments e ON e.id = pbs.enrollment_id
 		  WHERE pbs.batch_id=$1 AND pbs.outcome='promoted'`,
 		batchID)
@@ -239,11 +249,12 @@ func (s *Service) RevertBatch(ctx context.Context, instID, adminID, batchID stri
 		priorGrade   *string
 		priorSection *string
 		userID       *string
+		name         string
 	}
 	var students []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.enrollmentID, &r.priorGroup, &r.priorGrade, &r.priorSection, &r.userID); err != nil {
+		if err := rows.Scan(&r.enrollmentID, &r.priorGroup, &r.priorGrade, &r.priorSection, &r.userID, &r.name); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -255,6 +266,7 @@ func (s *Service) RevertBatch(ctx context.Context, instID, adminID, batchID stri
 	}
 
 	reverted, skipped := 0, 0
+	skippedStudents := []SkippedStudent{}
 	for _, st := range students {
 		// Still where the promotion left them? Grade must match, and section
 		// only when the promotion set one.
@@ -278,6 +290,12 @@ func (s *Service) RevertBatch(ctx context.Context, instID, adminID, batchID stri
 		}
 		if !stillThere {
 			skipped++
+			skippedStudents = append(skippedStudents, SkippedStudent{EnrollmentID: st.enrollmentID, Name: st.name,
+				Reason: "Moved or changed after the promotion, so left as they are."})
+			if _, err := tx.Exec(ctx, `UPDATE promotion_batch_students SET revert_outcome='skipped'
+				WHERE batch_id=$1 AND enrollment_id=$2 AND outcome='promoted'`, batchID, st.enrollmentID); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -300,6 +318,10 @@ func (s *Service) RevertBatch(ctx context.Context, instID, adminID, batchID stri
 				}
 			}
 		}
+		if _, err := tx.Exec(ctx, `UPDATE promotion_batch_students SET revert_outcome='reverted'
+			WHERE batch_id=$1 AND enrollment_id=$2 AND outcome='promoted'`, batchID, st.enrollmentID); err != nil {
+			return nil, err
+		}
 		reverted++
 	}
 
@@ -311,5 +333,5 @@ func (s *Service) RevertBatch(ctx context.Context, instID, adminID, batchID stri
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return &RevertResult{Reverted: reverted, Skipped: skipped}, nil
+	return &RevertResult{Reverted: reverted, Skipped: skipped, SkippedStudents: skippedStudents}, nil
 }

@@ -38,6 +38,10 @@ type RosterInput struct {
 	GuardianName  string
 	GuardianPhone string
 	GuardianEmail string
+	// SourceRow is the CSV line this came from (header is line 1), so verdicts
+	// point at the line the school can find, not the row's index after errors
+	// were dropped. Zero for rows not from a file.
+	SourceRow int
 }
 
 func nilIfEmpty(s string) *string {

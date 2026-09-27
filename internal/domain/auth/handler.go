@@ -182,6 +182,7 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		if existingUser.InstitutionID != nil {
 			instName = h.svc.GetInstitutionName(r.Context(), *existingUser.InstitutionID)
 		}
+		h.svc.recordSignIn(r.Context(), existingUser.ID, "email_code", r)
 		middleware.JSON(w, http.StatusOK, map[string]interface{}{
 			"user":          userPayload(existingUser, instName),
 			"access_token":  accessToken,

@@ -24,12 +24,16 @@ func (h *Handler) InstitutionRoutes(r chi.Router) {
 		r.Use(academicScope("institution_admin"))
 		r.Get("/academic-years", h.ListYears)
 		r.Post("/academic-years", h.CreateYear)
+		r.Patch("/academic-years/{yearId}", h.UpdateYear)
 		r.Get("/curricula", h.ListVersions)
+		r.Get("/curricula/facets", h.Facets)
 		r.Post("/curricula", h.CreateCurriculum)
 		r.Post("/curricula/{curriculumId}/versions", h.CreateVersion)
 		r.Get("/curriculum-versions/{versionId}", h.GetVersion)
 		r.Put("/curriculum-versions/{versionId}", h.UpdateVersion)
 		r.Post("/curriculum-versions/{versionId}/publish", h.PublishVersion)
+		r.Get("/curriculum-versions/{versionId}/history", h.History)
+		r.Get("/curriculum-versions/{versionId}/revisions/{revision}", h.RevisionSnapshot)
 		r.Get("/groups/{groupId}/curricula", h.ListAssignments)
 		r.Post("/groups/{groupId}/curricula", h.Assign)
 		r.Delete("/groups/{groupId}/curricula/{assignmentId}", h.EndAssignment)
@@ -101,8 +105,13 @@ func replyError(w http.ResponseWriter, err error) {
 		middleware.Error(w, http.StatusConflict, "REVISION_CONFLICT", err.Error())
 	case errors.Is(err, ErrConflict):
 		middleware.Error(w, http.StatusConflict, "ACADEMIC_CONFLICT", err.Error())
-	case errors.Is(err, ErrIncomplete):
-		middleware.Error(w, http.StatusUnprocessableEntity, "CURRICULUM_INCOMPLETE", err.Error())
+	case errors.Is(err, ErrNoteNeeded):
+		middleware.Error(w, http.StatusUnprocessableEntity, "CHANGE_NOTE_REQUIRED", err.Error())
+	case errors.As(err, new(*PublishBlockedError)):
+		var pb *PublishBlockedError
+		errors.As(err, &pb)
+		// The message carries every issue, one per clause, for the editor.
+		middleware.Error(w, http.StatusUnprocessableEntity, "PUBLISH_BLOCKED", pb.Error())
 	default:
 		log.Printf("curriculum: %v", err)
 		middleware.InternalError(w)
@@ -149,7 +158,14 @@ func (h *Handler) ListVersions(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "limit must be at most 50")
 		return
 	}
-	data, total, err := h.svc.ListVersions(r.Context(), middleware.GetInstitutionID(r), page, limit)
+	q := r.URL.Query()
+	status := q.Get("status")
+	if status != "" && status != "draft" && status != "published" {
+		middleware.BadRequest(w, "status must be draft or published")
+		return
+	}
+	data, total, err := h.svc.ListVersions(r.Context(), middleware.GetInstitutionID(r), page, limit,
+		ListFilter{Subject: q.Get("subject"), Grade: q.Get("grade"), Status: status})
 	if err != nil {
 		replyError(w, err)
 		return
@@ -301,4 +317,64 @@ func (h *Handler) EndAssignment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	middleware.JSON(w, http.StatusOK, map[string]string{"status": "ended"})
+}
+
+func (h *Handler) Facets(w http.ResponseWriter, r *http.Request) {
+	subjects, grades, err := h.svc.Facets(r.Context(), middleware.GetInstitutionID(r))
+	if err != nil {
+		replyError(w, err)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string][]string{"subjects": subjects, "grades": grades})
+}
+
+func (h *Handler) History(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "versionId")
+	if !ok {
+		return
+	}
+	data, err := h.svc.History(r.Context(), middleware.GetInstitutionID(r), id)
+	if err != nil {
+		replyError(w, err)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, data)
+}
+
+func (h *Handler) RevisionSnapshot(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "versionId")
+	if !ok {
+		return
+	}
+	rev, err := strconv.Atoi(chi.URLParam(r, "revision"))
+	if err != nil || rev < 1 {
+		middleware.BadRequest(w, "invalid revision")
+		return
+	}
+	snap, err := h.svc.RevisionSnapshot(r.Context(), middleware.GetInstitutionID(r), id, rev)
+	if err != nil {
+		replyError(w, err)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, snap)
+}
+
+func (h *Handler) UpdateYear(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "yearId")
+	if !ok {
+		return
+	}
+	var in YearInput
+	if !decode(w, r, &in) {
+		return
+	}
+	if err := in.Validate(); err != nil {
+		middleware.BadRequest(w, err.Error())
+		return
+	}
+	if err := h.svc.UpdateYear(r.Context(), actor(r), id, in); err != nil {
+		replyError(w, err)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]string{"id": id})
 }

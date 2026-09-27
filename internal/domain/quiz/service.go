@@ -1336,6 +1336,10 @@ func (s *Service) SetTeacherFavorite(ctx context.Context, teacherID, quizID stri
 type InstitutionQuiz struct {
 	Quiz
 	AverageScore *float64 `json:"average_score,omitempty"`
+	// StartedCount is every attempt begun; CompletionRate is completed/started
+	// as a percentage, absent while nobody has started.
+	StartedCount   int      `json:"started_count"`
+	CompletionRate *float64 `json:"completion_rate,omitempty"`
 }
 
 // institutionListWhere builds the WHERE clause and args for the admin quiz
@@ -1353,7 +1357,8 @@ func institutionListWhere(institutionID, statusFilter, quizType, search string) 
 		args = append(args, quizType)
 	}
 	if search != "" {
-		where += fmt.Sprintf(` AND q.title ILIKE $%d`, len(args)+1)
+		// Title or the authoring teacher's name, as the dashboard's search box says.
+		where += fmt.Sprintf(` AND (q.title ILIKE $%[1]d OR EXISTS (SELECT 1 FROM users su WHERE su.id = q.created_by AND su.display_name ILIKE $%[1]d))`, len(args)+1)
 		args = append(args, "%"+search+"%")
 	}
 	return where, args
@@ -1379,7 +1384,8 @@ func (s *Service) ListForInstitution(ctx context.Context, institutionID, statusF
 		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
 		        COUNT(qa.id) FILTER (WHERE qa.status = 'completed') AS taker_count,
 		        AVG(qa.score_pct) FILTER (WHERE qa.status = 'completed') AS average_score,
-		        q.ends_at, q.published_at, q.group_id, q.created_at
+		        q.ends_at, q.published_at, q.group_id, q.created_at,
+		        COUNT(qa.id) AS started_count
 		 FROM quizzes q
 		 JOIN users u ON u.id = q.created_by
 		 LEFT JOIN quiz_attempts qa ON qa.quiz_id = q.id
@@ -1397,8 +1403,12 @@ func (s *Service) ListForInstitution(ctx context.Context, institutionID, statusF
 		var q InstitutionQuiz
 		if err := rows.Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName,
 			&q.Title, &q.Description, &q.Type, &q.Visibility, &q.Status, &q.QuestionCount,
-			&q.TakerCount, &q.AverageScore, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.CreatedAt); err != nil {
+			&q.TakerCount, &q.AverageScore, &q.EndsAt, &q.PublishedAt, &q.GroupID, &q.CreatedAt, &q.StartedCount); err != nil {
 			return nil, 0, err
+		}
+		if q.StartedCount > 0 {
+			rate := float64(q.TakerCount) / float64(q.StartedCount) * 100
+			q.CompletionRate = &rate
 		}
 		quizzes = append(quizzes, q)
 	}

@@ -3,6 +3,7 @@ package enrollment
 import (
 	"encoding/json"
 	"net/http"
+	"net/mail"
 	"strconv"
 	"strings"
 
@@ -47,11 +48,20 @@ func (h *InstitutionHandler) SaveAdmissionPolicy(w http.ResponseWriter, r *http.
 	defer tx.Rollback(r.Context())
 	var locked string
 	err = tx.QueryRow(r.Context(), `SELECT id FROM institutions WHERE id=$1 FOR UPDATE`, middleware.GetInstitutionID(r)).Scan(&locked)
+	// The previous policy goes in the log beside the new one, so the audit
+	// Details show exactly which rule changed.
+	var previous []byte
 	if err == nil {
+		tx.QueryRow(r.Context(), `SELECT policy FROM admission_policies WHERE institution_id=$1`, locked).Scan(&previous)
 		_, err = tx.Exec(r.Context(), `INSERT INTO admission_policies(institution_id,policy) VALUES($1,$2) ON CONFLICT(institution_id) DO UPDATE SET policy=EXCLUDED.policy`, locked, raw)
 	}
 	if err == nil {
-		err = admissionAudit(r.Context(), tx, middleware.GetUserID(r), locked, "update_admission_policy", locked, p.Mode)
+		if previous == nil {
+			previous = []byte("{}")
+		}
+		_, err = tx.Exec(r.Context(), `INSERT INTO audit_log(admin_id,admin_name,admin_role,action_type,target_type,target_id,reason,institution_id,old_value,new_value)
+			SELECT id,display_name,role,'update_admission_policy','institution',$2,$3,$2,$4,$5 FROM users WHERE id=$1`,
+			middleware.GetUserID(r), locked, p.Mode, previous, raw)
 	}
 	if err == nil {
 		err = tx.Commit(r.Context())
@@ -141,4 +151,37 @@ func admissionOffset(r *http.Request) int {
 		return 0
 	}
 	return offset
+}
+
+// GET /institution/admissions/requests/counts
+func (h *InstitutionHandler) AdmissionRequestCounts(w http.ResponseWriter, r *http.Request) {
+	open, history, err := h.svc.RequestCounts(r.Context(), middleware.GetInstitutionID(r))
+	if err != nil {
+		joinError(w, err)
+		return
+	}
+	middleware.JSON(w, 200, map[string]int{"open": open, "history": history})
+}
+
+// POST /institution/admissions/policy/test {email}
+// A dry run: how the current policy would treat a join from this address.
+func (h *InstitutionHandler) TestAdmissionPolicy(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := jsonx.NewDecoder(http.MaxBytesReader(w, r.Body, 4*1024)).Decode(&req); err != nil {
+		middleware.BadRequest(w, "email is required")
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	if a, err := mail.ParseAddress(email); err != nil || a.Address != email {
+		middleware.BadRequest(w, "enter a valid email address")
+		return
+	}
+	v, err := h.svc.TestPolicy(r.Context(), middleware.GetInstitutionID(r), email)
+	if err != nil {
+		joinError(w, err)
+		return
+	}
+	middleware.JSON(w, 200, v)
 }

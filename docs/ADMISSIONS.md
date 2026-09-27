@@ -53,3 +53,13 @@ Legacy `/students/claim` and `/students/join-class` use the same admission servi
 ## Verification
 
 Database integration tests in `internal/domain/enrollment/admissions_test.go` use `TEST_DATABASE_URL` pointing to a scratch database with all migrations. Run the affected enrollment/auth packages with `-race`. NumPie joining widget/cubit tests cover immediate joining, pending approval, response-loss recovery, accepted invite URLs, and a narrow display with large text.
+
+## Additions for the Institute dashboard redesign
+
+Reviewer-facing request fields (`rule_checks`, `reason_code`, `reason_hint`,
+`source_institution_name`, `approved_at`, `targets[].meta`), the counts
+endpoint, the policy dry-run (`POST /institution/admissions/policy/test`) and
+policy-change diffs in the audit log are documented in
+[API_DOC.md → Institute dashboard redesign](../API_DOC.md#institute-dashboard-redesign-migrations-077078).
+The join flow itself is unchanged: `needsReview` and the reviewer view share
+one `evaluatePolicy`.

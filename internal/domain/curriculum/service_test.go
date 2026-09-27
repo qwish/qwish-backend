@@ -56,19 +56,21 @@ func testService(t *testing.T) (*Service, Actor, string, string) {
 	t.Cleanup(pool.Close)
 	_, err = pool.Exec(ctx, `CREATE TABLE institutions(id UUID PRIMARY KEY);
 		CREATE TABLE users(id UUID PRIMARY KEY,display_name TEXT);
-		CREATE TABLE groups(id UUID PRIMARY KEY,institution_id UUID REFERENCES institutions(id),archived_at TIMESTAMPTZ);
+		CREATE TABLE groups(id UUID PRIMARY KEY,institution_id UUID REFERENCES institutions(id),archived_at TIMESTAMPTZ,name TEXT NOT NULL DEFAULT '');
 		CREATE TABLE group_teachers(group_id UUID REFERENCES groups(id),user_id UUID REFERENCES users(id),PRIMARY KEY(group_id,user_id));
 		CREATE TABLE audit_log(admin_id UUID NOT NULL,admin_name TEXT NOT NULL,admin_role TEXT NOT NULL,action_type TEXT NOT NULL,target_type TEXT NOT NULL,target_id UUID,institution_id UUID REFERENCES institutions(id));`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, file, _, _ := runtime.Caller(0)
-	sql, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../..", "migrations/058_curriculum_foundation.sql"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = pool.Exec(ctx, string(sql)); err != nil {
-		t.Fatalf("migration: %v", err)
+	for _, name := range []string{"058_curriculum_foundation.sql", "077_curriculum_structure.sql"} {
+		sql, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../..", "migrations", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = pool.Exec(ctx, string(sql)); err != nil {
+			t.Fatalf("migration %s: %v", name, err)
+		}
 	}
 	a := Actor{InstitutionID: uuid.NewString(), ID: uuid.NewString()}
 	group := uuid.NewString()
@@ -176,7 +178,7 @@ func TestCurriculumLifecycleAndScope(t *testing.T) {
 	if err = s.db.QueryRow(ctx, `SELECT ended_at IS NOT NULL FROM class_curricula WHERE id=$1`, assignmentID).Scan(&ended); err != nil || !ended {
 		t.Fatalf("history not retained: %v", err)
 	}
-	versions, total, err := s.ListVersions(ctx, a.InstitutionID, 2, 20)
+	versions, total, err := s.ListVersions(ctx, a.InstitutionID, 2, 20, ListFilter{})
 	if err != nil || len(versions) != 0 || total != 1 {
 		t.Fatalf("empty page total: %d %v", total, err)
 	}
@@ -258,7 +260,8 @@ func TestIncompleteVersionCannotPublish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.PublishVersion(ctx, a, id, 1); !errors.Is(err, ErrIncomplete) {
+	var blocked *PublishBlockedError
+	if err = s.PublishVersion(ctx, a, id, 1); !errors.As(err, &blocked) {
 		t.Fatalf("got %v", err)
 	}
 }

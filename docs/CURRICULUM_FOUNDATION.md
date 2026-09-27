@@ -160,7 +160,7 @@ Teacher class reads and academic-year reads return arrays without pagination.
 | 409 | `ACADEMIC_CONFLICT` | Duplicate name, label or active class assignment |
 | 409 | `REVISION_CONFLICT` | Another save changed the draft |
 | 409 | `VERSION_PUBLISHED` | A published version cannot be edited or published again |
-| 422 | `CURRICULUM_INCOMPLETE` | Chapter/concept content is insufficient for publication |
+| 422 | `PUBLISH_BLOCKED` | Content isn't ready to publish; `message` lists every issue, `;`-separated |
 
 Permission failures do not disclose whether another institute owns an identifier.
 Transactions include audit writes, so failure to record the action rolls back the
@@ -207,3 +207,13 @@ before deployment; no production migration was applied during implementation.
 The existing application continues working without curriculum setup. Rollback can
 remove the new routes while leaving these additive tables in place; do not drop
 published curriculum data to roll back an application release.
+
+## Structure rules and concept metadata (migration 077)
+
+Versions carry `settings` (board/stream/medium, term or unit grouping, code
+pattern, outcome framework, difficulty scale, required fields, weightage,
+teaching plan, evidence threshold, change-note rule). Chapters and concepts
+carry optional `details`, and every save records a revision with its note and
+content. See
+[API_DOC.md → Curriculum](../API_DOC.md#institute-dashboard-redesign-migrations-077078)
+for shapes, validation and the `PUBLISH_BLOCKED` checks.

@@ -38,6 +38,31 @@ type Request struct {
 	Status        string     `json:"status"`
 	CreatedAt     time.Time  `json:"created_at"`
 	ReviewedAt    *time.Time `json:"reviewed_at,omitempty"`
+	// StudentUserID is null while the roster row is unclaimed.
+	StudentUserID *string `json:"student_user_id"`
+	RollNumber    *string `json:"roll_number"`
+	// Warnings are computed for pending requests only: what approving would
+	// collide with, in words an admin can act on.
+	Warnings []string `json:"warnings"`
+}
+
+// Counts is the number of requests per status, for filter pills.
+type Counts struct {
+	Pending  int `json:"pending"`
+	Approved int `json:"approved"`
+	Rejected int `json:"rejected"`
+}
+
+// CountForInstitution returns per-status totals for the review queue.
+func (s *Service) CountForInstitution(ctx context.Context, instID string) (Counts, error) {
+	var c Counts
+	err := s.db.QueryRow(ctx, `
+		SELECT COUNT(*) FILTER (WHERE r.status='pending'),
+		       COUNT(*) FILTER (WHERE r.status='approved'),
+		       COUNT(*) FILTER (WHERE r.status='rejected')
+		  FROM student_edit_requests r JOIN enrollments e ON e.id=r.enrollment_id
+		 WHERE e.institution_id=$1`, instID).Scan(&c.Pending, &c.Approved, &c.Rejected)
+	return c, err
 }
 
 type Service struct{ db *pgxpool.Pool }
@@ -139,6 +164,18 @@ func (s *Service) Review(ctx context.Context, instID, adminID, requestID, decisi
 		return err
 	}
 
+	// Recorded in the same transaction: an approved correction always has its
+	// before and after in the audit log.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, reason, institution_id, old_value, new_value)
+		SELECT u.id, u.display_name, u.role, 'review_edit_request', 'enrollment', $2, $3 || ' ' || r.field, $4,
+		       jsonb_build_object(r.field, r.current_value),
+		       jsonb_build_object(r.field, CASE WHEN $3='approved' THEN r.proposed_value ELSE r.current_value END)
+		  FROM users u, student_edit_requests r WHERE u.id=$1 AND r.id=$5`,
+		adminID, enrollmentID, decision, instID, requestID); err != nil {
+		return err
+	}
+
 	return tx.Commit(ctx)
 }
 
@@ -158,7 +195,17 @@ func (s *Service) list(ctx context.Context, scope, scopeArg, status string) ([]R
 	rows, err := s.db.Query(ctx, `
 		SELECT r.id, r.enrollment_id, COALESCE(su.display_name, e.full_name),
 		       r.requested_by, t.display_name, r.field, r.current_value,
-		       r.proposed_value, r.note, r.status, r.created_at, r.reviewed_at
+		       r.proposed_value, r.note, r.status, r.created_at, r.reviewed_at,
+		       e.user_id, e.roll_number,
+		       -- Another live enrollment already holds the proposed roll number.
+		       (r.status='pending' AND r.field='roll_number' AND EXISTS (
+		          SELECT 1 FROM enrollments o
+		           WHERE o.institution_id=e.institution_id AND o.id<>e.id
+		             AND o.roll_number=r.proposed_value
+		             AND o.status IN ('pending_claim','active','suspended'))),
+		       -- The student is in classes that a grade/section change won't move.
+		       (SELECT COUNT(*) FROM group_students gs JOIN groups g ON g.id=gs.group_id
+		         WHERE gs.user_id=e.user_id AND g.institution_id=e.institution_id AND g.archived_at IS NULL)
 		  FROM student_edit_requests r
 		  JOIN enrollments e ON e.id = r.enrollment_id
 		  JOIN users t ON t.id = r.requested_by
@@ -173,12 +220,36 @@ func (s *Service) list(ctx context.Context, scope, scopeArg, status string) ([]R
 	out := []Request{}
 	for rows.Next() {
 		var q Request
+		var rollTaken bool
+		var classCount int
 		if err := rows.Scan(&q.ID, &q.EnrollmentID, &q.StudentName, &q.RequestedBy,
 			&q.TeacherName, &q.Field, &q.CurrentValue, &q.ProposedValue, &q.Note,
-			&q.Status, &q.CreatedAt, &q.ReviewedAt); err != nil {
+			&q.Status, &q.CreatedAt, &q.ReviewedAt, &q.StudentUserID, &q.RollNumber,
+			&rollTaken, &classCount); err != nil {
 			return nil, err
 		}
+		q.Warnings = warningsFor(q, rollTaken, classCount)
 		out = append(out, q)
 	}
 	return out, rows.Err()
+}
+
+// warningsFor explains what approving a pending request would run into.
+func warningsFor(q Request, rollTaken bool, classCount int) []string {
+	w := []string{}
+	if q.Status != "pending" {
+		return w
+	}
+	if rollTaken {
+		w = append(w, "Roll "+q.ProposedValue+" already belongs to another student.")
+	}
+	if (q.Field == "grade" || q.Field == "section") && classCount > 0 {
+		w = append(w, "Class memberships won't change automatically — move the student between classes separately.")
+	}
+	if q.Field == "admission_date" {
+		if _, err := time.Parse("2006-01-02", q.ProposedValue); err != nil {
+			w = append(w, "“"+q.ProposedValue+"” isn't a valid date, so approving will fail.")
+		}
+	}
+	return w
 }

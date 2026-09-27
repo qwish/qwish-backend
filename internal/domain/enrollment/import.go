@@ -18,7 +18,12 @@ type RowVerdict struct {
 	Action     string `json:"action"` // create | update | error
 	FullName   string `json:"full_name"`
 	RollNumber string `json:"roll_number,omitempty"`
+	Email      string `json:"email,omitempty"`
+	Grade      string `json:"grade,omitempty"`
+	Section    string `json:"section,omitempty"`
 	Reason     string `json:"reason,omitempty"`
+	// Changes describe what an update would change, in words.
+	Changes []string `json:"changes,omitempty"`
 }
 
 // ParseCSV reads the roster file, returning the usable rows and a verdict for
@@ -64,6 +69,7 @@ func ParseCSV(r io.Reader) ([]RosterInput, []RowVerdict, error) {
 		}
 
 		in := RosterInput{
+			SourceRow:     line,
 			FullName:      get(rec, "full_name"),
 			Email:         get(rec, "email"),
 			RollNumber:    get(rec, "roll_number"),
@@ -103,6 +109,10 @@ func ParseCSV(r io.Reader) ([]RosterInput, []RowVerdict, error) {
 	return rows, bad, nil
 }
 
+// ErrImportRowsRejected is returned when rows fail the roster checks and the
+// caller didn't ask to skip them.
+var ErrImportRowsRejected = fmt.Errorf("some rows can't be imported")
+
 // querier is the subset of pgxpool.Pool and pgx.Tx that matchRoster needs, so
 // preview (pool) and commit (transaction) can share one lookup.
 type querier interface {
@@ -115,7 +125,14 @@ type querier interface {
 type rosterMatch struct {
 	byRoll  map[string]string
 	byEmail map[string]string
+	// current holds each matched enrollment's values, for the change summary.
+	current map[string]rosterCurrent
+	// elsewhere holds emails that belong to a student active at another
+	// institution: joining them here is an admission transfer, not an import.
+	elsewhere map[string]bool
 }
+
+type rosterCurrent struct{ FullName, Email, Grade, Section, AdmissionDate string }
 
 // id returns the live enrollment this row updates, or "" to create. Roll number
 // wins over email when both are present, matching the original per-row order.
@@ -130,43 +147,132 @@ func (m rosterMatch) id(in RosterInput) string {
 }
 
 func matchRoster(ctx context.Context, q querier, instID string, rows []RosterInput) (rosterMatch, error) {
-	m := rosterMatch{byRoll: map[string]string{}, byEmail: map[string]string{}}
+	m := rosterMatch{byRoll: map[string]string{}, byEmail: map[string]string{},
+		current: map[string]rosterCurrent{}, elsewhere: map[string]bool{}}
 	rollNumbers := make([]string, 0, len(rows))
 	emails := make([]string, 0, len(rows))
+	allEmails := make([]string, 0, len(rows))
 	for _, in := range rows {
 		if in.RollNumber != "" {
 			rollNumbers = append(rollNumbers, in.RollNumber)
 		} else if in.Email != "" {
 			emails = append(emails, in.Email)
 		}
-	}
-	if len(rollNumbers) == 0 && len(emails) == 0 {
-		return m, nil
+		if in.Email != "" {
+			allEmails = append(allEmails, strings.ToLower(in.Email))
+		}
 	}
 
-	res, err := q.Query(ctx, `
-		SELECT id, COALESCE(roll_number,''), COALESCE(email,'')
-		  FROM enrollments
-		 WHERE institution_id=$1 AND ended_at IS NULL
-		   AND (roll_number = ANY($2::text[]) OR email = ANY($3::text[]))`,
-		instID, rollNumbers, emails)
-	if err != nil {
-		return m, err
-	}
-	defer res.Close()
-	for res.Next() {
-		var id, roll, email string
-		if err := res.Scan(&id, &roll, &email); err != nil {
+	if len(rollNumbers) > 0 || len(emails) > 0 {
+		res, err := q.Query(ctx, `
+			SELECT id, COALESCE(roll_number,''), COALESCE(email,''), full_name,
+			       COALESCE(grade,''), COALESCE(section,''), COALESCE(admission_date::text,'')
+			  FROM enrollments
+			 WHERE institution_id=$1 AND ended_at IS NULL
+			   AND (roll_number = ANY($2::text[]) OR email = ANY($3::text[]))`,
+			instID, rollNumbers, emails)
+		if err != nil {
 			return m, err
 		}
-		if roll != "" {
-			m.byRoll[roll] = id
+		for res.Next() {
+			var id, roll, email string
+			var cur rosterCurrent
+			if err := res.Scan(&id, &roll, &email, &cur.FullName, &cur.Grade, &cur.Section, &cur.AdmissionDate); err != nil {
+				res.Close()
+				return m, err
+			}
+			cur.Email = email
+			m.current[id] = cur
+			if roll != "" {
+				m.byRoll[roll] = id
+			}
+			if email != "" {
+				m.byEmail[email] = id
+			}
 		}
-		if email != "" {
-			m.byEmail[email] = id
+		res.Close()
+		if err := res.Err(); err != nil {
+			return m, err
 		}
 	}
-	return m, res.Err()
+
+	if len(allEmails) > 0 {
+		res, err := q.Query(ctx, `
+			SELECT DISTINCT lower(u.email) FROM users u
+			  JOIN enrollments e ON e.user_id=u.id
+			 WHERE lower(u.email) = ANY($2::text[]) AND u.deleted_at IS NULL
+			   AND e.institution_id<>$1 AND e.status IN ('active','suspended')`, instID, allEmails)
+		if err != nil {
+			return m, err
+		}
+		for res.Next() {
+			var email string
+			if err := res.Scan(&email); err != nil {
+				res.Close()
+				return m, err
+			}
+			m.elsewhere[email] = true
+		}
+		res.Close()
+		if err := res.Err(); err != nil {
+			return m, err
+		}
+	}
+	return m, nil
+}
+
+// rowNumber is the verdict row for an input: its CSV line when known.
+func rowNumber(in RosterInput, i int) int {
+	if in.SourceRow > 0 {
+		return in.SourceRow
+	}
+	return i + 2
+}
+
+// verdictFor decides one row against the live roster.
+func verdictFor(in RosterInput, i int, match rosterMatch) RowVerdict {
+	v := RowVerdict{Row: rowNumber(in, i), FullName: in.FullName, RollNumber: in.RollNumber,
+		Email: in.Email, Grade: in.Grade, Section: in.Section, Action: "create"}
+	if id := match.id(in); id != "" {
+		v.Action = "update"
+		v.Changes = rosterChanges(match.current[id], in)
+		return v
+	}
+	if in.Email != "" && match.elsewhere[strings.ToLower(in.Email)] {
+		v.Action = "error"
+		v.Reason = "This email belongs to an active student at another institute. Use an admission transfer instead."
+	}
+	return v
+}
+
+// rosterChanges describes what an update would change. Blank import values
+// that would clear a field are named too, since the update writes them.
+func rosterChanges(cur rosterCurrent, in RosterInput) []string {
+	out := []string{}
+	diff := func(label, before, after string) {
+		if before == after {
+			return
+		}
+		switch {
+		case before == "":
+			out = append(out, label+" added")
+		case after == "":
+			out = append(out, label+" cleared")
+		default:
+			out = append(out, label+" "+before+" → "+after)
+		}
+	}
+	if cur.FullName != in.FullName {
+		out = append(out, "Name corrected")
+	}
+	diff("Email", cur.Email, in.Email)
+	diff("Grade", cur.Grade, in.Grade)
+	diff("Section", cur.Section, in.Section)
+	diff("Admission date", cur.AdmissionDate, in.AdmissionDate)
+	if len(out) == 0 {
+		out = append(out, "No changes")
+	}
+	return out
 }
 
 // PreviewImport validates rows against the live roster and writes nothing.
@@ -177,21 +283,22 @@ func (s *Service) PreviewImport(ctx context.Context, instID string, rows []Roste
 	}
 	verdicts := make([]RowVerdict, 0, len(rows))
 	for i, in := range rows {
-		v := RowVerdict{Row: i + 2, FullName: in.FullName, RollNumber: in.RollNumber, Action: "create"}
-		if match.id(in) != "" {
-			v.Action = "update"
-		}
-		verdicts = append(verdicts, v)
+		verdicts = append(verdicts, verdictFor(in, i, match))
 	}
 	return verdicts, nil
 }
 
 // CommitImport applies every row in one transaction. Rows matching a live
 // enrollment are updated in place; the rest are created with a claim code.
-func (s *Service) CommitImport(ctx context.Context, instID string, rows []RosterInput) ([]Enrollment, error) {
+//
+// The transaction is the resume story: an interrupted commit saves nothing, so
+// running it again is always safe. With skipErrors, rows the preview would
+// reject (e.g. an email active at another institute) are left out and returned
+// as verdicts instead of failing the whole file.
+func (s *Service) CommitImport(ctx context.Context, instID string, rows []RosterInput, skipErrors bool) ([]Enrollment, []RowVerdict, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer tx.Rollback(ctx)
 
@@ -199,11 +306,24 @@ func (s *Service) CommitImport(ctx context.Context, instID string, rows []Roster
 	// writes below.
 	match, err := matchRoster(ctx, tx, instID, rows)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	skipped := []RowVerdict{}
+	for i, in := range rows {
+		if v := verdictFor(in, i, match); v.Action == "error" {
+			skipped = append(skipped, v)
+		}
+	}
+	if len(skipped) > 0 && !skipErrors {
+		return nil, skipped, ErrImportRowsRejected
 	}
 
 	created := make([]Enrollment, 0, len(rows))
 	for i, in := range rows {
+		if verdictFor(in, i, match).Action == "error" {
+			continue
+		}
 		existingID := match.id(in)
 
 		if existingID != "" {
@@ -214,14 +334,14 @@ func (s *Service) CommitImport(ctx context.Context, instID string, rows []Roster
 				  WHERE id=$6`,
 				in.FullName, nilIfEmpty(in.Email), nilIfEmpty(in.Grade), nilIfEmpty(in.Section),
 				nilIfEmpty(in.AdmissionDate), existingID); err != nil {
-				return nil, fmt.Errorf("row %d: %w", i+2, err)
+				return nil, nil, fmt.Errorf("row %d: %w", rowNumber(in, i), err)
 			}
 			continue
 		}
 
 		code, err := GenerateClaimCode()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		e, err := scanEnrollment(tx.QueryRow(ctx,
 			`INSERT INTO enrollments
@@ -235,10 +355,10 @@ func (s *Service) CommitImport(ctx context.Context, instID string, rows []Roster
 			nilIfEmpty(in.Phone), nilIfEmpty(in.GuardianName), nilIfEmpty(in.GuardianPhone),
 			nilIfEmpty(in.GuardianEmail), code))
 		if err != nil {
-			return nil, fmt.Errorf("row %d: %w", i+2, err)
+			return nil, nil, fmt.Errorf("row %d: %w", rowNumber(in, i), err)
 		}
 		created = append(created, e)
 	}
 
-	return created, tx.Commit(ctx)
+	return created, skipped, tx.Commit(ctx)
 }

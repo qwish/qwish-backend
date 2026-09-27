@@ -92,10 +92,13 @@ func RateLimitByJSONField(max int, window time.Duration, field string) func(http
 
 			if allowed, retryAfter := rl.allow(key); !allowed {
 				w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+				w.Header().Set("X-RateLimit-Remaining", "0")
 				Error(w, http.StatusTooManyRequests, "RATE_LIMITED",
 					"too many requests for this "+field+", please try again later")
 				return
 			}
+			// Lets a sign-in form say "2 tries left" before the pause, not after.
+			w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(rl.remaining(key)))
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -193,4 +196,30 @@ func clientIP(r *http.Request) string {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+// remaining is how many more requests key may make right now, without
+// consuming one. GCRA admits request j while tat+(j-1)*interval-burst <= now.
+func (rl *rateLimiter) remaining(key string) int {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if rl.max <= 0 || rl.window <= 0 {
+		return 0
+	}
+	now := time.Now()
+	interval := rl.window / time.Duration(rl.max)
+	burst := interval * time.Duration(rl.max-1)
+	tat := now
+	if st, ok := rl.clients[key]; ok && st.tat.After(now) {
+		tat = st.tat
+	}
+	gap := now.Add(burst).Sub(tat)
+	if gap < 0 {
+		return 0 // truncating a negative gap would round toward zero, i.e. up
+	}
+	n := int(gap/interval) + 1
+	if n > rl.max {
+		return rl.max
+	}
+	return n
 }

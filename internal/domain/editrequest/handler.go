@@ -71,6 +71,17 @@ func (h *Handler) ListForReview(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, list)
 }
 
+// GET /api/v1/institution/edit-requests/counts
+func (h *Handler) CountsForReview(w http.ResponseWriter, r *http.Request) {
+	c, err := h.svc.CountForInstitution(r.Context(), middleware.GetInstitutionID(r))
+	if err != nil {
+		log.Printf("CountsForReview: %v", err)
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, c)
+}
+
 // PATCH /api/v1/institution/edit-requests/{requestId}  {decision}
 func (h *Handler) Review(w http.ResponseWriter, r *http.Request) {
 	var req struct {

@@ -50,3 +50,21 @@ func TestGCRAKeysAreIndependent(t *testing.T) {
 		t.Fatal("second key shared the first key's budget")
 	}
 }
+
+func TestRemainingCountsDown(t *testing.T) {
+	rl := &rateLimiter{clients: map[string]*gcraState{}, max: 5, window: time.Minute}
+	if got := rl.remaining("x"); got != 5 {
+		t.Fatalf("fresh key: remaining = %d, want 5", got)
+	}
+	rl.allow("x")
+	rl.allow("x")
+	rl.allow("x")
+	if got := rl.remaining("x"); got != 2 {
+		t.Fatalf("after 3 of 5: remaining = %d, want 2", got)
+	}
+	rl.allow("x")
+	rl.allow("x")
+	if got := rl.remaining("x"); got != 0 {
+		t.Fatalf("exhausted: remaining = %d, want 0", got)
+	}
+}

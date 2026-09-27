@@ -103,10 +103,10 @@ func TestCommitImportIsAllOrNothing(t *testing.T) {
 
 	// The second row collides with the first only after that first row has
 	// already been inserted inside the transaction.
-	_, err := svc.CommitImport(ctx, f.InstitutionID, []RosterInput{
+	_, _, err := svc.CommitImport(ctx, f.InstitutionID, []RosterInput{
 		{FullName: "Good", RollNumber: "OK-1"},
 		{FullName: "Bad", RollNumber: "OK-1"},
-	})
+	}, false)
 	if err == nil {
 		t.Fatal("expected the duplicate roll number to fail the commit")
 	}
@@ -123,10 +123,10 @@ func TestCommitImportReturnsClaimCodes(t *testing.T) {
 	f := seedFixture(t, pool)
 	svc := NewService(pool)
 
-	created, err := svc.CommitImport(context.Background(), f.InstitutionID, []RosterInput{
+	created, _, err := svc.CommitImport(context.Background(), f.InstitutionID, []RosterInput{
 		{FullName: "Imported One", RollNumber: "I-1"},
 		{FullName: "Imported Two", RollNumber: "I-2"},
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("CommitImport: %v", err)
 	}

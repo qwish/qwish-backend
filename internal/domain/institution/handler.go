@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,7 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 	var avgScore float64
 	var topStudentName string
 	var topStudentPoints int64
+	var topStudentID *string
 	// Six independent aggregates folded into one round-trip.
 	h.db.QueryRow(r.Context(), `SELECT
 		(SELECT COUNT(*) FROM enrollments e LEFT JOIN users u ON u.id=e.user_id WHERE e.institution_id=$1 AND e.status IN ('pending_claim','active','suspended') AND (e.user_id IS NULL OR (u.role='student' AND u.deleted_at IS NULL))),
@@ -48,11 +50,32 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher' AND status='active'),
 		(SELECT COUNT(*) FROM quizzes WHERE institution_id=$1 AND status='published'),
 		(SELECT COALESCE(AVG(qa.score_pct),0) FROM quiz_attempts qa JOIN users u ON u.id=qa.user_id
-		 WHERE u.institution_id=$1 AND u.role='student' AND u.deleted_at IS NULL AND qa.completed_at >= date_trunc('month', CURRENT_DATE)),
+		 WHERE u.institution_id=$1 AND u.role='student' AND u.deleted_at IS NULL AND qa.status='completed' AND qa.completed_at >= CURRENT_DATE - 30),
 		COALESCE((SELECT display_name FROM users WHERE institution_id=$1 AND role='student' AND status='active' ORDER BY total_points DESC LIMIT 1), ''),
-		COALESCE((SELECT total_points FROM users WHERE institution_id=$1 AND role='student' AND status='active' ORDER BY total_points DESC LIMIT 1), 0)`,
+		COALESCE((SELECT total_points FROM users WHERE institution_id=$1 AND role='student' AND status='active' ORDER BY total_points DESC LIMIT 1), 0),
+		(SELECT id::text FROM users WHERE institution_id=$1 AND role='student' AND status='active' ORDER BY total_points DESC LIMIT 1)`,
 		instID,
-	).Scan(&totalStudents, &activeStudents, &totalTeachers, &totalQuizzes, &avgScore, &topStudentName, &topStudentPoints)
+	).Scan(&totalStudents, &activeStudents, &totalTeachers, &totalQuizzes, &avgScore, &topStudentName, &topStudentPoints, &topStudentID)
+
+	// The top student's last 30 days here, and the class to show beside them.
+	topStudent := map[string]interface{}{"name": topStudentName, "points": topStudentPoints}
+	if topStudentID != nil {
+		var tsAvg *float64
+		var tsQuizzes int
+		var tsClass *string
+		h.db.QueryRow(r.Context(), `SELECT
+			(SELECT AVG(qa.score_pct) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
+			  WHERE qa.user_id=$1 AND q.institution_id=$2 AND qa.status='completed' AND qa.completed_at >= CURRENT_DATE - 30),
+			(SELECT COUNT(*) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
+			  WHERE qa.user_id=$1 AND q.institution_id=$2 AND qa.status='completed' AND qa.completed_at >= CURRENT_DATE - 30),
+			(SELECT g.name FROM groups g JOIN group_students gs ON gs.group_id=g.id
+			  WHERE gs.user_id=$1 AND g.institution_id=$2 AND g.archived_at IS NULL ORDER BY g.name LIMIT 1)`,
+			*topStudentID, instID).Scan(&tsAvg, &tsQuizzes, &tsClass)
+		topStudent["id"] = *topStudentID
+		topStudent["average_score_30d"] = tsAvg
+		topStudent["quizzes_30d"] = tsQuizzes
+		topStudent["class_name"] = tsClass
+	}
 
 	// Work waiting on the institution: drives the overview strip and sidebar counts.
 	var pendingAdmissions, pendingEdits, unclaimed int
@@ -85,20 +108,23 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 
 	// Top 5 quizzes by completion
 	qrows, _ := h.db.Query(r.Context(),
-		`SELECT q.id, q.title, COUNT(qa.id) as completions
+		`SELECT q.id, q.title, q.type, COALESCE(NULLIF(t.display_name,''), t.full_name, ''), COUNT(qa.id) as completions
 		 FROM quizzes q LEFT JOIN quiz_attempts qa ON qa.quiz_id=q.id AND qa.status='completed'
+		 LEFT JOIN users t ON t.id=q.created_by
 		 WHERE q.institution_id=$1
-		 GROUP BY q.id, q.title ORDER BY completions DESC LIMIT 5`, instID)
+		 GROUP BY q.id, q.title, q.type, t.display_name, t.full_name ORDER BY completions DESC LIMIT 5`, instID)
 	defer qrows.Close()
 	type topQuiz struct {
 		ID          string `json:"id"`
 		Title       string `json:"title"`
+		Type        string `json:"type"`
+		TeacherName string `json:"teacher_name"`
 		Completions int    `json:"completions"`
 	}
 	topQuizzes := []topQuiz{}
 	for qrows.Next() {
 		var tq topQuiz
-		qrows.Scan(&tq.ID, &tq.Title, &tq.Completions)
+		qrows.Scan(&tq.ID, &tq.Title, &tq.Type, &tq.TeacherName, &tq.Completions)
 		topQuizzes = append(topQuizzes, tq)
 	}
 
@@ -108,9 +134,11 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		"total_teachers":  totalTeachers,
 		"total_quizzes":   totalQuizzes,
 		"average_score":   avgScore,
-		"top_student":     map[string]interface{}{"name": topStudentName, "points": topStudentPoints},
-		"activity_chart":  chart,
-		"top_quizzes":     topQuizzes,
+		"top_student":     topStudent,
+		// Completed attempts in the last 30 days, the window the dashboard labels.
+		"average_score_window_days": 30,
+		"activity_chart":            chart,
+		"top_quizzes":               topQuizzes,
 		"pending": map[string]interface{}{
 			"admissions":            pendingAdmissions,
 			"oldest_admission_at":   oldestAdmission,
@@ -132,6 +160,13 @@ const avgScoreExpr = `COALESCE((SELECT AVG(qa.score_pct) FROM quiz_attempts qa J
  AND qa.completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)
  AND (e.ended_at IS NULL OR qa.completed_at<=e.ended_at)),0)`
 
+// attemptsExpr counts the same attempts avgScoreExpr averages, so a client can
+// tell "no attempts" from a real 0% average.
+const attemptsExpr = `(SELECT COUNT(*) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
+ WHERE qa.user_id=e.user_id AND qa.status='completed' AND q.institution_id=e.institution_id
+ AND qa.completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)
+ AND (e.ended_at IS NULL OR qa.completed_at<=e.ended_at))`
+
 func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	h.listStudents(w, r, middleware.GetInstitutionID(r))
 }
@@ -147,18 +182,9 @@ func (h *Handler) ListStudentsForAdmin(w http.ResponseWriter, r *http.Request) {
 	h.listStudents(w, r, instID)
 }
 
-func (h *Handler) listStudents(w http.ResponseWriter, r *http.Request, instID string) {
-	q := r.URL.Query()
-	page, _ := strconv.Atoi(q.Get("page"))
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	if page < 1 {
-		page = 1
-	}
-	if limit < 1 || limit > 50 {
-		limit = 20
-	}
-	offset := (page - 1) * limit
-
+// studentListWhere is the roster filter shared by the paged list and the
+// "select all matching" ids endpoint, so both always agree on who matches.
+func studentListWhere(instID string, q url.Values) (string, []interface{}) {
 	search := q.Get("search")
 	groupID := q.Get("group_id")
 	status := q.Get("status")
@@ -225,6 +251,25 @@ func (h *Handler) listStudents(w http.ResponseWriter, r *http.Request, instID st
 		}
 	}
 
+	_ = n
+	return where, args
+}
+
+func (h *Handler) listStudents(w http.ResponseWriter, r *http.Request, instID string) {
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
+	offset := (page - 1) * limit
+
+	where, args := studentListWhere(instID, q)
+	n := len(args) + 1
+
 	var total int
 	if err := h.db.QueryRow(r.Context(),
 		`SELECT COUNT(*) FROM enrollments e LEFT JOIN users u ON u.id = e.user_id WHERE `+where,
@@ -251,6 +296,7 @@ func (h *Handler) listStudents(w http.ResponseWriter, r *http.Request, instID st
 		        e.roll_number, e.grade, e.section, e.status,
 		        COALESCE(u.total_points,0), COALESCE(u.current_streak,0), u.last_active_at,
 		        `+avgScoreExpr+` AS avg_score,
+		        `+attemptsExpr+` AS attempts_count,
 		        CASE WHEN e.status='pending_claim' THEN e.claim_code END,
 		        COALESCE((SELECT json_agg(json_build_object('id', g.id, 'name', g.name))
 		                    FROM group_students gs JOIN groups g ON g.id = gs.group_id
@@ -281,6 +327,8 @@ func (h *Handler) listStudents(w http.ResponseWriter, r *http.Request, instID st
 		CurrentStreak int        `json:"current_streak"`
 		LastActiveAt  *time.Time `json:"last_active_at,omitempty"`
 		AverageScore  float64    `json:"average_score"`
+		// Completed attempts behind average_score; 0 means "no attempts", not 0%.
+		AttemptsCount int `json:"attempts_count"`
 		// Only a pending_claim row has a live code. Claimed rows carry NULL,
 		// which is what stops the roster screen offering a code to copy.
 		ClaimCode *string    `json:"claim_code"`
@@ -291,7 +339,7 @@ func (h *Handler) listStudents(w http.ResponseWriter, r *http.Request, instID st
 		var s studentRow
 		if err := rows.Scan(&s.EnrollmentID, &s.ID, &s.DisplayName, &s.Email, &s.RollNumber, &s.Grade,
 			&s.Section, &s.Status, &s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.AverageScore,
-			&s.ClaimCode, &s.Groups); err != nil {
+			&s.AttemptsCount, &s.ClaimCode, &s.Groups); err != nil {
 			middleware.InternalError(w)
 			return
 		}
@@ -305,6 +353,40 @@ func (h *Handler) listStudents(w http.ResponseWriter, r *http.Request, instID st
 		students = []studentRow{}
 	}
 	middleware.JSONWithMeta(w, http.StatusOK, students, &middleware.Meta{Page: page, Limit: limit, Total: total})
+}
+
+// GET /api/v1/institution/students/ids — every enrollment matching the roster
+// filters (same query params as the list), for "select all matching" across
+// pages. Capped: a selection larger than this is a job for an import.
+func (h *Handler) ListStudentIDs(w http.ResponseWriter, r *http.Request) {
+	const max = 5000
+	where, args := studentListWhere(middleware.GetInstitutionID(r), r.URL.Query())
+	rows, err := h.db.Query(r.Context(),
+		`SELECT e.id, e.user_id, COALESCE(NULLIF(u.full_name,''), NULLIF(u.display_name,''), e.full_name), e.status
+		   FROM enrollments e LEFT JOIN users u ON u.id = e.user_id
+		  WHERE `+where+fmt.Sprintf(` ORDER BY e.id LIMIT %d`, max+1), args...)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+	type ref struct {
+		EnrollmentID string  `json:"enrollment_id"`
+		UserID       *string `json:"user_id"`
+		DisplayName  string  `json:"display_name"`
+		Status       string  `json:"status"`
+	}
+	out := []ref{}
+	for rows.Next() {
+		var x ref
+		rows.Scan(&x.EnrollmentID, &x.UserID, &x.DisplayName, &x.Status)
+		out = append(out, x)
+	}
+	truncated := len(out) > max
+	if truncated {
+		out = out[:max]
+	}
+	middleware.JSON(w, http.StatusOK, map[string]interface{}{"students": out, "truncated": truncated})
 }
 
 // GET /api/v1/institution/students/:userId
@@ -322,13 +404,16 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 	// Summary
 	var displayName, email, status string
 	var points int64
-	var streak int
+	var streak, longestStreak int
 	var avgScore float64
 	var quizCount int
 	var memberSince time.Time
+	var guardianName, guardianPhone *string
 	h.db.QueryRow(r.Context(),
-		`SELECT display_name, email, status, total_points, current_streak, member_since FROM users WHERE id=$1`, studentID,
-	).Scan(&displayName, &email, &status, &points, &streak, &memberSince)
+		`SELECT display_name, email, status, total_points, current_streak, COALESCE(longest_streak,0), member_since,
+		        NULLIF(guardian_name,''), NULLIF(guardian_phone,'')
+		   FROM users WHERE id=$1`, studentID,
+	).Scan(&displayName, &email, &status, &points, &streak, &longestStreak, &memberSince, &guardianName, &guardianPhone)
 	h.db.QueryRow(r.Context(),
 		`SELECT COUNT(*), COALESCE(AVG(qa.score_pct),0) FROM quiz_attempts qa
  JOIN quizzes q ON q.id=qa.quiz_id JOIN enrollments e ON e.user_id=qa.user_id AND e.institution_id=$2 AND e.status IN ('active','suspended')
@@ -336,40 +421,79 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
  AND qa.completed_at>=COALESCE(e.joined_at,'-infinity'::timestamptz)`, studentID, instID,
 	).Scan(&quizCount, &avgScore)
 
-	// Quiz history (last 20)
+	// Quiz history, paged. The same window as the summary above so the two agree.
+	histLimit, _ := strconv.Atoi(r.URL.Query().Get("history_limit"))
+	if histLimit < 1 || histLimit > 50 {
+		histLimit = 20
+	}
+	histOffset, _ := strconv.Atoi(r.URL.Query().Get("history_offset"))
+	if histOffset < 0 {
+		histOffset = 0
+	}
 	rows, _ := h.db.Query(r.Context(),
-		`SELECT qa.id, q.title, COALESCE(qa.score_pct,0), COALESCE(qa.points_delta,0), qa.completed_at
+		`SELECT qa.id, q.id, q.title, q.type, COALESCE(qa.score_pct,0), COALESCE(qa.points_delta,0), qa.completed_at,
+		        CASE WHEN qa.started_at IS NOT NULL THEN (EXTRACT(EPOCH FROM (qa.completed_at - qa.started_at))*1000)::BIGINT END
 		 FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
 		 WHERE qa.user_id=$1 AND qa.status='completed' AND q.institution_id=$2
  AND qa.completed_at>=(SELECT COALESCE(e.joined_at,'-infinity'::timestamptz) FROM enrollments e WHERE e.user_id=$1 AND e.institution_id=$2 AND e.status IN ('active','suspended'))
- ORDER BY qa.completed_at DESC LIMIT 20`, studentID, instID)
+ ORDER BY qa.completed_at DESC LIMIT $3 OFFSET $4`, studentID, instID, histLimit, histOffset)
 	defer rows.Close()
 	type attempt struct {
 		ID          string     `json:"id"`
+		QuizID      string     `json:"quiz_id"`
 		QuizTitle   string     `json:"quiz_title"`
+		QuizType    string     `json:"quiz_type"`
 		ScorePct    float64    `json:"score_pct"`
 		PointsDelta int64      `json:"points_delta"`
 		CompletedAt *time.Time `json:"completed_at"`
+		TimeTakenMs *int64     `json:"time_taken_ms"`
 	}
-	var attempts []attempt
+	attempts := []attempt{}
 	for rows.Next() {
 		var a attempt
-		rows.Scan(&a.ID, &a.QuizTitle, &a.ScorePct, &a.PointsDelta, &a.CompletedAt)
+		rows.Scan(&a.ID, &a.QuizID, &a.QuizTitle, &a.QuizType, &a.ScorePct, &a.PointsDelta, &a.CompletedAt, &a.TimeTakenMs)
 		attempts = append(attempts, a)
 	}
 
-	// Groups
+	// Points ledger, most recent first. Points are platform-wide, so this is
+	// the student's whole ledger, not an institution slice.
+	ledger := []map[string]interface{}{}
+	lRows, _ := h.db.Query(r.Context(),
+		`SELECT id, amount, reason, reference_id, balance_after, expires_at, created_at
+		   FROM points_ledger WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50`, studentID)
+	defer lRows.Close()
+	for lRows.Next() {
+		var id, reason string
+		var ref *string
+		var amount, balance int64
+		var expires *time.Time
+		var created time.Time
+		if lRows.Scan(&id, &amount, &reason, &ref, &balance, &expires, &created) == nil {
+			ledger = append(ledger, map[string]interface{}{
+				"id": id, "amount": amount, "reason": reason, "reference_id": ref,
+				"balance_after": balance, "expires_at": expires, "created_at": created,
+			})
+		}
+	}
+
+	// Groups, with who teaches each.
 	gRows, _ := h.db.Query(r.Context(),
-		`SELECT g.id, g.name FROM groups g JOIN group_students gs ON gs.group_id=g.id WHERE gs.user_id=$1 AND g.institution_id=$2 AND g.archived_at IS NULL`, studentID, instID)
+		`SELECT g.id, g.name,
+		        COALESCE((SELECT array_agg(COALESCE(NULLIF(t.display_name,''), t.full_name) ORDER BY t.display_name)
+		                    FROM group_teachers gt JOIN users t ON t.id=gt.user_id
+		                   WHERE gt.group_id=g.id AND t.deleted_at IS NULL), '{}')
+		   FROM groups g JOIN group_students gs ON gs.group_id=g.id
+		  WHERE gs.user_id=$1 AND g.institution_id=$2 AND g.archived_at IS NULL`, studentID, instID)
 	defer gRows.Close()
 	type group struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID           string   `json:"id"`
+		Name         string   `json:"name"`
+		TeacherNames []string `json:"teacher_names"`
 	}
-	var groups []group
+	groups := []group{}
 	for gRows.Next() {
 		var g group
-		gRows.Scan(&g.ID, &g.Name)
+		gRows.Scan(&g.ID, &g.Name, &g.TeacherNames)
 		groups = append(groups, g)
 	}
 
@@ -392,9 +516,11 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"id": studentID, "display_name": displayName, "email": email, "status": status,
-		"total_points": points, "current_streak": streak, "average_score": avgScore,
-		"quizzes_taken": quizCount, "member_since": memberSince,
-		"quiz_history": attempts, "groups": groups,
+		"total_points": points, "current_streak": streak, "longest_streak": longestStreak,
+		"average_score": avgScore, "quizzes_taken": quizCount, "member_since": memberSince,
+		"quiz_history": attempts, "history_limit": histLimit, "history_offset": histOffset,
+		"points_ledger": ledger, "groups": groups,
+		"guardian_name": guardianName, "guardian_phone": maskPhone(guardianPhone),
 		"enrollment_id": enrollmentID, "enrollment_status": enrollmentStatus,
 		"roll_number": rollNumber, "grade": grade, "section": section,
 		"admission_date": admissionDateStr,
@@ -450,54 +576,150 @@ func (h *Handler) UpdateStudentStatus(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/institution/teachers
 func (h *Handler) ListTeachers(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
 	if page < 1 {
 		page = 1
 	}
-	if limit < 1 || limit > 50 {
+	if limit < 1 || limit > 100 {
 		limit = 20
 	}
 	offset := (page - 1) * limit
 
-	var total int
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher' AND deleted_at IS NULL`, instID).Scan(&total)
+	where := `u.institution_id=$1 AND u.role='teacher' AND u.deleted_at IS NULL`
+	args := []interface{}{instID}
+	switch status := q.Get("status"); status {
+	case "":
+	case "active", "pending", "suspended":
+		where += fmt.Sprintf(` AND u.status=$%d`, len(args)+1)
+		args = append(args, status)
+	case "needs_action":
+		where += ` AND u.status IN ('pending','suspended')`
+	default:
+		middleware.BadRequest(w, "status must be active, pending, suspended or needs_action")
+		return
+	}
+	if search := strings.TrimSpace(q.Get("search")); search != "" {
+		where += fmt.Sprintf(` AND (u.display_name ILIKE $%[1]d OR u.email ILIKE $%[1]d)`, len(args)+1)
+		args = append(args, "%"+search+"%")
+	}
 
+	var total int
+	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users u WHERE `+where, args...).Scan(&total)
+
+	n := len(args)
 	rows, err := h.db.Query(r.Context(),
-		`SELECT u.id, u.display_name, u.email, u.last_active_at, u.status,
-		        COUNT(DISTINCT q.id) as quiz_count,
-		        COUNT(DISTINCT qa.id) as attempt_count
+		`SELECT u.id, u.display_name, u.email, u.last_active_at, u.status, u.verified_at,
+		        (SELECT COUNT(*) FROM quizzes q WHERE q.created_by=u.id AND q.deleted_at IS NULL) AS quiz_count,
+		        (SELECT COUNT(*) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
+		          WHERE q.created_by=u.id AND q.deleted_at IS NULL AND qa.status='completed') AS attempt_count,
+		        COALESCE((SELECT json_agg(json_build_object('id', g.id, 'name', g.name) ORDER BY g.name)
+		                    FROM group_teachers gt JOIN groups g ON g.id=gt.group_id
+		                   WHERE gt.user_id=u.id AND g.archived_at IS NULL), '[]'::json)
 		 FROM users u
-		 LEFT JOIN quizzes q ON q.created_by=u.id AND q.deleted_at IS NULL
-		 LEFT JOIN quiz_attempts qa ON qa.quiz_id=q.id AND qa.status='completed'
-		 WHERE u.institution_id=$1 AND u.role='teacher' AND u.deleted_at IS NULL
-		 GROUP BY u.id ORDER BY u.display_name LIMIT $2 OFFSET $3`,
-		instID, limit, offset)
+		 WHERE `+where+fmt.Sprintf(` ORDER BY u.display_name, u.id LIMIT $%d OFFSET $%d`, n+1, n+2),
+		append(args, limit, offset)...)
 	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
 	defer rows.Close()
 
+	type groupRef struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
 	type teacherRow struct {
 		ID           string     `json:"id"`
 		DisplayName  string     `json:"display_name"`
 		Email        string     `json:"email"`
 		LastActiveAt *time.Time `json:"last_active_at,omitempty"`
 		Status       string     `json:"status"`
+		VerifiedAt   *time.Time `json:"verified_at"`
 		QuizCount    int        `json:"quiz_count"`
 		AttemptCount int        `json:"attempt_count"`
+		Groups       []groupRef `json:"groups"`
 	}
-	var teachers []teacherRow
+	teachers := []teacherRow{}
 	for rows.Next() {
 		var t teacherRow
-		rows.Scan(&t.ID, &t.DisplayName, &t.Email, &t.LastActiveAt, &t.Status, &t.QuizCount, &t.AttemptCount)
+		rows.Scan(&t.ID, &t.DisplayName, &t.Email, &t.LastActiveAt, &t.Status, &t.VerifiedAt, &t.QuizCount, &t.AttemptCount, &t.Groups)
 		teachers = append(teachers, t)
 	}
-	if teachers == nil {
-		teachers = []teacherRow{}
-	}
 	middleware.JSONWithMeta(w, http.StatusOK, teachers, &middleware.Meta{Page: page, Limit: limit, Total: total})
+}
+
+// GET /api/v1/institution/teachers/counts — totals for the filter pills.
+// Pending invitations are counted separately: they aren't accounts yet.
+func (h *Handler) TeacherCounts(w http.ResponseWriter, r *http.Request) {
+	instID := middleware.GetInstitutionID(r)
+	var all, active, pending, suspended, invited int
+	h.db.QueryRow(r.Context(), `SELECT
+		COUNT(*), COUNT(*) FILTER (WHERE status='active'), COUNT(*) FILTER (WHERE status='pending'),
+		COUNT(*) FILTER (WHERE status='suspended'),
+		(SELECT COUNT(*) FROM teacher_invites WHERE institution_id=$1 AND status='pending' AND expires_at > now())
+		FROM users WHERE institution_id=$1 AND role='teacher' AND deleted_at IS NULL`, instID).
+		Scan(&all, &active, &pending, &suspended, &invited)
+	middleware.JSON(w, http.StatusOK, map[string]int{
+		"all": all, "active": active, "pending": pending, "suspended": suspended,
+		"invited": invited, "needs_action": pending + suspended,
+	})
+}
+
+// GET /api/v1/institution/teachers/invites — open invitations, newest first.
+func (h *Handler) ListTeacherInvites(w http.ResponseWriter, r *http.Request) {
+	rows, err := h.db.Query(r.Context(),
+		`SELECT id, email, COALESCE(name,''), created_at, expires_at FROM teacher_invites
+		  WHERE institution_id=$1 AND status='pending' AND expires_at > now()
+		  ORDER BY created_at DESC LIMIT 200`, middleware.GetInstitutionID(r))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+	type invite struct {
+		ID        string    `json:"id"`
+		Email     string    `json:"email"`
+		Name      string    `json:"name"`
+		InvitedAt time.Time `json:"invited_at"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	out := []invite{}
+	for rows.Next() {
+		var i invite
+		rows.Scan(&i.ID, &i.Email, &i.Name, &i.InvitedAt, &i.ExpiresAt)
+		out = append(out, i)
+	}
+	middleware.JSON(w, http.StatusOK, out)
+}
+
+// POST /api/v1/institution/teachers/invites/{inviteId}/resend
+// Sends the same invitation again and restarts its 7-day window. The token is
+// kept, so a link from the first email still works.
+func (h *Handler) ResendTeacherInvite(w http.ResponseWriter, r *http.Request) {
+	instID := middleware.GetInstitutionID(r)
+	inviteID := chi.URLParam(r, "inviteId")
+	var email, name, token string
+	var expires time.Time
+	err := h.db.QueryRow(r.Context(),
+		`UPDATE teacher_invites SET expires_at = now() + INTERVAL '7 days'
+		  WHERE id=$1 AND institution_id=$2 AND status='pending'
+		  RETURNING email, COALESCE(name,''), token, expires_at`, inviteID, instID).Scan(&email, &name, &token, &expires)
+	if err != nil {
+		middleware.NotFound(w, "pending invitation")
+		return
+	}
+	var instName string
+	h.db.QueryRow(r.Context(), `SELECT name FROM institutions WHERE id=$1`, instID).Scan(&instName)
+	if h.notif != nil {
+		if err := h.notif.SendTeacherInvite(r.Context(), email, name, instName, token, h.appURL, inviteID); err != nil {
+			middleware.Error(w, http.StatusBadGateway, "EMAIL_FAILED", "the invitation couldn't be emailed; try again")
+			return
+		}
+	}
+	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), instID, "invite_teacher", "teacher_invite", inviteID, "resent to "+email)
+	middleware.JSON(w, http.StatusOK, map[string]string{"email": email, "expires_at": expires.UTC().Format(time.RFC3339)})
 }
 
 // GET /api/v1/institution/teachers/:userId
@@ -505,35 +727,94 @@ func (h *Handler) GetTeacher(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
 	teacherID := chi.URLParam(r, "userId")
 
-	var check int
-	h.db.QueryRow(r.Context(), `SELECT 1 FROM users WHERE id=$1 AND institution_id=$2 AND role='teacher'`, teacherID, instID).Scan(&check)
-	if check == 0 {
+	var name, email, status string
+	var lastActive, verifiedAt *time.Time
+	err := h.db.QueryRow(r.Context(),
+		`SELECT COALESCE(NULLIF(display_name,''), full_name), email, status, last_active_at, verified_at
+		   FROM users WHERE id=$1 AND institution_id=$2 AND role='teacher' AND deleted_at IS NULL`,
+		teacherID, instID).Scan(&name, &email, &status, &lastActive, &verifiedAt)
+	if err != nil {
 		middleware.NotFound(w, "teacher")
 		return
 	}
 
-	var name string
-	var avgScore float64
-	var quizCount, attemptCount int
-	// Name + quiz/attempt aggregates in one round-trip. The tq CTE evaluates the
-	// quizzes⋈attempts join once so COUNT(*)/AVG match the original single query.
-	h.db.QueryRow(r.Context(), `
-		WITH tq AS (
-			SELECT COUNT(*) AS cnt, COALESCE(AVG(qa.score_pct),0) AS avg
-			FROM quizzes q LEFT JOIN quiz_attempts qa ON qa.quiz_id=q.id AND qa.status='completed'
-			WHERE q.created_by=$1 AND q.deleted_at IS NULL
-		)
-		SELECT
-			(SELECT display_name FROM users WHERE id=$1),
-			(SELECT cnt FROM tq),
-			(SELECT avg FROM tq),
-			(SELECT COUNT(*) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id WHERE q.created_by=$1 AND qa.status='completed')`,
-		teacherID,
-	).Scan(&name, &quizCount, &avgScore, &attemptCount)
+	// Their quizzes with per-quiz completions and averages.
+	qrows, _ := h.db.Query(r.Context(),
+		`SELECT q.id, q.title, q.type, q.status, q.question_count,
+		        COUNT(qa.id) FILTER (WHERE qa.status='completed'),
+		        COALESCE(AVG(qa.score_pct) FILTER (WHERE qa.status='completed'),0),
+		        q.published_at, q.created_at
+		   FROM quizzes q LEFT JOIN quiz_attempts qa ON qa.quiz_id=q.id
+		  WHERE q.created_by=$1 AND q.deleted_at IS NULL
+		  GROUP BY q.id ORDER BY COALESCE(q.published_at, q.created_at) DESC LIMIT 100`, teacherID)
+	defer qrows.Close()
+	type quizRow struct {
+		ID              string     `json:"id"`
+		Title           string     `json:"title"`
+		Type            string     `json:"type"`
+		Status          string     `json:"status"`
+		QuestionCount   int        `json:"question_count"`
+		CompletionCount int        `json:"completion_count"`
+		AverageScore    float64    `json:"average_score"`
+		PublishedAt     *time.Time `json:"published_at"`
+		CreatedAt       time.Time  `json:"created_at"`
+	}
+	quizzes := []quizRow{}
+	attempts, weighted := 0, 0.0
+	for qrows.Next() {
+		var q quizRow
+		qrows.Scan(&q.ID, &q.Title, &q.Type, &q.Status, &q.QuestionCount, &q.CompletionCount, &q.AverageScore, &q.PublishedAt, &q.CreatedAt)
+		attempts += q.CompletionCount
+		weighted += q.AverageScore * float64(q.CompletionCount)
+		quizzes = append(quizzes, q)
+	}
+	var avg *float64
+	if attempts > 0 {
+		v := weighted / float64(attempts)
+		avg = &v
+	}
+
+	grows, _ := h.db.Query(r.Context(),
+		`SELECT g.id, g.name, (SELECT COUNT(*) FROM group_students gs WHERE gs.group_id=g.id)
+		   FROM group_teachers gt JOIN groups g ON g.id=gt.group_id
+		  WHERE gt.user_id=$1 AND g.institution_id=$2 AND g.archived_at IS NULL ORDER BY g.name`, teacherID, instID)
+	defer grows.Close()
+	type groupRow struct {
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		StudentCount int    `json:"student_count"`
+	}
+	groups := []groupRow{}
+	for grows.Next() {
+		var g groupRow
+		grows.Scan(&g.ID, &g.Name, &g.StudentCount)
+		groups = append(groups, g)
+	}
+
+	// Recent activity: what they published and which topic requests they took on.
+	arows, _ := h.db.Query(r.Context(),
+		`(SELECT 'Published “' || title || '”', published_at FROM quizzes
+		   WHERE created_by=$1 AND deleted_at IS NULL AND published_at IS NOT NULL)
+		 UNION ALL
+		 (SELECT 'Picked up topic request “' || topic || '”', created_at FROM topic_requests WHERE assigned_to=$1)
+		 ORDER BY 2 DESC LIMIT 5`, teacherID)
+	defer arows.Close()
+	type activity struct {
+		Text string    `json:"text"`
+		At   time.Time `json:"at"`
+	}
+	recent := []activity{}
+	for arows.Next() {
+		var a activity
+		arows.Scan(&a.Text, &a.At)
+		recent = append(recent, a)
+	}
 
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
-		"id": teacherID, "display_name": name, "quiz_count": quizCount,
-		"attempt_count": attemptCount, "average_score": avgScore,
+		"id": teacherID, "display_name": name, "full_name": name, "email": email, "status": status,
+		"last_active_at": lastActive, "verified_at": verifiedAt,
+		"quiz_count": len(quizzes), "attempt_count": attempts, "average_score": avg,
+		"quizzes": quizzes, "groups": groups, "recent_activity": recent,
 	})
 }
 
@@ -570,7 +851,8 @@ func (h *Handler) UpdateTeacherStatus(w http.ResponseWriter, r *http.Request) {
 		newStatus = "active"
 	}
 
-	h.db.Exec(r.Context(), `UPDATE users SET status=$1, updated_at=now() WHERE id=$2`, newStatus, teacherID)
+	h.db.Exec(r.Context(), `UPDATE users SET status=$1, updated_at=now(),
+		verified_at = CASE WHEN $3 THEN now() ELSE verified_at END WHERE id=$2`, newStatus, teacherID, req.Action == "verify")
 	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), req.Action+"_teacher", "user", teacherID, req.Reason)
 
 	// On verification, email the teacher that they can now sign in.
@@ -680,6 +962,33 @@ func (h *Handler) InviteTeacher(w http.ResponseWriter, r *http.Request) {
 }
 
 // nullableString returns a *string pointer for DB nullable TEXT columns.
+// maskPhone keeps the country prefix, two leading and three trailing digits:
+// "+91 98••• ••412". An admin can recognise the number without it being
+// exposed on every screen that renders a profile.
+func maskPhone(p *string) *string {
+	if p == nil {
+		return nil
+	}
+	digits := make([]rune, 0, len(*p))
+	for _, c := range *p {
+		if c >= '0' && c <= '9' {
+			digits = append(digits, c)
+		}
+	}
+	if len(digits) < 6 {
+		m := "•••"
+		return &m
+	}
+	prefix := ""
+	if len(digits) > 10 {
+		prefix = "+" + string(digits[:len(digits)-10]) + " "
+		digits = digits[len(digits)-10:]
+	}
+	n := len(digits)
+	out := prefix + string(digits[:2]) + "••• ••" + string(digits[n-3:])
+	return &out
+}
+
 func nullableString(s string) *string {
 	if s == "" {
 		return nil
@@ -690,25 +999,51 @@ func nullableString(s string) *string {
 // GET /api/v1/institution/groups
 func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
+	// The 30-day average covers attempts by the class's current students on
+	// any of this institution's quizzes; null when there are none.
 	rows, err := h.db.Query(r.Context(),
-		`SELECT id, name, description, invite_code, archived_at, created_at FROM groups WHERE institution_id=$1 ORDER BY name`, instID)
+		`SELECT g.id, g.name, g.description, g.invite_code, g.archived_at, g.created_at,
+		        (SELECT COUNT(*) FROM group_students gs WHERE gs.group_id=g.id),
+		        (SELECT COUNT(*) FROM group_teachers gt WHERE gt.group_id=g.id),
+		        COALESCE((SELECT array_agg(COALESCE(NULLIF(t.display_name,''), t.full_name) ORDER BY t.display_name)
+		                    FROM group_teachers gt JOIN users t ON t.id=gt.user_id
+		                   WHERE gt.group_id=g.id AND t.deleted_at IS NULL), '{}'),
+		        (SELECT AVG(qa.score_pct) FROM quiz_attempts qa
+		           JOIN group_students gs ON gs.user_id=qa.user_id AND gs.group_id=g.id
+		           JOIN quizzes q ON q.id=qa.quiz_id AND q.institution_id=g.institution_id
+		          WHERE qa.status='completed' AND qa.completed_at >= CURRENT_DATE - 30),
+		        (SELECT json_build_object('version_id', v.id, 'name', c.name, 'label', v.label,
+		                                  'subject', v.subject, 'grade', v.grade, 'revision', v.revision,
+		                                  'academic_year_name', y.name)
+		           FROM class_curricula cc
+		           JOIN curriculum_versions v ON v.id=cc.version_id JOIN curricula c ON c.id=v.curriculum_id
+		           JOIN academic_years y ON y.id=cc.academic_year_id
+		          WHERE cc.group_id=g.id AND cc.ended_at IS NULL AND CURRENT_DATE BETWEEN y.starts_on AND y.ends_on
+		          ORDER BY cc.assigned_at DESC LIMIT 1)
+		   FROM groups g WHERE g.institution_id=$1 ORDER BY g.name`, instID)
 	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
 	defer rows.Close()
 	type groupRow struct {
-		ID          string     `json:"id"`
-		Name        string     `json:"name"`
-		Description *string    `json:"description"`
-		InviteCode  string     `json:"invite_code"`
-		ArchivedAt  *time.Time `json:"archived_at"`
-		CreatedAt   time.Time  `json:"created_at"`
+		ID              string                 `json:"id"`
+		Name            string                 `json:"name"`
+		Description     *string                `json:"description"`
+		InviteCode      string                 `json:"invite_code"`
+		ArchivedAt      *time.Time             `json:"archived_at"`
+		CreatedAt       time.Time              `json:"created_at"`
+		StudentCount    int                    `json:"student_count"`
+		TeacherCount    int                    `json:"teacher_count"`
+		TeacherNames    []string               `json:"teacher_names"`
+		AverageScore30d *float64               `json:"average_score_30d"`
+		CurrentCurric   map[string]interface{} `json:"current_curriculum"`
 	}
 	var groups []groupRow
 	for rows.Next() {
 		var g groupRow
-		rows.Scan(&g.ID, &g.Name, &g.Description, &g.InviteCode, &g.ArchivedAt, &g.CreatedAt)
+		rows.Scan(&g.ID, &g.Name, &g.Description, &g.InviteCode, &g.ArchivedAt, &g.CreatedAt,
+			&g.StudentCount, &g.TeacherCount, &g.TeacherNames, &g.AverageScore30d, &g.CurrentCurric)
 		groups = append(groups, g)
 	}
 	if groups == nil {
@@ -769,22 +1104,34 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 		 WHERE gs.group_id=$1 AND qa.status='completed'`, groupID).Scan(&avgScore)
 
 	type studentRow struct {
-		EnrollmentID  *string `json:"enrollment_id"`
-		ID            string  `json:"id"`
-		DisplayName   string  `json:"display_name"`
-		Email         string  `json:"email"`
-		Status        string  `json:"status"`
-		TotalPoints   int64   `json:"total_points"`
-		CurrentStreak int     `json:"current_streak"`
-		AverageScore  float64 `json:"average_score"`
+		EnrollmentID  *string    `json:"enrollment_id"`
+		ID            string     `json:"id"`
+		DisplayName   string     `json:"display_name"`
+		Email         string     `json:"email"`
+		Status        string     `json:"status"`
+		RollNumber    *string    `json:"roll_number"`
+		TotalPoints   int64      `json:"total_points"`
+		CurrentStreak int        `json:"current_streak"`
+		LastActiveAt  *time.Time `json:"last_active_at"`
+		AverageScore  float64    `json:"average_score"`
+		// Class-scoped: attempts on quizzes set for this class. Null with no
+		// attempts, which is not the same as 0%.
+		ClassAverageScore *float64  `json:"class_average_score"`
+		ClassAttempts     int       `json:"class_attempts"`
+		JoinedAt          time.Time `json:"joined_at"`
 	}
 	students := []studentRow{}
 	srows, err := h.db.Query(r.Context(),
 		`SELECT e.id, u.id, COALESCE(u.display_name, ''), COALESCE(u.email, ''),
-		        COALESCE(e.status, 'active'),
-		        COALESCE(u.total_points,0), COALESCE(u.current_streak,0),
+		        COALESCE(e.status, 'active'), e.roll_number,
+		        COALESCE(u.total_points,0), COALESCE(u.current_streak,0), u.last_active_at,
 		        COALESCE((SELECT AVG(score_pct) FROM quiz_attempts
-		                   WHERE user_id=u.id AND status='completed'),0)
+		                   WHERE user_id=u.id AND status='completed'),0),
+		        (SELECT AVG(qa.score_pct) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
+		          WHERE qa.user_id=u.id AND qa.status='completed' AND q.group_id=gs.group_id),
+		        (SELECT COUNT(*) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
+		          WHERE qa.user_id=u.id AND qa.status='completed' AND q.group_id=gs.group_id),
+		        gs.joined_at
 		   FROM group_students gs
 		   JOIN users u ON u.id = gs.user_id
 		   LEFT JOIN enrollments e ON e.user_id = u.id AND e.institution_id = $2
@@ -796,8 +1143,9 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	for srows.Next() {
 		var s studentRow
-		srows.Scan(&s.EnrollmentID, &s.ID, &s.DisplayName, &s.Email, &s.Status,
-			&s.TotalPoints, &s.CurrentStreak, &s.AverageScore)
+		srows.Scan(&s.EnrollmentID, &s.ID, &s.DisplayName, &s.Email, &s.Status, &s.RollNumber,
+			&s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.AverageScore,
+			&s.ClassAverageScore, &s.ClassAttempts, &s.JoinedAt)
 		students = append(students, s)
 	}
 	srows.Close()
@@ -963,8 +1311,22 @@ func (h *Handler) GetSettings(w http.ResponseWriter, r *http.Request) {
 		pending = &pr
 	}
 
+	// Verification state for the "Qwish is verifying your institution" banner,
+	// and the open Play & Win count a point-rule change should mention.
+	var verification string
+	var submittedAt time.Time
+	var openPlayWin int
+	h.db.QueryRow(r.Context(), `SELECT status, created_at,
+		(SELECT COUNT(*) FROM quizzes q WHERE q.institution_id=$1 AND q.deleted_at IS NULL AND q.type='play_and_win'
+		   AND q.status='published' AND (q.ends_at IS NULL OR q.ends_at > now()))
+		FROM institutions WHERE id=$1`, instID).Scan(&verification, &submittedAt, &openPlayWin)
+	// A short, stable reference derived from the id, for support conversations.
+	reference := "INST-" + strings.ToUpper(strings.ReplaceAll(instID, "-", "")[:6])
+
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"name": name, "type": instType, "timezone": timezone,
+		"verification_status": verification, "submitted_at": submittedAt, "reference": reference,
+		"open_play_win_quizzes": openPlayWin,
 		"student_referral_code": sCode, "teacher_referral_code": tCode,
 		"point_rules": map[string]interface{}{
 			"point_multiplier": mult, "streak_grace_enabled": graceEnabled,
@@ -1101,16 +1463,23 @@ func (h *Handler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "invalid request")
 		return
 	}
-	if _, err := h.db.Exec(r.Context(),
-		`UPDATE institutions SET name=COALESCE(NULLIF($1,''),name), timezone=COALESCE(NULLIF($2,''),timezone), type=COALESCE(NULLIF($3,''),type), updated_at=now() WHERE id=$4`,
-		req.Name, req.Timezone, req.Type, instID); err != nil {
+	var before [3]string
+	h.db.QueryRow(r.Context(), `SELECT name, COALESCE(timezone,''), COALESCE(type,'') FROM institutions WHERE id=$1`, instID).
+		Scan(&before[0], &before[1], &before[2])
+	var after [3]string
+	if err := h.db.QueryRow(r.Context(),
+		`UPDATE institutions SET name=COALESCE(NULLIF($1,''),name), timezone=COALESCE(NULLIF($2,''),timezone), type=COALESCE(NULLIF($3,''),type), updated_at=now() WHERE id=$4
+		 RETURNING name, COALESCE(timezone,''), COALESCE(type,'')`,
+		req.Name, req.Timezone, req.Type, instID).Scan(&after[0], &after[1], &after[2]); err != nil {
 		middleware.InternalError(w)
 		return
 	}
 	// The institution's display name is what every student sees in the app, and
 	// its timezone decides when a streak day ends. Both belong in the log for the
 	// same reason a suspension does.
-	logAuditInst(r.Context(), h.db, adminID, instID, "update_settings", "institution", instID, "")
+	logAuditChange(r.Context(), h.db, adminID, instID, "update_settings", "institution", instID, "",
+		map[string]interface{}{"name": before[0], "timezone": before[1], "type": before[2]},
+		map[string]interface{}{"name": after[0], "timezone": after[1], "type": after[2]})
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "settings updated"})
 }
 
@@ -1128,6 +1497,15 @@ func (h *Handler) UpdatePointRules(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "invalid request")
 		return
 	}
+	rulesQuery := `SELECT point_multiplier, streak_grace_enabled, play_win_score_hidden, point_expiry_months FROM institutions WHERE id=$1`
+	readRules := func() map[string]interface{} {
+		var m float64
+		var g, hid bool
+		var e int
+		h.db.QueryRow(r.Context(), rulesQuery, instID).Scan(&m, &g, &hid, &e)
+		return map[string]interface{}{"point_multiplier": m, "streak_grace_enabled": g, "play_win_score_hidden": hid, "point_expiry_months": e}
+	}
+	before := readRules()
 	if req.PointMultiplier != nil {
 		h.db.Exec(r.Context(), `UPDATE institutions SET point_multiplier=$1, updated_at=now() WHERE id=$2`, *req.PointMultiplier, instID)
 	}
@@ -1140,7 +1518,7 @@ func (h *Handler) UpdatePointRules(w http.ResponseWriter, r *http.Request) {
 	if req.PointExpiryMonths != nil {
 		h.db.Exec(r.Context(), `UPDATE institutions SET point_expiry_months=$1, updated_at=now() WHERE id=$2`, *req.PointExpiryMonths, instID)
 	}
-	logAuditInst(r.Context(), h.db, adminID, instID, "update_point_rules", "institution", instID, "")
+	logAuditChange(r.Context(), h.db, adminID, instID, "update_point_rules", "institution", instID, "", before, readRules())
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "point rules updated"})
 }
 
@@ -1191,6 +1569,15 @@ func (h *Handler) AuditLog(w http.ResponseWriter, r *http.Request) {
 	offset := (page - 1) * limit
 
 	where, args := auditLogWhere(instID, q.Get("action_type"), q.Get("date_from"), q.Get("date_to"))
+	if g := q.Get("action_group"); g != "" {
+		actions, ok := auditActionGroups[g]
+		if !ok {
+			middleware.BadRequest(w, "action_group must be membership, admissions, academics or settings")
+			return
+		}
+		where += fmt.Sprintf(` AND al.action_type = ANY($%d::text[])`, len(args)+1)
+		args = append(args, actions)
+	}
 
 	var total int
 	if err := h.db.QueryRow(r.Context(),
@@ -1201,7 +1588,8 @@ func (h *Handler) AuditLog(w http.ResponseWriter, r *http.Request) {
 
 	n := len(args)
 	rows, err := h.db.Query(r.Context(),
-		`SELECT al.id, al.timestamp, al.admin_name, al.admin_role, al.action_type, al.target_type, al.target_id, al.reason
+		`SELECT al.id, al.timestamp, al.admin_name, al.admin_role, al.action_type, al.target_type, al.target_id, al.reason,
+		        `+auditTargetLabel+`, al.old_value, al.new_value
 		 FROM audit_log al
 		 WHERE `+where+
 			fmt.Sprintf(` ORDER BY al.timestamp DESC LIMIT $%d OFFSET $%d`, n+1, n+2),
@@ -1221,11 +1609,18 @@ func (h *Handler) AuditLog(w http.ResponseWriter, r *http.Request) {
 		TargetType string    `json:"target_type"`
 		TargetID   *string   `json:"target_id,omitempty"`
 		Reason     *string   `json:"reason,omitempty"`
+		// TargetLabel names the target when it still exists.
+		TargetLabel *string `json:"target_label"`
+		// Changes lists field-level before/after for entries that recorded them.
+		Changes []auditChange `json:"changes,omitempty"`
 	}
 	var entries []logEntry
 	for rows.Next() {
 		var e logEntry
-		rows.Scan(&e.ID, &e.Timestamp, &e.AdminName, &e.AdminRole, &e.ActionType, &e.TargetType, &e.TargetID, &e.Reason)
+		var oldV, newV []byte
+		rows.Scan(&e.ID, &e.Timestamp, &e.AdminName, &e.AdminRole, &e.ActionType, &e.TargetType, &e.TargetID, &e.Reason,
+			&e.TargetLabel, &oldV, &newV)
+		e.Changes = auditChanges(oldV, newV)
 		entries = append(entries, e)
 	}
 	if entries == nil {
@@ -1235,51 +1630,74 @@ func (h *Handler) AuditLog(w http.ResponseWriter, r *http.Request) {
 }
 
 // Reports
+
+// GET /api/v1/institution/reports/student-performance
+// Ranked by points, paged, with the period and class applied to the attempts
+// behind quizzes_taken and average_score.
 func (h *Handler) StudentPerformanceReport(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
-	groupID := r.URL.Query().Get("group_id")
-	dateFrom := r.URL.Query().Get("date_from")
-	dateTo := r.URL.Query().Get("date_to")
-
-	where := `u.institution_id=$1 AND u.role='student' AND u.status='active'`
-	args := []interface{}{instID}
-	n := 2
-	if groupID != "" {
-		where += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM group_students gs WHERE gs.user_id=u.id AND gs.group_id=$%d)`, n)
-		args = append(args, groupID)
-		n++
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if page < 1 {
+		page = 1
 	}
-	_ = dateFrom
-	_ = dateTo
+	if limit < 1 || limit > 200 {
+		limit = 50
+	}
 
-	rows, _ := h.db.Query(r.Context(),
+	where := `u.institution_id=$1 AND u.role='student' AND u.status='active' AND u.deleted_at IS NULL`
+	args := []interface{}{instID}
+	if groupID := q.Get("group_id"); groupID != "" {
+		args = append(args, groupID)
+		where += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM group_students gs WHERE gs.user_id=u.id AND gs.group_id=$%d)`, len(args))
+	}
+	// The count uses only the student filter; attempt dates are appended after.
+	studentArgs := append([]interface{}{}, args...)
+	attemptFilter := `qa.user_id=u.id AND qa.status='completed'`
+	if v := q.Get("date_from"); v != "" {
+		args = append(args, v)
+		attemptFilter += fmt.Sprintf(` AND qa.completed_at >= $%d`, len(args))
+	}
+	if v := q.Get("date_to"); v != "" {
+		args = append(args, v)
+		attemptFilter += fmt.Sprintf(` AND qa.completed_at <= $%d`, len(args))
+	}
+
+	var total int
+	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM users u WHERE `+where, studentArgs...).Scan(&total)
+
+	n := len(args)
+	rows, err := h.db.Query(r.Context(),
 		`SELECT u.id, u.display_name, u.total_points, u.current_streak,
-		        COUNT(qa.id) as quizzes_taken,
-		        COALESCE(AVG(qa.score_pct),0) as avg_score
-		 FROM users u
-		 LEFT JOIN quiz_attempts qa ON qa.user_id=u.id AND qa.status='completed'
-		 WHERE `+where+` GROUP BY u.id ORDER BY u.total_points DESC`,
-		args...)
+		        (SELECT COUNT(*) FROM quiz_attempts qa WHERE `+attemptFilter+`),
+		        (SELECT COALESCE(AVG(qa.score_pct),0) FROM quiz_attempts qa WHERE `+attemptFilter+`),
+		        COALESCE((SELECT array_agg(g.name ORDER BY g.name) FROM group_students gs JOIN groups g ON g.id=gs.group_id
+		                   WHERE gs.user_id=u.id AND g.archived_at IS NULL), '{}')
+		 FROM users u WHERE `+where+fmt.Sprintf(` ORDER BY u.total_points DESC, u.id LIMIT $%d OFFSET $%d`, n+1, n+2),
+		append(args, limit, (page-1)*limit)...)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
 	defer rows.Close()
 
 	type row struct {
-		ID            string  `json:"id"`
-		DisplayName   string  `json:"display_name"`
-		TotalPoints   int64   `json:"total_points"`
-		CurrentStreak int     `json:"current_streak"`
-		QuizzesTaken  int     `json:"quizzes_taken"`
-		AverageScore  float64 `json:"average_score"`
+		ID            string   `json:"id"`
+		DisplayName   string   `json:"display_name"`
+		TotalPoints   int64    `json:"total_points"`
+		CurrentStreak int      `json:"current_streak"`
+		QuizzesTaken  int      `json:"quizzes_taken"`
+		AverageScore  float64  `json:"average_score"`
+		ClassNames    []string `json:"class_names"`
 	}
-	var result []row
+	result := []row{}
 	for rows.Next() {
 		var rr row
-		rows.Scan(&rr.ID, &rr.DisplayName, &rr.TotalPoints, &rr.CurrentStreak, &rr.QuizzesTaken, &rr.AverageScore)
+		rows.Scan(&rr.ID, &rr.DisplayName, &rr.TotalPoints, &rr.CurrentStreak, &rr.QuizzesTaken, &rr.AverageScore, &rr.ClassNames)
 		result = append(result, rr)
 	}
-	if result == nil {
-		result = []row{}
-	}
-	middleware.JSON(w, http.StatusOK, result)
+	middleware.JSONWithMeta(w, http.StatusOK, result, &middleware.Meta{Page: page, Limit: limit, Total: total})
 }
 
 // GET /api/v1/institution/reports/teacher-activity
@@ -1312,9 +1730,22 @@ func (h *Handler) TeacherActivityReport(w http.ResponseWriter, r *http.Request) 
 		n++
 	}
 
+	// Teachers of one class, when a class is chosen.
+	scope := func(p int) string {
+		return fmt.Sprintf(` AND EXISTS (SELECT 1 FROM group_teachers gt WHERE gt.user_id=u.id AND gt.group_id::text=$%d)`, p)
+	}
+	teacherScope := ""
+	countSQL := `SELECT COUNT(*) FROM users u WHERE u.institution_id=$1 AND u.role='teacher' AND u.deleted_at IS NULL`
+	countArgs := []interface{}{instID}
+	if groupID := q.Get("group_id"); groupID != "" {
+		args = append(args, groupID)
+		teacherScope = scope(n)
+		n++
+		countSQL += scope(2)
+		countArgs = append(countArgs, groupID)
+	}
 	var total int
-	h.db.QueryRow(r.Context(),
-		`SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher' AND deleted_at IS NULL`, instID).Scan(&total)
+	h.db.QueryRow(r.Context(), countSQL, countArgs...).Scan(&total)
 
 	args = append(args, limit, offset)
 	sql := `SELECT u.id, u.display_name,
@@ -1324,7 +1755,7 @@ func (h *Handler) TeacherActivityReport(w http.ResponseWriter, r *http.Request) 
 	 FROM users u
 	 LEFT JOIN quizzes q ON q.created_by=u.id
 	 LEFT JOIN quiz_attempts qa ON qa.quiz_id=q.id
-	 WHERE u.institution_id=$1 AND u.role='teacher' AND u.deleted_at IS NULL
+	 WHERE u.institution_id=$1 AND u.role='teacher' AND u.deleted_at IS NULL` + teacherScope + `
 	 GROUP BY u.id, u.display_name
 	 ORDER BY total_attempts DESC, u.display_name
 	 LIMIT $` + strconv.Itoa(n) + ` OFFSET $` + strconv.Itoa(n+1)
@@ -1382,9 +1813,18 @@ func (h *Handler) QuizAnalyticsReport(w http.ResponseWriter, r *http.Request) {
 		n++
 	}
 
+	quizScope := ""
 	var total int
-	h.db.QueryRow(r.Context(),
-		`SELECT COUNT(*) FROM quizzes WHERE institution_id=$1 AND deleted_at IS NULL`, instID).Scan(&total)
+	if groupID := q.Get("group_id"); groupID != "" {
+		args = append(args, groupID)
+		quizScope = fmt.Sprintf(` AND q.group_id::text=$%d`, n)
+		n++
+		h.db.QueryRow(r.Context(),
+			`SELECT COUNT(*) FROM quizzes q WHERE q.institution_id=$1 AND q.deleted_at IS NULL AND q.group_id::text=$2`, instID, groupID).Scan(&total)
+	} else {
+		h.db.QueryRow(r.Context(),
+			`SELECT COUNT(*) FROM quizzes WHERE institution_id=$1 AND deleted_at IS NULL`, instID).Scan(&total)
+	}
 
 	args = append(args, limit, offset)
 	sql := `SELECT q.id, q.title,
@@ -1395,7 +1835,7 @@ func (h *Handler) QuizAnalyticsReport(w http.ResponseWriter, r *http.Request) {
 	        COUNT(*) FILTER (WHERE qa.status='completed' AND qa.score_pct < 60) AS low_band
 	 FROM quizzes q
 	 LEFT JOIN quiz_attempts qa ON qa.quiz_id=q.id` + dateClause + `
-	 WHERE q.institution_id=$1 AND q.deleted_at IS NULL
+	 WHERE q.institution_id=$1 AND q.deleted_at IS NULL` + quizScope + `
 	 GROUP BY q.id, q.title
 	 ORDER BY completed_count DESC, q.title
 	 LIMIT $` + strconv.Itoa(n) + ` OFFSET $` + strconv.Itoa(n+1)
@@ -1432,17 +1872,22 @@ func (h *Handler) QuizAnalyticsReport(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/institution/reports/streak-health
 func (h *Handler) StreakHealthReport(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
-	var active, atRisk, broken int
+	groupID := r.URL.Query().Get("group_id")
+	var active, atRisk, broken, unclaimed int
 	h.db.QueryRow(r.Context(),
 		`SELECT
 		   COUNT(*) FILTER (WHERE current_streak >= 7),
 		   COUNT(*) FILTER (WHERE current_streak BETWEEN 1 AND 6),
-		   COUNT(*) FILTER (WHERE current_streak = 0)
-		 FROM users
-		 WHERE institution_id=$1 AND role='student' AND status='active' AND deleted_at IS NULL`,
-		instID).Scan(&active, &atRisk, &broken)
+		   COUNT(*) FILTER (WHERE current_streak = 0),
+		   (SELECT COUNT(*) FROM enrollments WHERE institution_id=$1 AND status='pending_claim' AND $2='')
+		 FROM users u
+		 WHERE u.institution_id=$1 AND u.role='student' AND u.status='active' AND u.deleted_at IS NULL
+		   AND ($2='' OR EXISTS (SELECT 1 FROM group_students gs WHERE gs.user_id=u.id AND gs.group_id::text=$2))`,
+		instID, groupID).Scan(&active, &atRisk, &broken, &unclaimed)
+	// Unclaimed roster records have no account and so no streak; they're
+	// reported beside the bands, not inside "broken".
 	middleware.JSON(w, http.StatusOK, map[string]int{
-		"active": active, "at_risk": atRisk, "broken": broken,
+		"active": active, "at_risk": atRisk, "broken": broken, "unclaimed": unclaimed,
 	})
 }
 
@@ -1469,11 +1914,19 @@ func (h *Handler) PointsSummaryReport(w http.ResponseWriter, r *http.Request) {
 		n++
 	}
 
+	// A chosen class narrows both the trend and the student list.
+	groupID := q.Get("group_id")
+	inGroup := func(p int) string {
+		return fmt.Sprintf(` AND ($%[1]d='' OR EXISTS (SELECT 1 FROM group_students gs WHERE gs.user_id=u.id AND gs.group_id::text=$%[1]d))`, p)
+	}
+	args = append(args, groupID)
+	groupClause := inGroup(n)
+
 	rows, _ := h.db.Query(r.Context(),
 		`SELECT DATE(pl.created_at) AS day, COALESCE(SUM(pl.amount),0) AS points_distributed
 		 FROM points_ledger pl
 		 JOIN users u ON u.id=pl.user_id
-		 WHERE u.institution_id=$1 AND pl.amount > 0 AND `+fromClause+toClause+`
+		 WHERE u.institution_id=$1 AND pl.amount > 0 AND `+fromClause+toClause+groupClause+`
 		 GROUP BY day ORDER BY day`, args...)
 	defer rows.Close()
 	type day struct {
@@ -1500,8 +1953,8 @@ func (h *Handler) PointsSummaryReport(w http.ResponseWriter, r *http.Request) {
 		            AND expires_at > now()
 		        ),0) AS expiring_soon
 		 FROM users u
-		 WHERE u.institution_id=$1 AND u.role='student' AND u.deleted_at IS NULL
-		 ORDER BY u.total_points DESC`, instID)
+		 WHERE u.institution_id=$1 AND u.role='student' AND u.deleted_at IS NULL`+inGroup(2)+`
+		 ORDER BY u.total_points DESC`, instID, groupID)
 	defer srows.Close()
 	type stu struct {
 		UserID       string `json:"user_id"`
@@ -1566,34 +2019,66 @@ func (h *Handler) QuizResults(w http.ResponseWriter, r *http.Request) {
 		perQ = append(perQ, p)
 	}
 
-	// Attempts list
+	// Attempts, paged. Unfinished attempts are included with their status: an
+	// in-progress or abandoned attempt's time runs to its last answer, not to
+	// now, so a week-old abandoned attempt doesn't read as a week spent.
+	aLimit, _ := strconv.Atoi(r.URL.Query().Get("attempts_limit"))
+	if aLimit < 1 || aLimit > 200 {
+		aLimit = 50
+	}
+	aOffset, _ := strconv.Atoi(r.URL.Query().Get("attempts_offset"))
+	if aOffset < 0 {
+		aOffset = 0
+	}
 	arows, _ := h.db.Query(r.Context(),
-		`SELECT qa.user_id, u.display_name,
-		        COALESCE(qa.score_pct,0), COALESCE(qa.points_delta,0),
-		        COALESCE(EXTRACT(EPOCH FROM (qa.completed_at - qa.started_at))*1000, 0)::BIGINT AS time_taken_ms,
-		        qa.completed_at
+		`SELECT qa.id, qa.user_id, u.display_name, qa.status,
+		        qa.score_pct, COALESCE(qa.points_delta,0),
+		        (EXTRACT(EPOCH FROM (COALESCE(qa.completed_at,
+		            (SELECT MAX(qr.submitted_at) FROM question_responses qr WHERE qr.attempt_id=qa.id),
+		            qa.started_at) - qa.started_at))*1000)::BIGINT AS time_taken_ms,
+		        qa.started_at, qa.completed_at
 		 FROM quiz_attempts qa JOIN users u ON u.id=qa.user_id
-		 WHERE qa.quiz_id=$1 AND qa.status='completed'
-		 ORDER BY qa.completed_at DESC`, quizID)
+		 WHERE qa.quiz_id=$1
+		 ORDER BY COALESCE(qa.completed_at, qa.started_at) DESC, qa.id
+		 LIMIT $2 OFFSET $3`, quizID, aLimit, aOffset)
 	defer arows.Close()
 	type att struct {
+		AttemptID    string     `json:"attempt_id"`
 		StudentID    string     `json:"student_id"`
 		DisplayName  string     `json:"display_name"`
-		ScorePct     float64    `json:"score_pct"`
+		Status       string     `json:"status"` // completed, in_progress, abandoned
+		ScorePct     *float64   `json:"score_pct"`
 		PointsEarned int64      `json:"points_earned"`
 		TimeTakenMs  int64      `json:"time_taken_ms"`
+		StartedAt    time.Time  `json:"started_at"`
 		CompletedAt  *time.Time `json:"completed_at"`
 	}
 	attempts := []att{}
 	for arows.Next() {
 		var a att
-		arows.Scan(&a.StudentID, &a.DisplayName, &a.ScorePct, &a.PointsEarned, &a.TimeTakenMs, &a.CompletedAt)
+		arows.Scan(&a.AttemptID, &a.StudentID, &a.DisplayName, &a.Status, &a.ScorePct, &a.PointsEarned, &a.TimeTakenMs, &a.StartedAt, &a.CompletedAt)
 		attempts = append(attempts, a)
 	}
 
+	// The classes the quiz targets: its own class, plus classes holding a
+	// curriculum unit it covers.
+	var classNames []string
+	h.db.QueryRow(r.Context(), `SELECT COALESCE(array_agg(DISTINCT g.name ORDER BY g.name),'{}') FROM groups g
+		WHERE g.institution_id=$2 AND g.archived_at IS NULL AND (
+		  g.id=(SELECT group_id FROM quizzes WHERE id=$1)
+		  OR g.id IN (SELECT cc.group_id FROM quiz_curriculum_units qu
+		                JOIN curriculum_chapters ch ON ch.id=qu.unit_id
+		                JOIN class_curricula cc ON cc.version_id=ch.version_id AND cc.ended_at IS NULL
+		               WHERE qu.quiz_id=$1))`, quizID, instID).Scan(&classNames)
+
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
+		"started":               started,
 		"completions":           completions,
 		"completion_rate":       completionRate,
+		"class_names":           classNames,
+		"attempts_total":        started,
+		"attempts_limit":        aLimit,
+		"attempts_offset":       aOffset,
 		"avg_score":             avgScore,
 		"per_question_accuracy": perQ,
 		"attempts":              attempts,

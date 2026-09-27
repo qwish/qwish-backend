@@ -28,6 +28,13 @@ type TopicRequest struct {
 	Status      string    `json:"status"`
 	AssignedTo  *string   `json:"assigned_to,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
+	// Filled by the staff listing only.
+	StudentName    string  `json:"student_name,omitempty"`
+	AssignedToName *string `json:"assigned_to_name,omitempty"`
+	// RequesterCount is how many open requests in the institution ask for the
+	// same topic and subject (this one included); OtherRequesters names a few.
+	RequesterCount  int      `json:"requester_count,omitempty"`
+	OtherRequesters []string `json:"other_requesters,omitempty"`
 }
 
 type updateRequest struct {
@@ -89,48 +96,103 @@ func (h *Handler) ListMine(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/teacher/topic-requests
 func (h *Handler) TeacherList(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
 	if page < 1 {
 		page = 1
 	}
-	if limit < 1 || limit > 50 {
+	if limit < 1 || limit > 100 {
 		limit = 20
 	}
 	offset := (page - 1) * limit
 
-	status := r.URL.Query().Get("status")
-	args := []interface{}{instID}
-	where := `institution_id=$1`
-	if status != "" {
-		where += ` AND status=$2`
-		args = append(args, status)
+	where, args, bad := topicListWhere(instID, q.Get("status"), q.Get("assigned"), q.Get("search"))
+	if bad != "" {
+		middleware.BadRequest(w, bad)
+		return
 	}
 
 	var total int
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM topic_requests WHERE `+where, args...).Scan(&total)
+	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM topic_requests tr LEFT JOIN users su ON su.id=tr.student_id WHERE `+where, args...).Scan(&total)
 	args = append(args, limit, offset)
 	n := len(args)
 
+	// Open work reads oldest first; everything else newest first.
+	order := "tr.created_at DESC"
+	if s := q.Get("status"); s == "open" || s == "pending" || s == "in_progress" {
+		order = "tr.created_at ASC"
+	}
 	rows, err := h.db.Query(r.Context(),
-		`SELECT id, student_id, topic, subject, description, status, assigned_to, created_at FROM topic_requests WHERE `+where+
-			" ORDER BY created_at DESC LIMIT $"+strconv.Itoa(n-1)+" OFFSET $"+strconv.Itoa(n),
+		`SELECT tr.id, tr.student_id, tr.topic, tr.subject, tr.description, tr.status, tr.assigned_to, tr.created_at,
+		        COALESCE(NULLIF(su.display_name,''), su.full_name, ''),
+		        (SELECT COALESCE(NULLIF(t.display_name,''), t.full_name) FROM users t WHERE t.id=tr.assigned_to),
+		        (SELECT COUNT(*) FROM topic_requests o WHERE o.institution_id=tr.institution_id AND o.status<>'done'
+		           AND lower(btrim(o.topic))=lower(btrim(tr.topic)) AND o.subject IS NOT DISTINCT FROM tr.subject),
+		        COALESCE((SELECT array_agg(n) FROM (SELECT COALESCE(NULLIF(ou.display_name,''), ou.full_name) AS n
+		           FROM topic_requests o JOIN users ou ON ou.id=o.student_id
+		          WHERE o.institution_id=tr.institution_id AND o.status<>'done' AND o.id<>tr.id
+		            AND lower(btrim(o.topic))=lower(btrim(tr.topic)) AND o.subject IS NOT DISTINCT FROM tr.subject
+		          ORDER BY o.created_at LIMIT 3) x), '{}')
+		 FROM topic_requests tr LEFT JOIN users su ON su.id=tr.student_id
+		 WHERE `+where+" ORDER BY "+order+", tr.id LIMIT $"+strconv.Itoa(n-1)+" OFFSET $"+strconv.Itoa(n),
 		args...)
 	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
 	defer rows.Close()
-	var list []TopicRequest
+	list := []TopicRequest{}
 	for rows.Next() {
 		var tr TopicRequest
-		rows.Scan(&tr.ID, &tr.StudentID, &tr.Topic, &tr.Subject, &tr.Description, &tr.Status, &tr.AssignedTo, &tr.CreatedAt)
+		rows.Scan(&tr.ID, &tr.StudentID, &tr.Topic, &tr.Subject, &tr.Description, &tr.Status, &tr.AssignedTo, &tr.CreatedAt,
+			&tr.StudentName, &tr.AssignedToName, &tr.RequesterCount, &tr.OtherRequesters)
 		list = append(list, tr)
 	}
-	if list == nil {
-		list = []TopicRequest{}
-	}
 	middleware.JSONWithMeta(w, http.StatusOK, list, &middleware.Meta{Page: page, Limit: limit, Total: total})
+}
+
+// topicListWhere builds the staff listing filter. status accepts a single
+// state or "open" (pending + in progress); assigned=none keeps unassigned
+// requests; search matches topic, subject, description or the student's name.
+func topicListWhere(instID, status, assigned, search string) (string, []interface{}, string) {
+	where := `tr.institution_id=$1`
+	args := []interface{}{instID}
+	switch status {
+	case "":
+	case "open":
+		where += ` AND tr.status IN ('pending','in_progress')`
+	case "pending", "in_progress", "done":
+		args = append(args, status)
+		where += ` AND tr.status=$` + strconv.Itoa(len(args))
+	default:
+		return "", nil, "status must be pending, in_progress, done or open"
+	}
+	switch assigned {
+	case "":
+	case "none":
+		where += ` AND tr.assigned_to IS NULL`
+	default:
+		return "", nil, "assigned must be none or empty"
+	}
+	if search != "" {
+		args = append(args, "%"+search+"%")
+		p := `$` + strconv.Itoa(len(args))
+		where += ` AND (tr.topic ILIKE ` + p + ` OR tr.subject ILIKE ` + p + ` OR tr.description ILIKE ` + p +
+			` OR su.display_name ILIKE ` + p + ` OR su.full_name ILIKE ` + p + `)`
+	}
+	return where, args, ""
+}
+
+// GET /institution/topic-requests/counts
+func (h *Handler) Counts(w http.ResponseWriter, r *http.Request) {
+	var open, unassigned, done int
+	h.db.QueryRow(r.Context(), `SELECT
+		COUNT(*) FILTER (WHERE status IN ('pending','in_progress')),
+		COUNT(*) FILTER (WHERE status IN ('pending','in_progress') AND assigned_to IS NULL),
+		COUNT(*) FILTER (WHERE status='done')
+		FROM topic_requests WHERE institution_id=$1`, middleware.GetInstitutionID(r)).Scan(&open, &unassigned, &done)
+	middleware.JSON(w, http.StatusOK, map[string]int{"open": open, "unassigned": unassigned, "done": done})
 }
 
 // PATCH /api/v1/teacher/topic-requests/:requestId

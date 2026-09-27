@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/mail"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,56 +73,101 @@ func policyFor(ctx context.Context, q joinQuerier, inst string) (AdmissionPolicy
 	return p, err
 }
 
-// users.email is populated from the verified authentication response, never
-// from the joining form. Roster matches use that same authenticated address.
-func needsReview(ctx context.Context, q joinQuerier, user, inst string) (bool, error) {
+// RuleCheck is one policy rule evaluated against one email address.
+type RuleCheck struct {
+	Rule    string `json:"rule"`   // email_domain | email_list | roster
+	Detail  string `json:"detail"` // what the rule holds, e.g. "@school.edu"
+	Matched bool   `json:"matched"`
+}
+
+// PolicyVerdict is the outcome of a policy for an email: whether a join is
+// admitted automatically, and every rule that decided it.
+type PolicyVerdict struct {
+	Mode   string      `json:"mode"`
+	Match  string      `json:"match"`
+	Admit  bool        `json:"admit"`
+	Checks []RuleCheck `json:"checks"`
+}
+
+// evaluatePolicy applies an institution's policy to an email address. It is
+// the single source of truth for the join flow, the review screen's "why this
+// needs review", and the policy tester.
+func evaluatePolicy(ctx context.Context, q joinQuerier, inst, email string) (PolicyVerdict, error) {
 	p, err := policyFor(ctx, q, inst)
 	if err != nil {
-		return false, err
+		return PolicyVerdict{}, err
 	}
-	if p.Mode == "allow_all" {
-		return false, nil
+	v := PolicyVerdict{Mode: p.Mode, Match: p.Match, Checks: []RuleCheck{}}
+	switch p.Mode {
+	case "allow_all":
+		v.Admit = true
+		return v, nil
+	case "custom":
+	default:
+		return v, nil
 	}
-	if p.Mode != "custom" {
-		return true, nil
-	}
-	var email string
-	if err = q.QueryRow(ctx, `SELECT lower(btrim(email)) FROM users WHERE id=$1`, user).Scan(&email); err != nil {
-		return false, err
-	}
-	checks := []bool{}
+	email = strings.ToLower(strings.TrimSpace(email))
 	if len(p.EmailDomains) > 0 {
-		matched := false
 		_, domain, ok := strings.Cut(email, "@")
-		for _, v := range p.EmailDomains {
-			matched = matched || (ok && v == domain)
+		matched := false
+		for _, d := range p.EmailDomains {
+			matched = matched || (ok && d == domain)
 		}
-		checks = append(checks, matched)
+		v.Checks = append(v.Checks, RuleCheck{Rule: "email_domain", Detail: "@" + strings.Join(p.EmailDomains, ", @"), Matched: matched})
 	}
 	if len(p.Emails) > 0 {
 		matched := false
-		for _, v := range p.Emails {
-			matched = matched || v == email
+		for _, e := range p.Emails {
+			matched = matched || e == email
 		}
-		checks = append(checks, matched)
+		v.Checks = append(v.Checks, RuleCheck{Rule: "email_list", Detail: plural(len(p.Emails), "address", "addresses"), Matched: matched})
 	}
 	if p.RosterMatch {
 		var matched bool
-		err = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM enrollments WHERE institution_id=$1 AND lower(btrim(email))=$2 AND status='pending_claim')`, inst, email).Scan(&matched)
+		var unclaimed int
+		err = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM enrollments WHERE institution_id=$1 AND lower(btrim(email))=$2 AND status='pending_claim'),
+			(SELECT count(*) FROM enrollments WHERE institution_id=$1 AND status='pending_claim')`, inst, email).Scan(&matched, &unclaimed)
 		if err != nil {
-			return false, err
+			return v, err
 		}
-		checks = append(checks, matched)
+		v.Checks = append(v.Checks, RuleCheck{Rule: "roster", Detail: plural(unclaimed, "unclaimed record", "unclaimed records"), Matched: matched})
 	}
-	matched := p.Match == "all" && len(checks) > 0
-	for _, v := range checks {
+	matched := p.Match == "all" && len(v.Checks) > 0
+	for _, c := range v.Checks {
 		if p.Match == "all" {
-			matched = matched && v
+			matched = matched && c.Matched
 		} else {
-			matched = matched || v
+			matched = matched || c.Matched
 		}
 	}
-	return !matched, nil
+	v.Admit = matched
+	return v, nil
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return strconv.Itoa(n) + " " + many
+}
+
+// users.email is populated from the verified authentication response, never
+// from the joining form. Roster matches use that same authenticated address.
+func needsReview(ctx context.Context, q joinQuerier, user, inst string) (bool, error) {
+	var email string
+	if err := q.QueryRow(ctx, `SELECT lower(btrim(email)) FROM users WHERE id=$1`, user).Scan(&email); err != nil {
+		return false, err
+	}
+	v, err := evaluatePolicy(ctx, q, inst, email)
+	if err != nil {
+		return false, err
+	}
+	return !v.Admit, nil
+}
+
+// TestPolicy dry-runs an institution's current policy against an email.
+func (s *Service) TestPolicy(ctx context.Context, inst, email string) (PolicyVerdict, error) {
+	return evaluatePolicy(ctx, s.db, inst, email)
 }
 
 type AdmissionTarget struct {
@@ -130,6 +176,13 @@ type AdmissionTarget struct {
 	Name     string `json:"name"`
 	Outcome  string `json:"outcome"`
 	Code     string `json:"-"`
+	// Meta describes a class target: student count and whether it's archived.
+	Meta *TargetMeta `json:"meta,omitempty"`
+}
+
+type TargetMeta struct {
+	StudentCount int  `json:"student_count"`
+	Archived     bool `json:"archived"`
 }
 type AdmissionRequest struct {
 	ID                  string            `json:"id"`
@@ -143,12 +196,75 @@ type AdmissionRequest struct {
 	Reason              string            `json:"reason"`
 	CreatedAt           time.Time         `json:"created_at"`
 	Targets             []AdmissionTarget `json:"targets"`
+	// Filled for institution reviewers only.
+	SourceInstitutionName *string    `json:"source_institution_name,omitempty"`
+	ApprovedAt            *time.Time `json:"approved_at,omitempty"`
+	// Accounts sign in by emailed code, so every email here was verified at
+	// sign-in; the flag is explicit so a client never has to assume it.
+	EmailVerified bool         `json:"email_verified"`
+	RuleChecks    []RuleCheck  `json:"rule_checks,omitempty"`
+	ReasonCode    string       `json:"reason_code,omitempty"`
+	ReasonHint    string       `json:"reason_hint,omitempty"`
+	flags         requestFlags `json:"-"`
+}
+
+// requestFlags are facts about the requester that decide a reason code.
+type requestFlags struct {
+	role, userStatus                     string
+	suspendedHere, endedHere, claimTaken bool
+	claimEmailMismatch                   bool
+}
+
+// reasonFor names the one case that best explains a request, with the line an
+// admin needs. Order matters: the first blocking fact wins.
+func reasonFor(r AdmissionRequest) (string, string) {
+	if r.Status != "pending" && r.Status != "approved" {
+		return "", "" // closed requests are history, not a decision to make
+	}
+	f := r.flags
+	pending := r.Status == "pending"
+	switch {
+	case f.role != "" && f.role != "student":
+		return "staff_account", "This is a staff account. Staff join through the teacher panel, not as students."
+	case f.userStatus == "suspended":
+		return "blocked", "This account is suspended on Qwish, so it can't join until that's lifted."
+	case f.suspendedHere:
+		return "suspended_member_new_code", "Suspended here already. A new code doesn't lift a suspension — reactivate them from the roster instead."
+	case pending && f.claimTaken:
+		return "claim_code_used", "That roster record has already been claimed by another account."
+	case pending && f.claimEmailMismatch:
+		return "claim_email_mismatch", "The roster record's email doesn't match this account's verified email."
+	case f.endedHere:
+		return "graduated_rejoin", "Graduated or transferred out of your institution before. Approving starts a new enrollment."
+	}
+	for _, t := range r.Targets {
+		if t.Outcome == "unavailable" || (t.Meta != nil && t.Meta.Archived) {
+			return "destination_closed", "A requested class is archived or its code changed, so it won't be joined."
+		}
+	}
+	if r.Status == "approved" && r.SourceInstitutionID != nil {
+		return "transfer_waiting", "Approved. Waiting for the student to confirm leaving their current institute."
+	}
+	if r.SourceInstitutionID != nil {
+		return "transfer", "Enrolled at another institute. Approving creates a transfer the student must confirm."
+	}
+	return "", ""
 }
 
 func (s *Service) Requests(ctx context.Context, user, inst, filter string, offset int) ([]AdmissionRequest, error) {
 	rows, err := s.db.Query(ctx, `SELECT r.id,r.user_id,u.full_name,u.email,r.institution_id,i.name,r.source_institution_id,r.status,r.reason,r.created_at,
- COALESCE((SELECT jsonb_agg(jsonb_build_object('kind',t.kind,'target_id',t.target_id,'name',t.name,'outcome',t.outcome) ORDER BY t.name) FROM admission_targets t WHERE t.request_id=r.id),'[]'::jsonb)
+ COALESCE((SELECT jsonb_agg(jsonb_build_object('kind',t.kind,'target_id',t.target_id,'name',t.name,'outcome',t.outcome,
+   'meta', CASE WHEN t.kind='class' THEN (SELECT jsonb_build_object('student_count',(SELECT count(*) FROM group_students gs WHERE gs.group_id=g.id),'archived',g.archived_at IS NOT NULL) FROM groups g WHERE g.id=t.target_id) END) ORDER BY t.name)
+   FROM admission_targets t WHERE t.request_id=r.id),'[]'::jsonb),
+ src.name, CASE WHEN r.status IN ('approved','joined') THEN r.reviewed_at END,
+ u.role, u.status,
+ EXISTS(SELECT 1 FROM enrollments e WHERE e.user_id=r.user_id AND e.institution_id=r.institution_id AND e.status='suspended'),
+ EXISTS(SELECT 1 FROM enrollments e WHERE e.user_id=r.user_id AND e.institution_id=r.institution_id AND e.status IN ('graduated','transferred')),
+ EXISTS(SELECT 1 FROM admission_targets t JOIN enrollments e ON e.id=t.target_id WHERE t.request_id=r.id AND t.kind='claim' AND e.status<>'pending_claim'),
+ EXISTS(SELECT 1 FROM admission_targets t JOIN enrollments e ON e.id=t.target_id WHERE t.request_id=r.id AND t.kind='claim'
+        AND e.email IS NOT NULL AND lower(btrim(e.email))<>lower(btrim(u.email)))
  FROM admission_requests r JOIN users u ON u.id=r.user_id JOIN institutions i ON i.id=r.institution_id
+ LEFT JOIN institutions src ON src.id=r.source_institution_id
  WHERE ($1='' OR r.user_id::text=$1) AND ($2='' OR r.institution_id::text=$2)
  AND ($3='' OR ($3='open' AND r.status IN ('pending','approved')) OR ($3='history' AND r.status NOT IN ('pending','approved')))
  ORDER BY CASE WHEN r.status IN ('pending','approved') THEN 0 ELSE 1 END,r.created_at DESC,r.id LIMIT 50 OFFSET $4`, user, inst, filter, offset)
@@ -160,15 +276,36 @@ func (s *Service) Requests(ctx context.Context, user, inst, filter string, offse
 	for rows.Next() {
 		var r AdmissionRequest
 		var raw []byte
-		if err = rows.Scan(&r.ID, &r.UserID, &r.Name, &r.Email, &r.InstitutionID, &r.InstitutionName, &r.SourceInstitutionID, &r.Status, &r.Reason, &r.CreatedAt, &raw); err != nil {
+		if err = rows.Scan(&r.ID, &r.UserID, &r.Name, &r.Email, &r.InstitutionID, &r.InstitutionName, &r.SourceInstitutionID, &r.Status, &r.Reason, &r.CreatedAt, &raw,
+			&r.SourceInstitutionName, &r.ApprovedAt, &r.flags.role, &r.flags.userStatus,
+			&r.flags.suspendedHere, &r.flags.endedHere, &r.flags.claimTaken, &r.flags.claimEmailMismatch); err != nil {
 			return nil, err
 		}
 		if err = json.Unmarshal(raw, &r.Targets); err != nil {
 			return nil, err
 		}
+		r.EmailVerified = true
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	// The reviewer sees how the institution's current rules read this email,
+	// and one line naming the case. The requester's own view gets neither.
+	if inst != "" {
+		for i := range out {
+			if out[i].Status == "pending" {
+				v, err := evaluatePolicy(ctx, s.db, inst, out[i].Email)
+				if err != nil {
+					return nil, err
+				}
+				out[i].RuleChecks = v.Checks
+			}
+			out[i].ReasonCode, out[i].ReasonHint = reasonFor(out[i])
+		}
+	}
+	return out, nil
 }
 
 func queueAdmission(ctx context.Context, tx pgx.Tx, user, code string, p JoinPreview, source *string) (string, error) {
@@ -409,4 +546,12 @@ func activateEnrollment(ctx context.Context, tx pgx.Tx, user, name string, p Joi
 		e, err = scanEnrollment(tx.QueryRow(ctx, `INSERT INTO enrollments(institution_id,user_id,full_name,email,status,joined_at) SELECT $1,id,$3,email,'active',now() FROM users WHERE id=$2 RETURNING `+selectCols, p.InstitutionID, user, name))
 	}
 	return e, err
+}
+
+// RequestCounts is open and history totals for the review queue.
+func (s *Service) RequestCounts(ctx context.Context, inst string) (open, history int, err error) {
+	err = s.db.QueryRow(ctx, `SELECT count(*) FILTER (WHERE status IN ('pending','approved')),
+		count(*) FILTER (WHERE status NOT IN ('pending','approved'))
+		FROM admission_requests WHERE institution_id=$1`, inst).Scan(&open, &history)
+	return
 }

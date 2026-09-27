@@ -1908,7 +1908,11 @@ Returns a performance report for students under the teacher's instruction.
 
 # 10. Institution Admin
 
-All routes require role `institution_admin`.
+All routes require role `institution_admin`. Every response carries an
+`X-Request-Id` header (see [Request IDs and rate-limit headers](#request-ids-and-rate-limit-headers)).
+Endpoints added for the Institute dashboard redesign are collected in
+[Institute dashboard redesign](#institute-dashboard-redesign-migrations-077078);
+this section lists each route once, with its current contract.
 
 ## GET `/institution/overview`
 
@@ -1920,31 +1924,136 @@ All routes require role `institution_admin`.
   "total_teachers":  8,
   "total_quizzes":   34,
   "average_score":   71.2,
-  "top_student":     { "name": "Bob", "points": 3200 },
+  "average_score_window_days": 30,
+  "top_student": {
+    "id": "uuid", "name": "Bob", "points": 3200,
+    "average_score_30d": 94.2, "quizzes_30d": 41, "class_name": "Science B"
+  },
   "activity_chart":  [{ "day": "2024-03-01", "count": 12 }],
-  "top_quizzes":     [{ "id": "uuid", "title": "Biology Ch3", "completions": 89 }]
+  "top_quizzes": [
+    { "id": "uuid", "title": "Biology Ch3", "type": "knowledge_check", "teacher_name": "M. Joshi", "completions": 89 }
+  ],
+  "pending": {
+    "admissions": 12,
+    "oldest_admission_at": "2026-09-20T04:12:00Z",
+    "edit_requests": 4,
+    "unclaimed_enrollments": 37
+  }
+}
+```
+- `average_score` averages completed attempts in the last 30 days (`average_score_window_days`).
+- `active_students` is distinct students with a completed attempt in the last 7 days.
+- `top_student` is ranked by lifetime points; its `average_score_30d` is `null` when they have no attempts in that window. It is an object with an empty `name` when the institution has no students.
+- `activity_chart` omits days with no completions — treat a missing day as a recorded zero.
+- `pending` drives the dashboard's "waiting on you" strip and sidebar counts.
+
+---
+
+## GET `/institution/students`
+Enrollment-backed roster: unclaimed roster rows appear with `id: null`.
+
+### Query Params
+| Param | Description |
+|-------|-------------|
+| `search` | Name or email |
+| `status` | `pending_claim`, `active`, `suspended`, `graduated`, `transferred`. Omitted = the first three |
+| `group_id` | Only students in this class |
+| `grade`, `section` | Exact match on the enrollment |
+| `min_score`, `max_score` | Bounds on `average_score` |
+| `inactive_days` | No activity for at least this many days (never-active students included) |
+| `sort` | `total_points`, `average_score`, `last_active` (default: name) |
+| `page`, `limit` | Pagination (max `limit` 50) |
+
+### Response `200` (paginated)
+```json
+[
+  {
+    "enrollment_id": "uuid",
+    "id": "uuid-or-null",
+    "display_name": "Aarya Kulkarni",
+    "email": "aarya.k@school.edu",
+    "roll_number": "11A-014", "grade": "11", "section": "A",
+    "status": "active",
+    "total_points": 2480,
+    "current_streak": 12,
+    "last_active_at": "2026-09-26T03:44:00Z",
+    "average_score": 81.2,
+    "attempts_count": 46,
+    "claim_code": null,
+    "groups": [{ "id": "uuid", "name": "Physics A" }]
+  }
+]
+```
+`attempts_count` is the number of completed attempts behind `average_score`.
+`0` means **no attempts**, which is not the same as a 0% average.
+`claim_code` is set only while `status` is `pending_claim`.
+
+---
+
+## GET `/institution/students/ids`
+Every enrollment matching the same filters as `GET /institution/students`
+(`search`, `status`, `group_id`, `grade`, `section`, score and activity
+filters), for "select all matching" across pages. Capped at 5000.
+
+```json
+{
+  "students": [
+    { "enrollment_id": "uuid", "user_id": "uuid-or-null", "display_name": "Aarya Kulkarni", "status": "active" }
+  ],
+  "truncated": false
 }
 ```
 
 ---
 
-## GET `/institution/students`
+## GET `/institution/students/{userId}`
+A claimed, live (active or suspended) student. `404` otherwise.
+
 ### Query Params
 | Param | Description |
 |-------|-------------|
-| `search` | Name or email search |
-| `status` | `active`, `suspended` |
-| `group_id` | Filter by group |
-| `sort` | `total_points`, `average_score`, `last_active` |
-| `page`, `limit` | Pagination |
+| `history_limit` | Quiz history page size, 1–50 (default 20) |
+| `history_offset` | Quiz history offset (default 0) |
 
-### Response `200` (paginated)
-Array of student rows with `id`, `display_name`, `email`, `total_points`, `current_streak`, `last_active_at`, `status`, `average_score`.
-
----
-
-## GET `/institution/students/{userId}`
-Returns detailed student profile with quiz history and group memberships.
+### Response `200`
+```json
+{
+  "id": "uuid",
+  "display_name": "Aarya Kulkarni",
+  "email": "aarya.k@school.edu",
+  "status": "active",
+  "enrollment_id": "uuid",
+  "enrollment_status": "active",
+  "roll_number": "11A-014", "grade": "11", "section": "A",
+  "admission_date": "2025-06-12",
+  "total_points": 2480,
+  "current_streak": 12,
+  "longest_streak": 21,
+  "average_score": 81.2,
+  "quizzes_taken": 46,
+  "member_since": "2024-03-01T00:00:00Z",
+  "guardian_name": "Sanjay Kulkarni",
+  "guardian_phone": "+91 98••• ••412",
+  "quiz_history": [
+    {
+      "id": "attempt-uuid", "quiz_id": "uuid", "quiz_title": "Kinematics Speed Round",
+      "quiz_type": "play_and_win", "score_pct": 90.0, "points_delta": 135,
+      "completed_at": "2026-09-26T03:44:00Z", "time_taken_ms": 252000
+    }
+  ],
+  "history_limit": 20,
+  "history_offset": 0,
+  "points_ledger": [
+    { "id": "uuid", "amount": 135, "reason": "quiz_attempt", "reference_id": "uuid",
+      "balance_after": 2480, "expires_at": "2027-03-26T03:44:00Z", "created_at": "2026-09-26T03:44:00Z" }
+  ],
+  "groups": [{ "id": "uuid", "name": "Physics A", "teacher_names": ["Anil Patil"] }]
+}
+```
+- `average_score` and `quizzes_taken` count completed attempts on this institution's quizzes since the student joined.
+- `quiz_history` uses the same window. `time_taken_ms` is `null` when the attempt has no start time.
+- `guardian_phone` is masked: the country prefix, two leading and three trailing digits.
+- `points_ledger` is the student's 50 most recent platform-wide ledger entries. Points aren't per-institution.
 
 ---
 
@@ -1953,7 +2062,9 @@ Returns detailed student profile with quiz history and group memberships.
 ```json
 { "action": "suspend", "reason": "Academic misconduct" }
 ```
-`action`: `suspend` or `reactivate`
+`action`: `suspend` or `reactivate`. Prefer
+`PATCH /institution/enrollments/{enrollmentId}/status`, which also handles
+graduation and transfer.
 
 ### Response `200`
 ```json
@@ -1964,20 +2075,79 @@ Returns detailed student profile with quiz history and group memberships.
 
 ## GET `/institution/teachers`
 ### Query Params
-`page`, `limit`
+| Param | Description |
+|-------|-------------|
+| `status` | `active`, `pending`, `suspended`, or `needs_action` (pending + suspended) |
+| `search` | Name or email |
+| `page`, `limit` | Pagination (max `limit` 100) |
 
 ### Response `200` (paginated)
-Array of teacher rows with `id`, `display_name`, `email`, `last_active_at`, `status`, `quiz_count`, `attempt_count`.
+```json
+[
+  {
+    "id": "uuid", "display_name": "Anil Patil", "email": "anil.p@school.edu",
+    "last_active_at": "2026-09-26T03:44:00Z", "status": "active",
+    "verified_at": "2025-06-04T09:00:00Z",
+    "quiz_count": 24, "attempt_count": 3410,
+    "groups": [{ "id": "uuid", "name": "Physics A" }]
+  }
+]
+```
+`verified_at` is `null` for teachers verified before migration 078.
+
+---
+
+## GET `/institution/teachers/counts`
+```json
+{ "all": 46, "active": 43, "pending": 2, "suspended": 1, "needs_action": 3, "invited": 1 }
+```
+`invited` counts open invitations. Those aren't accounts yet, so they aren't in `all`.
+
+---
+
+## GET `/institution/teachers/invites`
+Open (pending, unexpired) invitations, newest first.
+```json
+[{ "id": "uuid", "email": "rahul.d@school.edu", "name": "Rahul Desai",
+   "invited_at": "2026-09-21T05:00:00Z", "expires_at": "2026-09-28T05:00:00Z" }]
+```
+
+## POST `/institution/teachers/invites/{inviteId}/resend`
+Emails the same invitation again and restarts its 7-day window. The token is
+unchanged, so the first email's link keeps working.
+
+`200 { "email": "...", "expires_at": "..." }` · `404` if the invitation isn't open ·
+`502 EMAIL_FAILED` if the email couldn't be sent.
 
 ---
 
 ## GET `/institution/teachers/{userId}`
-Returns teacher profile with quiz and attempt stats.
+### Response `200`
+```json
+{
+  "id": "uuid", "display_name": "Anil Patil", "full_name": "Anil Patil",
+  "email": "anil.p@school.edu", "status": "active",
+  "last_active_at": "2026-09-26T03:44:00Z", "verified_at": "2025-06-04T09:00:00Z",
+  "quiz_count": 24, "attempt_count": 3410, "average_score": 71.5,
+  "quizzes": [
+    { "id": "uuid", "title": "Kinematics Speed Round", "type": "play_and_win", "status": "published",
+      "question_count": 10, "completion_count": 388, "average_score": 74.1,
+      "published_at": "2026-09-26T02:40:00Z", "created_at": "2026-09-20T02:40:00Z" }
+  ],
+  "groups": [{ "id": "uuid", "name": "Physics A", "student_count": 58 }],
+  "recent_activity": [{ "text": "Published “Kinematics Speed Round”", "at": "2026-09-26T02:40:00Z" }]
+}
+```
+- `average_score` is weighted by completions across the teacher's quizzes, and is `null` with no completions.
+- `quizzes` lists up to 100, newest first.
+- `recent_activity` holds the last five quiz publications and topic-request pickups.
 
 ---
 
 ## PATCH `/institution/teachers/{userId}/status`
-Same shape as student status update.
+Body `{ "action": "suspend" | "reactivate" | "verify", "reason": "..." }`.
+`verify` works only on a `pending` teacher (`422 NOT_PENDING` otherwise), sets
+`verified_at`, and emails the teacher.
 
 ---
 
@@ -1993,7 +2163,22 @@ Removes the teacher from the institution (does not delete their account).
 
 ## GET `/institution/groups`
 ### Response `200`
-Array of groups with `id`, `name`, `description`, `invite_code`, `archived_at`, `created_at`.
+```json
+[
+  {
+    "id": "uuid", "name": "Physics A", "description": "Grade 11 · morning batch",
+    "invite_code": "PHY-11A", "archived_at": null, "created_at": "2025-06-01T00:00:00Z",
+    "student_count": 58, "teacher_count": 1, "teacher_names": ["Anil Patil"],
+    "average_score_30d": 72.4,
+    "current_curriculum": {
+      "version_id": "uuid", "name": "Physics", "label": "2026 edition", "subject": "Physics",
+      "grade": "11", "revision": 3, "academic_year_name": "2026–27"
+    }
+  }
+]
+```
+- `average_score_30d` covers completed attempts by the class's current students on this institution's quizzes in the last 30 days. It is `null` with no attempts.
+- `current_curriculum` is the live assignment in an academic year that covers today, or `null`.
 
 ---
 
@@ -2014,12 +2199,23 @@ Array of groups with `id`, `name`, `description`, `invite_code`, `archived_at`, 
 ### Response `200`
 ```json
 {
-  "id":            "uuid",
-  "name":          "Class 10A",
-  "student_count": 28,
-  "average_score": 74.5
+  "id": "uuid", "name": "Physics A", "description": "…", "invite_code": "PHY-11A",
+  "student_count": 58, "average_score": 72.4,
+  "students": [
+    {
+      "enrollment_id": "uuid", "id": "uuid", "display_name": "Aarya Kulkarni", "email": "…",
+      "status": "active", "roll_number": "11A-014",
+      "total_points": 2480, "current_streak": 12, "last_active_at": "…",
+      "average_score": 81.2,
+      "class_average_score": 83.0, "class_attempts": 12,
+      "joined_at": "2025-06-12T00:00:00Z"
+    }
+  ],
+  "teachers": [{ "id": "uuid", "display_name": "Anil Patil", "email": "…", "status": "active" }]
 }
 ```
+- `class_average_score` covers the student's attempts on quizzes set for this class (`quizzes.group_id`). It is `null` with no attempts; check `class_attempts`.
+- `joined_at` is when they joined this class.
 
 ---
 
@@ -2081,14 +2277,26 @@ Archives the group.
 ---
 
 ## GET `/institution/reports/student-performance`
+Active students ranked by lifetime points, paged.
+
 ### Query Params
 | Param | Description |
 |-------|-------------|
-| `group_id` | Filter by group |
-| `date_from`, `date_to` | Date range filter |
+| `group_id` | Only students in this class |
+| `date_from`, `date_to` | Restrict the attempts behind `quizzes_taken` and `average_score` (by `completed_at`) |
+| `page`, `limit` | Pagination (default `limit` 50, max 200) |
 
-### Response `200`
-Array of student performance rows with `id`, `display_name`, `total_points`, `current_streak`, `quizzes_taken`, `average_score`.
+### Response `200` (paginated)
+```json
+[
+  { "id": "uuid", "display_name": "Ishita Deshpande", "total_points": 4120, "current_streak": 21,
+    "quizzes_taken": 41, "average_score": 94.2, "class_names": ["Science B"] }
+]
+```
+`average_score` is `0` when `quizzes_taken` is `0`. Show it as "no attempts".
+
+> **Changed:** this endpoint now returns the paginated envelope (`data` + `meta`)
+> instead of a bare array, and honours `date_from`/`date_to` (previously ignored).
 
 ---
 
@@ -2098,6 +2306,7 @@ Per-teacher activity stats for the institution.
 ### Query Params
 | Param | Description |
 |-------|-------------|
+| `group_id` | Only teachers assigned to this class |
 | `date_from`, `date_to` | Restrict attempt aggregates to this date range (ISO timestamp). |
 | `page`, `limit` | Pagination (default `page=1`, `limit=20`, max `100`). |
 
@@ -2125,6 +2334,7 @@ Per-quiz breakdown with completion rate and score-distribution bands (≥80, 60�
 ### Query Params
 | Param | Description |
 |-------|-------------|
+| `group_id` | Only quizzes set for this class |
 | `date_from`, `date_to` | Restrict attempts by `started_at`. |
 | `page`, `limit` | Pagination (default `page=1`, `limit=20`, max `100`). |
 
@@ -2148,15 +2358,21 @@ Per-quiz breakdown with completion rate and score-distribution bands (≥80, 60�
 ---
 
 ## GET `/institution/reports/streak-health`
-Institution-wide student counts by streak status.
+Student counts by streak status: a snapshot of today.
+
+### Query Params
+| Param | Description |
+|-------|-------------|
+| `group_id` | Only students in this class |
 
 ### Response `200`
 ```json
-{ "active": 512, "at_risk": 289, "broken": 483 }
+{ "active": 512, "at_risk": 289, "broken": 483, "unclaimed": 37 }
 ```
 - `active` — `current_streak >= 7`
 - `at_risk` — `current_streak` between 1 and 6
 - `broken` — `current_streak = 0`
+- `unclaimed` — roster records with no account yet. They have no streak, so they are reported beside the bands, not in them. Always `0` when `group_id` is set, since unclaimed records can't be in a class.
 
 ---
 
@@ -2166,6 +2382,7 @@ Points distribution trend + per-student totals.
 ### Query Params
 | Param | Description |
 |-------|-------------|
+| `group_id` | Only students in this class (both trend and list) |
 | `date_from`, `date_to` | Restrict the `daily_trend` window. Defaults to the last 30 days. |
 
 ### Response `200`
@@ -2189,29 +2406,46 @@ Points distribution trend + per-student totals.
 ---
 
 ## GET `/institution/quizzes/{quizId}/results`
-Institution-admin view of attempt results for a quiz the institution owns. Mirrors `/teacher/quizzes/{quizId}/results` but scopes by `institution_id` instead of `created_by`.
+Institution-admin view of attempt results for a quiz the institution owns.
+
+### Query Params
+| Param | Description |
+|-------|-------------|
+| `attempts_limit` | Attempts page size, 1–200 (default 50) |
+| `attempts_offset` | Attempts offset (default 0) |
 
 ### Response `200`
 ```json
 {
+  "started":         146,
   "completions":     128,
-  "completion_rate": 87.4,
+  "completion_rate": 87.7,
   "avg_score":       71.2,
+  "class_names":     ["Chemistry A", "Chemistry B"],
   "per_question_accuracy": [
     { "position": 1, "accuracy_pct": 92.1 }
   ],
+  "attempts_total":  146,
+  "attempts_limit":  50,
+  "attempts_offset": 0,
   "attempts": [
     {
+      "attempt_id":    "uuid",
       "student_id":    "uuid",
       "display_name":  "Priya S.",
+      "status":        "completed",
       "score_pct":     80.0,
       "points_earned": 240,
       "time_taken_ms": 412300,
+      "started_at":    "2026-05-12T10:15:22Z",
       "completed_at":  "2026-05-12T10:22:14Z"
     }
   ]
 }
 ```
+- `attempts` includes unfinished attempts: `status` is `in_progress` or `abandoned`, with `score_pct` and `completed_at` set to `null`.
+- For an unfinished attempt, `time_taken_ms` runs to its last submitted answer, not to now.
+- `class_names` are the classes the quiz is set for, directly or through a curriculum unit it covers.
 
 ### Errors
 - `404` — quiz not found in this institution.
@@ -2225,6 +2459,10 @@ Institution-admin view of attempt results for a quiz the institution owns. Mirro
   "name":                  "Springfield Academy",
   "type":                  "school",
   "timezone":              "America/Chicago",
+  "verification_status":   "verified",
+  "submitted_at":          "2026-09-25T00:00:00Z",
+  "reference":             "INST-2F9A1C",
+  "open_play_win_quizzes": 3,
   "student_referral_code": "SINST-ABC",
   "teacher_referral_code": "TINST-XYZ",
   "point_rules": {
@@ -2232,9 +2470,13 @@ Institution-admin view of attempt results for a quiz the institution owns. Mirro
     "streak_grace_enabled":  true,
     "play_win_score_hidden": false,
     "point_expiry_months":   6
-  }
+  },
+  "pending_code_reset": null
 }
 ```
+- `verification_status` is `pending`, `verified` or `suspended`.
+- `reference` is a stable short id for support conversations.
+- `open_play_win_quizzes` is the count of published Play & Win quizzes still open, for the warning shown before a point-rule change: attempts already started keep the old rules.
 
 ---
 
@@ -2248,6 +2490,7 @@ Institution-admin view of attempt results for a quiz the institution owns. Mirro
 ```json
 { "message": "settings updated" }
 ```
+The audit entry records the before/after of each changed field.
 
 ---
 
@@ -2262,7 +2505,8 @@ Institution-admin view of attempt results for a quiz the institution owns. Mirro
 }
 ```
 
-All fields optional — only provided fields are updated.
+All fields optional — only provided fields are updated. The audit entry
+records the before/after of each changed rule.
 
 ### Response `200`
 ```json
@@ -2273,15 +2517,43 @@ All fields optional — only provided fields are updated.
 
 ## GET `/institution/audit-log`
 ### Query Params
-`page`, `limit`
+| Param | Description |
+|-------|-------------|
+| `action_type` | One action, e.g. `update_point_rules` |
+| `action_group` | `membership`, `admissions`, `academics` or `settings` |
+| `date_from`, `date_to` | ISO timestamps (inclusive) |
+| `page`, `limit` | Pagination (max `limit` 50) |
 
 ### Response `200` (paginated)
-Array of audit entries scoped to this institution and its users.
+```json
+[
+  {
+    "id": "uuid", "timestamp": "2026-09-18T07:00:00Z",
+    "admin_name": "Admin", "admin_role": "institution_admin",
+    "action_type": "update_admission_policy", "target_type": "institution", "target_id": "uuid",
+    "target_label": "Sahyadri Junior College",
+    "reason": "custom",
+    "changes": [
+      { "field": "mode", "before": "verify_first", "after": "custom" },
+      { "field": "email_domains", "before": [], "after": ["sahyadri.edu.in"] }
+    ]
+  }
+]
+```
+- `target_label` is resolved when the entry is read, so older entries get names too. It is `null` when the target no longer exists.
+- `changes` is present only for entries that recorded before/after values: settings, point rules, the admission policy, and edit-request reviews.
 
 ---
 
 ## GET `/institution/quizzes`
-Same as `GET /quizzes` — lists published quizzes for the institution.
+The institution's quizzes in every status (the admin roster).
+
+### Query Params
+`status`, `type`, `search` (title or teacher name), `page`, `limit`.
+
+Each row is a quiz plus `teacher_name`, `taker_count` (completed attempts),
+`average_score`, `started_count` (all attempts), and `completion_rate`
+(`taker_count / started_count × 100`, absent while nothing has started).
 
 ---
 
@@ -2291,7 +2563,38 @@ Same as `GET /quizzes/{quizId}`.
 ---
 
 ## GET `/institution/topic-requests`
-Same as `GET /teacher/topic-requests`.
+Shared with `GET /teacher/topic-requests`.
+
+### Query Params
+| Param | Description |
+|-------|-------------|
+| `status` | `pending`, `in_progress`, `done`, or `open` (pending + in progress) |
+| `assigned` | `none` — only unassigned requests |
+| `search` | Topic, subject, description, or the student's name |
+| `page`, `limit` | Pagination (max `limit` 100) |
+
+Open states are ordered oldest first; otherwise newest first.
+
+### Response `200` (paginated)
+```json
+[
+  {
+    "id": "uuid", "student_id": "uuid", "student_name": "Kabir Mehta",
+    "topic": "Rotational motion worked examples", "subject": "Physics", "description": "…",
+    "status": "pending", "assigned_to": null, "assigned_to_name": null,
+    "created_at": "2026-09-21T05:00:00Z",
+    "requester_count": 7, "other_requesters": ["Sneha Gaikwad", "Omkar Bhosale", "Priya Nair"]
+  }
+]
+```
+`requester_count` is how many open requests ask for the same topic and subject
+(case-insensitive, this one included). `other_requesters` names up to three
+of the others.
+
+## GET `/institution/topic-requests/counts`
+```json
+{ "open": 14, "unassigned": 5, "done": 22 }
+```
 
 ---
 
@@ -3890,18 +4193,29 @@ With `dry_run=true` nothing is written and every row comes back with a verdict:
 ```json
 { "ok": false,
   "verdicts": [
-    { "row": 2, "action": "create", "full_name": "Asha R", "roll_number": "9A-01" },
-    { "row": 3, "action": "update", "full_name": "Vikram S", "roll_number": "9A-02" },
+    { "row": 2, "action": "create", "full_name": "Asha R", "roll_number": "9A-01",
+      "email": "asha@school.edu", "grade": "9", "section": "A" },
+    { "row": 3, "action": "update", "full_name": "Vikram S", "roll_number": "9A-02",
+      "changes": ["Section A → B", "Admission date added"] },
     { "row": 4, "action": "error",  "full_name": "",
-      "reason": "full_name is required" } ] }
+      "reason": "full_name is required" },
+    { "row": 7, "action": "error", "full_name": "Manasi K", "email": "manasi@x.in",
+      "reason": "This email belongs to an active student at another institute. Use an admission transfer instead." } ] }
 ```
 A row matches an existing live enrollment by `roll_number`, or by `email` when
-no roll number is given.
+no roll number is given. `row` is the CSV line (header = line 1) even when
+earlier rows failed. `changes` describes what an update would change.
 
-Committing (no `dry_run`) runs in one transaction and returns
-`text/csv` — `full_name, roll_number, claim_code` — for the school to
-distribute. If any row failed validation the commit is refused with
-`422 IMPORT_VALIDATION_FAILED` and the offending verdicts.
+Committing (no `dry_run`) runs in **one transaction**: an interrupted commit
+saves nothing, so re-running the same file is always safe — there is no
+partial state to resume. By default it returns `text/csv` —
+`full_name, roll_number, claim_code` — and if any row failed the commit is
+refused with `422 IMPORT_VALIDATION_FAILED` and the offending verdicts.
+
+| Query param | Effect |
+|---|---|
+| `skip_errors=true` | Commit the valid rows and skip the rest instead of refusing the file. The CSV response carries `X-Import-Skipped: <n>`. |
+| `format=json` | Return `{ created, updated, claim_codes: [{full_name, roll_number, claim_code}], skipped: [verdict] }` instead of CSV. |
 
 ### GET `/institution/students`
 Now reads from `enrollments`, so unclaimed roster rows appear and graduated
@@ -3942,10 +4256,43 @@ grade; `to_section` empty leaves each student's section unchanged. Returns
 ### Edit request review
 ```
 GET   /institution/edit-requests?status=pending
+GET   /institution/edit-requests/counts          → {"pending": 4, "approved": 12, "rejected": 3}
 PATCH /institution/edit-requests/{requestId}    {"decision": "approved"}
 ```
-Approving applies the field and closes the request in one transaction.
-Deciding twice returns `409 EDIT_REQUEST_RESOLVED`.
+Each request carries `student_user_id` (null while unclaimed), `roll_number`,
+and `warnings: string[]`. Warnings are computed for pending requests only:
+- a proposed roll number that another live enrollment already holds;
+- a grade or section change for a student who is in classes, since memberships don't move;
+- an admission date that isn't a valid date.
+
+Approving applies the field and closes the request in one transaction, and
+the audit entry records before/after. Deciding twice returns
+`409 EDIT_REQUEST_RESOLVED`.
+
+### PATCH `/institution/enrollments/{enrollmentId}/status`
+Now audited as `set_enrollment_status`, with the `reason` recorded.
+
+### POST `/institution/enrollments/bulk-status`
+```json
+{ "enrollment_ids": ["uuid", "uuid"], "status": "graduated", "reason": "Class of 2026" }
+```
+Applies one status to up to 5000 enrollments, as with the single endpoint.
+Each change is independent: one that can't apply is reported and skipped,
+and the rest still apply.
+```json
+{ "updated": 62, "skipped": [{ "enrollment_id": "uuid", "name": "Rohan Pawar", "reason": "not on your roster" }] }
+```
+
+### Promotions
+`POST /institution/promotions` already takes a per-student reason for each
+retained student: `retained: [{ "enrollment_id", "reason" }]`.
+
+`POST /institution/promotions/{batchId}/revert` now also returns
+`skipped_students: [{ enrollment_id, name, reason }]`.
+
+`GET /institution/promotions` rows add:
+- `skipped_students`: students a revert left in place;
+- `retained_students`: `[{ enrollment_id, name, reason }]`.
 
 ## Super Admin
 
@@ -3990,6 +4337,11 @@ institution keeps its historical roster count.
 | `IMPORT_VALIDATION_FAILED` | 422 | Commit refused; body carries per-row detail |
 | `NOT_IN_YOUR_CLASS` | 403 | Teacher acting outside their class scope |
 | `EDIT_REQUEST_RESOLVED` | 409 | Reviewing an already-decided request |
+| `RATE_LIMITED` | 429 | Too many requests; `Retry-After` gives seconds to wait |
+| `PUBLISH_BLOCKED` | 422 | Curriculum publish refused; `message` lists every issue, `;`-separated |
+| `CHANGE_NOTE_REQUIRED` | 422 | The curriculum requires `change_note` on every save |
+| `REVISION_CONFLICT` | 409 | Curriculum draft changed since it was loaded; re-fetch the version to compare |
+| `EMAIL_FAILED` | 502 | An invitation email couldn't be sent; nothing else changed |
 
 ### Class joining and admissions
 
@@ -4020,3 +4372,258 @@ Deploy migration 076 with the backend before deploying the updated dashboards.
 - Legacy affiliated student accounts missing enrollments are backfilled (or linked to a unique matching unclaimed roster row). Historical enrollments and open admissions are not automatically reactivated/approved. Existing live enrollments reconcile stale account institute pointers.
 - Both student screens refresh every 30 seconds while visible and on tab focus, reject stale network responses, and offer manual refresh. The platform roster supports pagination beyond 50 students.
 - NumPie recognizes platform roles explicitly; unknown roles no longer become students and nonstudents cannot enter the join flow.
+
+## Institute dashboard redesign (migrations 077–078)
+
+Deploy `077_curriculum_structure.sql` and `078_institute_operations.sql` with
+this API version. Both are additive: new tables, and nullable or defaulted
+columns. Section 10 documents the routes that changed; this section covers
+the new ones and the cross-cutting headers.
+
+### Request IDs and rate-limit headers
+
+- Every response carries `X-Request-Id` (e.g. `7f3a-19c2`). Show it on failures so support can find the request.
+- Endpoints limited per email (`/auth/send-otp`, `/auth/verify-otp`, `/auth/passkey/login/begin`) return `X-RateLimit-Remaining`: requests left for that email in the current window. A sign-in form can say "2 tries left" before the pause.
+- A `429 RATE_LIMITED` response carries `Retry-After` in seconds.
+- CORS exposes `X-Request-Id`, `Retry-After`, `X-RateLimit-Remaining`, `X-Import-Skipped` and `Content-Disposition` to browser scripts.
+
+### GET `/users/me/sign-ins`
+The caller's 20 most recent successful sign-ins, for a "was that me?" list.
+```json
+[{ "method": "passkey", "ip": "203.0.113.4", "user_agent": "Mozilla/5.0 …", "at": "2026-09-26T03:44:00Z" }]
+```
+`method` is `email_code` or `passkey`. Recorded from migration 078 onwards.
+
+### Admissions
+
+#### GET `/institution/admissions/requests`
+Unchanged parameters (`filter=open|history`, `offset`). When an institution reviewer reads the list, each request adds:
+
+| Field | Meaning |
+|---|---|
+| `source_institution_name` | The institute a transfer comes from |
+| `approved_at` | When an admin approved it (`approved`/`joined` only) |
+| `email_verified` | Always `true`: accounts sign in with an emailed code |
+| `rule_checks` | Pending only: `[{ rule: "email_domain"\|"email_list"\|"roster", detail, matched }]` against the **current** policy |
+| `reason_code`, `reason_hint` | Open requests only: the case that explains it, and one line for the admin |
+| `targets[].meta` | Class targets: `{ student_count, archived }` |
+
+`reason_code` values:
+- `staff_account`, `blocked`, `suspended_member_new_code`: the account can't join as is.
+- `claim_code_used`, `claim_email_mismatch`: problems with the roster record being claimed.
+- `graduated_rejoin`: they left this institution before.
+- `destination_closed`: a requested class is archived or its code changed.
+- `transfer`, `transfer_waiting`: moving from another institute, before and after approval.
+
+#### GET `/institution/admissions/requests/counts`
+`{ "open": 12, "history": 140 }`
+
+#### POST `/institution/admissions/policy/test`
+Dry-runs the current policy against an email address. Nothing is stored.
+```json
+{ "email": "student@school.edu" }
+```
+```json
+{ "mode": "custom", "match": "any", "admit": false,
+  "checks": [
+    { "rule": "email_domain", "detail": "@sahyadri.edu.in", "matched": false },
+    { "rule": "email_list", "detail": "14 addresses", "matched": false },
+    { "rule": "roster", "detail": "37 unclaimed records", "matched": false } ] }
+```
+`PUT /institution/admissions/policy` now records the previous and new policy
+in the audit log (`changes` on the entry).
+
+### Curriculum
+
+#### GET `/institution/curricula`
+New filters: `subject` (case-insensitive), `grade`, `status` (`draft`|`published`).
+Each version adds:
+- `updated_at`;
+- `chapter_count` and `concept_count`;
+- `assigned_classes: [{ group_id, name, academic_year_name }]`, the live assignments in academic years that cover today.
+
+#### GET `/institution/curricula/facets`
+`{ "subjects": ["Chemistry", "Physics"], "grades": ["11", "12"] }`, for filters that cover every page.
+
+#### Structure and concept fields
+`POST /institution/curricula`, `POST /institution/curricula/{id}/versions` and
+`PUT /institution/curriculum-versions/{id}` accept, and
+`GET /institution/curriculum-versions/{id}` returns:
+
+```json
+{
+  "settings": {
+    "board": "State board (HSC)", "stream": "Science", "medium": "English",
+    "description": "Revised for the 2027 board pattern.",
+    "grouping": "terms", "group_count": 2,
+    "code_pattern": "{SUBJ}{GRADE}-{CH}{NN}",
+    "outcome_framework": "blooms",
+    "difficulty_scale": "three",
+    "required_fields": ["learning_outcome", "cognitive_level"],
+    "weightage_enabled": true,
+    "teaching_plan": true,
+    "min_students_reported": 10,
+    "flag_prerequisite_order": true,
+    "require_change_note": false
+  },
+  "chapters": [{
+    "title": "Motion in a straight line",
+    "group": 1, "weightage": 12, "planned_periods": 18, "week_from": 3, "week_to": 7, "optional": false,
+    "concepts": [{
+      "code": "PHY11-K03", "title": "Relative velocity in one dimension", "learning_outcome": "…",
+      "cognitive_level": "apply", "difficulty": "core", "teaching_periods": 2, "weight": 15,
+      "prerequisites": ["PHY11-K01", "PHY11-K02"],
+      "tags": ["frame of reference"], "misconceptions": ["Adds the two speeds without considering direction"],
+      "textbook_ref": "", "optional": false
+    }]
+  }],
+  "change_note": "Moved rotation to Term 2",
+  "copied_from_version_id": "uuid"
+}
+```
+All of it is optional; existing clients that send only `label`, `subject`,
+`grade` and chapter titles and concepts keep working.
+
+Validation on save:
+- **Settings values:** `grouping` is `terms` or `units`, with `group_count` 1–12. `outcome_framework` is `blooms` (remember … create) or `three_level` (recall, apply, reason). `difficulty_scale` is `three` (foundational, core, advanced) or `five` (1–5). `min_students_reported` is 1–500 and defaults to 10.
+- **Concepts:** `cognitive_level` and `difficulty` must come from the version's chosen framework and scale. `prerequisites` must be codes in the same version, can't include the concept itself, and can't form a cycle.
+- **Limits:** tags ≤ 10 × 40 characters, misconceptions ≤ 10 × 300, prerequisites ≤ 20.
+- **Change notes:** when the stored version has `require_change_note`, a save without `change_note` fails with `422 CHANGE_NOTE_REQUIRED`.
+
+On read:
+- Each concept adds `mapped_questions_previous`: questions mapped to the same code in the curriculum's other editions. Those mappings carry over only while the code is unchanged.
+- Versions add `copied_from_label`.
+
+**Publishing** (`POST …/publish`) re-checks the whole version and refuses with
+`422 PUBLISH_BLOCKED`, listing every issue in `message`, when:
+- a chapter has no concepts;
+- a field named in `required_fields` is missing on any concept;
+- weightage is enabled and a chapter has none, or the chapters don't total 100%.
+
+#### Revision history
+```
+GET /institution/curriculum-versions/{id}/history
+  → [{ "revision": 5, "action": "saved", "note": "…", "actor_name": "…", "created_at": "…" }]
+GET /institution/curriculum-versions/{id}/revisions/{revision}
+  → the version's content as saved at that revision (same shape as the save body)
+```
+`action` is `created`, `saved` or `published`. Revisions are recorded from
+migration 077 onwards. Use two snapshots for "Compare with rN". On
+`409 REVISION_CONFLICT`, fetch the current version and compare it with the
+local draft field by field before saving again.
+
+#### Academic years
+- `GET /institution/academic-years` rows add `stats: { assignments, classes_covered, active_classes }`.
+- `PATCH /institution/academic-years/{yearId}` takes the same body as create (`name`, `starts_on`, `ends_on`) and is audited as `update_academic_year`.
+
+### GET `/institution/learning-summary/scoped`
+Learning evidence for one curriculum version, grouped by chapter, with coverage.
+
+| Param | Description |
+|---|---|
+| `version_id` | The curriculum version. May be omitted when both of the next two are given — the class's live assignment for that year decides it |
+| `group_id` | Only evidence from students in this class |
+| `academic_year_id` | Only evidence recorded within the year's dates |
+
+```json
+{
+  "version": { "id": "uuid", "label": "2026 edition", "subject": "Physics", "grade": "11" },
+  "coverage": {
+    "students": 58, "concepts": 64, "with_evidence": 41,
+    "not_assessed": [{ "code": "PHY11-L05", "title": "Circular motion", "chapter": "Laws of motion" }]
+  },
+  "min_students": 10,
+  "chapters": [{
+    "title": "Kinematics",
+    "concepts": [{ "concept_id": "uuid", "concept_code": "PHY11-K01", "concept_title": "Displacement vs distance",
+                   "students_assessed": 56, "correct_evidence": 148, "error_evidence": 22,
+                   "unknown_confidence": 6, "latest_evidence_at": "…" }]
+  }]
+}
+```
+- Every concept in the version appears, including ones with no evidence (all counts `0`).
+- `min_students` comes from the version's settings: below it, a concept's evidence reads as "too little evidence", not as a low result.
+- The unscoped `GET /institution/learning-summary` is unchanged.
+
+### Find a student
+
+Search matches only people connected to this institution: an enrollment in
+any state (including unclaimed roster records) or an admission request. An
+unconnected email returns nothing. That is deliberate: this endpoint must not
+reveal whether an account exists elsewhere on Qwish.
+
+#### GET `/institution/students/find?q=`
+`q` is at least 2 characters and matches name, email or roll number.
+```json
+[{ "user_id": "uuid-or-null", "enrollment_id": "uuid-or-null", "name": "Mira Thakur",
+   "email": "mira@x.in", "roll_number": null, "state": "request_approved" }]
+```
+`state` is the enrollment status, or `request_<status>` when the only link is an admission request.
+
+#### GET `/institution/students/explain?user_id=` or `?enrollment_id=`
+```json
+{
+  "name": "Mira Thakur", "email": "mira@x.in",
+  "user_id": "uuid", "enrollment_id": null, "admission_request_id": "uuid",
+  "on_roster": false, "account_since": "2024-03-01T00:00:00Z",
+  "chain": [
+    { "key": "account", "label": "Account", "state": "Exists", "tone": "ok", "detail": "Verified email · student role" },
+    { "key": "admission", "label": "Admission request", "state": "Approved", "tone": "ok", "detail": "23 Sep · transfer · Mathematics B" },
+    { "key": "transfer", "label": "Transfer", "state": "Waiting for student", "tone": "wait", "detail": "Pending their confirmation to leave Deccan Heights Academy" },
+    { "key": "enrollment", "label": "Institute enrollment", "state": "None here yet", "tone": "none", "detail": "Active at Deccan Heights Academy" },
+    { "key": "classes", "label": "Class membership", "state": "0 of 1 requested", "tone": "none", "detail": "Not in any class" }
+  ],
+  "diagnosis": {
+    "code": "transfer_waiting", "headline": "Approved, waiting for the student",
+    "detail": "Approval isn't enrollment. They join your roster when they confirm the transfer in NumPie. Nothing needs repair on your side.",
+    "actions": ["withdraw_approval"]
+  },
+  "events": [{ "at": "2026-09-20T10:42:00Z", "what": "Requested to join · Mathematics B", "by": "Mira Thakur · NumPie" }]
+}
+```
+- `tone` is `ok`, `wait`, `none` or `fail`.
+- `diagnosis.code` is one of: `on_roster`, `suspended`, `unclaimed`, `awaiting_review`, `transfer_waiting`, `declined`, `cancelled`, `ended`.
+- `actions` names what the admin can do, and the client maps each to an existing endpoint: `open_profile`, `reactivate`, `copy_claim_code`, `review_request`, `withdraw_approval` (decline the request).
+- `claim_code` is included for an unclaimed roster record.
+- `404` when nothing connects the person to the institution.
+
+### Action centre
+
+#### GET `/institution/action-centre?filter=all|mine|unowned|stale&page=&limit=`
+Everything waiting on the institution in one queue, oldest first.
+
+The item types are:
+- `admission`: pending, and approved transfers waiting on the student;
+- `teacher_verification`;
+- `edit_request`;
+- `unclaimed_records`: grouped by grade and section;
+- `topic_request`: open for more than 5 days.
+
+```json
+{
+  "items": [{
+    "type": "unclaimed_records", "id": "11|B", "title": "Grade 11 · Section B",
+    "subtitle": "12 roster records still unclaimed", "waiting_since": "…", "link_id": "11|B",
+    "owner_id": null, "owner_name": null, "assignable": true
+  }],
+  "queues": [{ "type": "admission", "count": 12, "oldest": "…" }],
+  "counts": { "all": 58, "mine": 9, "unowned": 41, "stale": 3 },
+  "page": 1, "limit": 20, "stale_after_days": 7, "updated_at": "…"
+}
+```
+- `stale` means waiting more than `stale_after_days`.
+- An approved transfer has `assignable: false` and `owner_name: "Student"`, because the next step is theirs.
+
+#### PUT `/institution/action-centre/owner`
+```json
+{ "item_type": "edit_request", "item_id": "uuid", "owner_id": "uuid" }
+```
+- The owner must be an admin or teacher at the institution. `owner_id: null` clears the owner.
+- The item must be one of the institution's open, assignable items, otherwise `404`.
+
+### Migrations
+
+| Migration | Adds |
+|---|---|
+| `077_curriculum_structure.sql` | `curriculum_versions.settings` (JSONB), `.copied_from_version_id`, `.updated_at`; `curriculum_chapters.details` and `curriculum_concepts.details` (JSONB); `curriculum_version_revisions` |
+| `078_institute_operations.sql` | `promotion_batch_students.revert_outcome`; `users.verified_at`; `user_sign_ins`; `action_item_owners` |

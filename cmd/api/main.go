@@ -140,6 +140,7 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(mw.RequestLog)
 	r.Use(chimw.Recoverer)
+	r.Use(mw.RequestID)
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -166,6 +167,8 @@ func main() {
 			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Qwish-Client")
+			// Browsers hide response headers from scripts unless listed here.
+			w.Header().Set("Access-Control-Expose-Headers", "X-Request-Id, Retry-After, X-RateLimit-Remaining, X-Import-Skipped, Content-Disposition")
 			if req.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
 				return
@@ -463,6 +466,7 @@ func main() {
 				r.Patch("/users/me", userH.UpdateMe)
 				r.Delete("/users/me", userH.DeleteMe)
 				r.Get("/users/me/stats", userH.GetMyStats)
+				r.Get("/users/me/sign-ins", authH.MySignIns)
 				r.With(mw.RequireUserRecord(), mw.RateLimitByUser(30, time.Minute)).Get("/users/me/badges", userH.GetMyBadges)
 				r.With(mw.RequireUserRecord(), mw.RateLimitByUser(6, time.Hour)).Post("/users/me/scorecard-shares", userH.RecordMyScorecardShare)
 				r.Get("/users/me/attempts", userH.GetMyAttempts)
@@ -676,13 +680,20 @@ func main() {
 					curriculumH.InstitutionRoutes(r)
 					r.Get("/overview", institutionH.Overview)
 					r.Get("/learning-summary", learningH.InstitutionSummary)
+					r.Get("/learning-summary/scoped", learningH.InstitutionScopedSummary)
 					r.Get("/students", institutionH.ListStudents)
+					r.Get("/students/ids", institutionH.ListStudentIDs)
+					r.Get("/students/find", institutionH.FindStudents)
+					r.Get("/students/explain", institutionH.ExplainStudent)
+					r.Get("/action-centre", institutionH.ActionCentre)
+					r.Put("/action-centre/owner", institutionH.SetActionOwner)
 					r.Post("/students", enrollmentInstH.CreateStudent)
 					// Enrollment-addressed routes stay off /students/... so they
 					// cannot collide with the existing /students/{userId}/status.
 					r.Patch("/enrollments/{enrollmentId}", enrollmentInstH.UpdateStudent)
 					r.Post("/students/import", enrollmentInstH.ImportStudents)
 					r.Patch("/enrollments/{enrollmentId}/status", enrollmentInstH.SetStudentStatus)
+					r.Post("/enrollments/bulk-status", enrollmentInstH.BulkSetStatus)
 					r.Post("/enrollments/promote", enrollmentInstH.PromoteStudents)
 					// Class-based promotion: pick a class, pick students, pick
 					// where they go. Recorded as a batch so it can be undone.
@@ -692,12 +703,18 @@ func main() {
 					r.Get("/admissions/policy", enrollmentInstH.AdmissionPolicy)
 					r.Put("/admissions/policy", enrollmentInstH.SaveAdmissionPolicy)
 					r.Get("/admissions/requests", enrollmentInstH.AdmissionRequests)
+					r.Get("/admissions/requests/counts", enrollmentInstH.AdmissionRequestCounts)
+					r.Post("/admissions/policy/test", enrollmentInstH.TestAdmissionPolicy)
 					r.Patch("/admissions/requests/{requestId}", enrollmentInstH.ReviewAdmission)
 					r.Get("/edit-requests", editRequestH.ListForReview)
+					r.Get("/edit-requests/counts", editRequestH.CountsForReview)
 					r.Patch("/edit-requests/{requestId}", editRequestH.Review)
 					r.Get("/students/{userId}", institutionH.GetStudent)
 					r.Patch("/students/{userId}/status", institutionH.UpdateStudentStatus)
 					r.Get("/teachers", institutionH.ListTeachers)
+					r.Get("/teachers/counts", institutionH.TeacherCounts)
+					r.Get("/teachers/invites", institutionH.ListTeacherInvites)
+					r.Post("/teachers/invites/{inviteId}/resend", institutionH.ResendTeacherInvite)
 					r.Get("/teachers/{userId}", institutionH.GetTeacher)
 					r.Patch("/teachers/{userId}/status", institutionH.UpdateTeacherStatus)
 					r.Delete("/teachers/{userId}", institutionH.RemoveTeacher)
@@ -715,6 +732,7 @@ func main() {
 					r.Get("/quizzes/{quizId}", quizH.Get)
 					r.Get("/topic-requests", topicH.TeacherList)
 					r.Patch("/topic-requests/{requestId}", topicH.InstitutionUpdate)
+					r.Get("/topic-requests/counts", topicH.Counts)
 					r.Get("/reports/student-performance", institutionH.StudentPerformanceReport)
 					r.Get("/reports/teacher-activity", institutionH.TeacherActivityReport)
 					r.Get("/reports/quiz-analytics", institutionH.QuizAnalyticsReport)

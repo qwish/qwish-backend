@@ -95,7 +95,7 @@ func (h *InstitutionHandler) CreatePromotion(w http.ResponseWriter, r *http.Requ
 		middleware.InternalError(w)
 		return
 	}
-	h.logAudit(r, adminID, instID, "promote_students", targetGroupID,
+	h.logAudit(r, adminID, instID, "promote_students", "group", targetGroupID,
 		fmt.Sprintf("%d promoted, %d retained, to grade %s", res.Promoted, res.Retained, req.ToGrade))
 	middleware.JSON(w, http.StatusCreated, res)
 }
@@ -103,13 +103,13 @@ func (h *InstitutionHandler) CreatePromotion(w http.ResponseWriter, r *http.Requ
 // logAudit mirrors the institution package's writer. Promotion moves students
 // between classes and changes their grade; an admin action that large belongs in
 // the log with everything else.
-func (h *InstitutionHandler) logAudit(r *http.Request, adminID, instID, action, targetID, reason string) {
+func (h *InstitutionHandler) logAudit(r *http.Request, adminID, instID, action, targetType, targetID, reason string) {
 	var name, role string
 	h.db.QueryRow(r.Context(), `SELECT display_name, role FROM users WHERE id=$1`, adminID).Scan(&name, &role)
 	h.db.Exec(r.Context(),
 		`INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, reason, institution_id)
-		 VALUES ($1,$2,$3,$4,'group',NULLIF($5,'')::uuid,$6,$7)`,
-		adminID, name, role, action, targetID, reason, instID)
+		 VALUES ($1,$2,$3,$4,$5,NULLIF($6,'')::uuid,$7,$8)`,
+		adminID, name, role, action, targetType, targetID, reason, instID)
 }
 
 // GET /api/v1/institution/promotions
@@ -123,7 +123,17 @@ func (h *InstitutionHandler) ListPromotions(w http.ResponseWriter, r *http.Reque
 		        COALESCE(sg.name,''), COALESCE(tg.name,''),
 		        pb.to_grade, pb.to_section,
 		        pb.promoted_count, pb.retained_count,
-		        pb.revertible_until, pb.reverted_at, pb.reverted_skipped
+		        pb.revertible_until, pb.reverted_at, pb.reverted_skipped,
+		        COALESCE((SELECT json_agg(json_build_object('enrollment_id', s.enrollment_id,
+		                    'name', COALESCE(NULLIF(u2.display_name,''), e2.full_name)))
+		                    FROM promotion_batch_students s JOIN enrollments e2 ON e2.id=s.enrollment_id
+		                    LEFT JOIN users u2 ON u2.id=e2.user_id
+		                   WHERE s.batch_id=pb.id AND s.revert_outcome='skipped'), '[]'::json),
+		        COALESCE((SELECT json_agg(json_build_object('enrollment_id', s.enrollment_id,
+		                    'name', COALESCE(NULLIF(u2.display_name,''), e2.full_name), 'reason', s.retained_reason))
+		                    FROM promotion_batch_students s JOIN enrollments e2 ON e2.id=s.enrollment_id
+		                    LEFT JOIN users u2 ON u2.id=e2.user_id
+		                   WHERE s.batch_id=pb.id AND s.outcome='retained'), '[]'::json)
 		   FROM promotion_batches pb
 		   JOIN users u ON u.id = pb.performed_by
 		   LEFT JOIN groups sg ON sg.id = pb.source_group_id
@@ -151,13 +161,16 @@ func (h *InstitutionHandler) ListPromotions(w http.ResponseWriter, r *http.Reque
 		RevertedSkipped *int       `json:"reverted_skipped,omitempty"`
 		// Precomputed so the UI never has to reason about the window itself.
 		Revertible bool `json:"revertible"`
+		// Students a revert left alone, and students kept back with their reasons.
+		SkippedStudents  []map[string]interface{} `json:"skipped_students"`
+		RetainedStudents []map[string]interface{} `json:"retained_students"`
 	}
 	out := []batch{}
 	for rows.Next() {
 		var b batch
 		if err := rows.Scan(&b.ID, &b.CreatedAt, &b.PerformedBy, &b.SourceClass, &b.TargetClass,
 			&b.ToGrade, &b.ToSection, &b.Promoted, &b.Retained,
-			&b.RevertibleUntil, &b.RevertedAt, &b.RevertedSkipped); err != nil {
+			&b.RevertibleUntil, &b.RevertedAt, &b.RevertedSkipped, &b.SkippedStudents, &b.RetainedStudents); err != nil {
 			middleware.InternalError(w)
 			return
 		}
@@ -180,7 +193,7 @@ func (h *InstitutionHandler) RevertPromotion(w http.ResponseWriter, r *http.Requ
 		middleware.InternalError(w)
 	default:
 		h.logAudit(r, middleware.GetUserID(r), middleware.GetInstitutionID(r),
-			"revert_promotion", "",
+			"revert_promotion", "group", "",
 			fmt.Sprintf("%d reverted, %d skipped", res.Reverted, res.Skipped))
 		middleware.JSON(w, http.StatusOK, res)
 	}

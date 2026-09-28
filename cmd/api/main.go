@@ -103,6 +103,7 @@ func main() {
 	leaderboardH := leaderboard.NewHandler(pool)
 	parentH := parent.NewHandler(pool)
 	topicH := topicrequest.NewHandler(pool)
+	topicH.SetNotifier(notifSvc, cfg.TeacherURL)
 	uploadH := upload.NewHandler(r2Client)
 	enrollmentSvc := enrollment.NewService(pool)
 	institutionH := institution.NewHandler(pool, notifSvc, enrollmentSvc, cfg.AppURL, cfg.TeacherURL)
@@ -128,6 +129,8 @@ func main() {
 	enrollmentInstH := enrollment.NewInstitutionHandler(enrollmentSvc, pool)
 	enrollmentTeacherH := enrollment.NewTeacherHandler(enrollmentSvc)
 	editRequestH := editrequest.NewHandler(editrequest.NewService(pool))
+	editRequestH.SetNotifier(notifSvc, cfg.TeacherURL)
+	questionGenerator := &teacher.Generator{APIKey: cfg.AnthropicAPIKey, Model: cfg.AnthropicModel}
 	studentAdminH := admin.NewStudentAdminHandler(pool)
 	analyticsH := analytics.NewHandler(pool)
 	profileEntryH := user.NewProfileEntryHandler(pool)
@@ -317,6 +320,13 @@ func main() {
 					}
 					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
 				})
+				r.Post("/teacher-notifications", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.SendTeacherNotifications(r.Context(), cfg.TeacherURL); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
 				r.Post("/dispatch-announcements", func(w http.ResponseWriter, r *http.Request) {
 					if err := sched.DispatchAnnouncements(r.Context()); err != nil {
 						mw.InternalError(w)
@@ -357,6 +367,8 @@ func main() {
 			// Public + unauthenticated, so rate-limit per IP to curb spam/abuse.
 			r.With(mw.RateLimit(5, 10*time.Minute)).Post("/contact", contactH.Submit)
 			r.Get("/surveys/{slug}", surveyH.PublicGet)
+			// R14 — read-only parent summary; the token is the capability.
+			r.With(mw.RateLimit(60, time.Minute)).Get("/public/parent-summaries/{token}", teacherH.PublicParentSummary)
 			r.With(mw.RateLimit(120, time.Minute)).Post("/surveys/{slug}/responses", surveyH.Submit)
 
 			// ------ Public Demo Quizzes (onboarding, no auth) ------
@@ -619,6 +631,20 @@ func main() {
 					r.Get("/follow-up-outcomes", learningH.FollowUpOutcomes)
 					r.Patch("/follow-up-outcomes/{assignmentId}/review", learningH.ReviewFollowUp)
 					r.Patch("/assignments/{assignmentId}/close", learningH.CloseAssignment)
+					// Teacher-panel roadmap (see qwish-teacher-panel/BACKEND_CHANGES.md).
+					r.Patch("/assignments/{assignmentId}", learningH.UpdateAssignment)
+					r.Get("/assignments/{assignmentId}/recipients", learningH.ListRecipients)
+					r.Patch("/assignments/{assignmentId}/recipients", learningH.UpdateRecipients)
+					r.Post("/assignments/{assignmentId}/remind", learningH.RemindRecipients)
+					r.Get("/support-reviews", teacherH.SupportReviews)
+					r.Get("/students/{userId}/attempts/{attemptId}", teacherH.StudentAttempt)
+					r.Post("/students/{userId}/parent-summaries", teacherH.CreateParentSummary(cfg.TeacherURL))
+					r.Get("/question-bank", teacherH.QuestionBank)
+					r.With(mw.RateLimitByUser(20, time.Hour)).Post("/questions/generate", teacherH.GenerateQuestions(questionGenerator))
+					r.Get("/preferences", teacherH.GetPreferences)
+					r.Put("/preferences", teacherH.PutPreferences)
+					r.Get("/notification-preferences", teacherH.GetNotificationPrefs)
+					r.Put("/notification-preferences", teacherH.PutNotificationPrefs)
 					r.Get("/quizzes/{quizId}/questions", quizH.TeacherGetQuestions)
 					r.Post("/quizzes/{quizId}/questions", quizH.TeacherAddQuestion)
 					r.Patch("/quizzes/{quizId}/questions/order", quizH.TeacherReorderQuestions)

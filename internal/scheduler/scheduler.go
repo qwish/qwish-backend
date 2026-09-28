@@ -566,10 +566,10 @@ func (s *Scheduler) SendAssignmentReminders(ctx context.Context) error {
 	if s.notifSvc == nil {
 		return nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT ar.student_id,a.id,q.title,a.due_at,
+	rows, err := s.db.Query(ctx, `SELECT ar.student_id,a.id,q.title,COALESCE(ar.due_at_override,a.due_at),
 		CASE
-		 WHEN a.due_at<=now() THEN 'overdue'
-		 WHEN a.due_at<=now()+interval '24 hours' THEN 'due_24h'
+		 WHEN COALESCE(ar.due_at_override,a.due_at)<=now() THEN 'overdue'
+		 WHEN COALESCE(ar.due_at_override,a.due_at)<=now()+interval '24 hours' THEN 'due_24h'
 		 ELSE 'incomplete'
 		END AS reminder
 		FROM learning_assignment_recipients ar
@@ -579,8 +579,8 @@ func (s *Scheduler) SendAssignmentReminders(ctx context.Context) error {
 		WHERE a.status='published' AND ar.status IN ('assigned','started','overdue')
 		  AND (a.available_at IS NULL OR a.available_at<=now())
 		  AND COALESCE(np.push_assignments,true)
-		  AND (a.due_at<=now()+interval '24 hours'
-		       OR (a.due_at IS NULL AND a.created_at<=now()-interval '3 days'))`)
+		  AND (COALESCE(ar.due_at_override,a.due_at)<=now()+interval '24 hours'
+		       OR (COALESCE(ar.due_at_override,a.due_at) IS NULL AND a.created_at<=now()-interval '3 days'))`)
 	if err != nil {
 		return err
 	}

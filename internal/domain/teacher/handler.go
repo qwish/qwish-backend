@@ -387,11 +387,11 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 	// The enrollment carries the institution-owned academic fields and the id a
 	// teacher needs to propose a correction to them.
 	var enrollmentID string
-	var rollNumber, grade, section *string
+	var rollNumber, grade, section, admissionDate *string
 	h.db.QueryRow(r.Context(), `
-		SELECT id, roll_number, grade, section FROM enrollments
+		SELECT id, roll_number, grade, section, to_char(admission_date,'YYYY-MM-DD') FROM enrollments
 		 WHERE user_id=$1 AND institution_id=$2 AND status IN ('active','suspended')`,
-		studentID, instID).Scan(&enrollmentID, &rollNumber, &grade, &section)
+		studentID, instID).Scan(&enrollmentID, &rollNumber, &grade, &section, &admissionDate)
 
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"id":             studentID,
@@ -401,6 +401,7 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 		"roll_number":    rollNumber,
 		"grade":          grade,
 		"section":        section,
+		"admission_date": admissionDate,
 		"status":         status,
 		"total_points":   points,
 		"current_streak": streak,

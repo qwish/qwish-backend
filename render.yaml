@@ -38,6 +38,9 @@ services:
         sync: false
       - key: RESEND_API_KEY
         sync: false
+      # Optional: enables teacher AI question generation. Unset = the route 404s.
+      - key: ANTHROPIC_API_KEY
+        sync: false
       - key: CRON_SECRET
         sync: false
       - key: ALLOWED_ORIGINS
@@ -113,6 +116,7 @@ services:
       post close-expired-quizzes;
       post abandon-stale-attempts;
       post assignment-reminders;
+      post teacher-notifications;
       '
     envVars: &cronEnv
       - key: API_HOST

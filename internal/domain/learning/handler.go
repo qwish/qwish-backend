@@ -392,22 +392,22 @@ func (h *Handler) StudentAssignments(w http.ResponseWriter, r *http.Request) {
 	countErr := h.db.QueryRow(r.Context(), `SELECT COUNT(*)
 		FROM learning_assignment_recipients ar JOIN learning_assignments a ON a.id=ar.assignment_id
 		WHERE ar.student_id=$1 AND a.status IN ('published','closed') AND ($2='' OR a.group_id::text=$2)
-		AND ($3='' OR ($3='completed' AND ar.status='submitted') OR ($3='overdue' AND ar.status<>'submitted' AND a.due_at<=now()) OR ($3='active' AND ar.status NOT IN ('submitted','excused','withdrawn') AND a.status='published'))`, middleware.GetUserID(r), classID, filter).Scan(&total)
+		AND ($3='' OR ($3='completed' AND ar.status='submitted') OR ($3='overdue' AND ar.status<>'submitted' AND COALESCE(ar.due_at_override,a.due_at)<=now()) OR ($3='active' AND ar.status NOT IN ('submitted','excused','withdrawn') AND a.status='published'))`, middleware.GetUserID(r), classID, filter).Scan(&total)
 	if countErr != nil {
 		middleware.InternalError(w)
 		return
 	}
-	rows, err := h.db.Query(r.Context(), `SELECT a.id,a.quiz_id,q.title,a.purpose,a.due_at,
+	rows, err := h.db.Query(r.Context(), `SELECT a.id,a.quiz_id,q.title,a.purpose,COALESCE(ar.due_at_override,a.due_at),
 		CASE WHEN ar.status='assigned' AND a.available_at IS NOT NULL AND a.available_at>now() THEN 'scheduled'
-		     WHEN ar.status='assigned' AND a.due_at IS NOT NULL AND a.due_at<=now() THEN 'overdue' ELSE ar.status END,
+		     WHEN ar.status='assigned' AND COALESCE(ar.due_at_override,a.due_at) IS NOT NULL AND COALESCE(ar.due_at_override,a.due_at)<=now() THEN 'overdue' ELSE ar.status END,
 		ar.attempt_id,a.status,g.id,g.name,u.display_name,COALESCE(a.instructions,''),a.available_at,
 		i.timezone,a.attempt_limit,ar.assigned_at
 		FROM learning_assignment_recipients ar
 		JOIN learning_assignments a ON a.id=ar.assignment_id JOIN quizzes q ON q.id=a.quiz_id
 		JOIN groups g ON g.id=a.group_id JOIN users u ON u.id=a.created_by JOIN institutions i ON i.id=a.institution_id
 		WHERE ar.student_id=$1 AND a.status IN ('published','closed') AND ($2='' OR a.group_id::text=$2)
-		AND ($3='' OR ($3='completed' AND ar.status='submitted') OR ($3='overdue' AND ar.status<>'submitted' AND a.due_at<=now()) OR ($3='active' AND ar.status NOT IN ('submitted','excused','withdrawn') AND a.status='published'))
-		ORDER BY CASE WHEN ar.status='submitted' THEN 1 ELSE 0 END,a.due_at NULLS LAST,a.created_at DESC LIMIT $4 OFFSET $5`, middleware.GetUserID(r), classID, filter, limit, (page-1)*limit)
+		AND ($3='' OR ($3='completed' AND ar.status='submitted') OR ($3='overdue' AND ar.status<>'submitted' AND COALESCE(ar.due_at_override,a.due_at)<=now()) OR ($3='active' AND ar.status NOT IN ('submitted','excused','withdrawn') AND a.status='published'))
+		ORDER BY CASE WHEN ar.status='submitted' THEN 1 ELSE 0 END,COALESCE(ar.due_at_override,a.due_at) NULLS LAST,a.created_at DESC LIMIT $4 OFFSET $5`, middleware.GetUserID(r), classID, filter, limit, (page-1)*limit)
 	if err != nil {
 		middleware.BadRequest(w, "assignments unavailable")
 		return
@@ -532,6 +532,8 @@ type assignmentInput struct {
 	Instructions *string `json:"instructions"`
 	AvailableAt  *string `json:"available_at"`
 	AttemptLimit int     `json:"attempt_limit"`
+	// R4 — optional recipient subset; each id must be in the class.
+	StudentIDs []string `json:"student_ids"`
 }
 
 type TeacherAssignment struct {
@@ -549,6 +551,8 @@ type TeacherAssignment struct {
 	OverdueCount   int        `json:"overdue_count"`
 	ExcusedCount   int        `json:"excused_count"`
 	CreatedAt      time.Time  `json:"created_at"`
+	AvailableAt    *time.Time `json:"available_at"`
+	ConceptID      *string    `json:"concept_id"`
 }
 
 func (h *Handler) ListAssignments(w http.ResponseWriter, r *http.Request) {
@@ -558,8 +562,8 @@ func (h *Handler) ListAssignments(w http.ResponseWriter, r *http.Request) {
 		       COUNT(ar.student_id),
 		       COUNT(*) FILTER (WHERE ar.status='started'),
 		       COUNT(*) FILTER (WHERE ar.status='submitted'),
-		       COUNT(*) FILTER (WHERE ar.status='overdue' OR (ar.status='assigned' AND a.due_at < now())),
-		       COUNT(*) FILTER (WHERE ar.status='excused'),a.created_at
+		       COUNT(*) FILTER (WHERE ar.status='overdue' OR (ar.status IN ('assigned','started') AND COALESCE(ar.due_at_override,a.due_at) < now())),
+		       COUNT(*) FILTER (WHERE ar.status='excused'),a.created_at,a.available_at,a.source_concept_id::text
 		FROM learning_assignments a
 		JOIN groups g ON g.id=a.group_id AND g.institution_id=a.institution_id
 		JOIN group_teachers gt ON gt.group_id=a.group_id AND gt.user_id=$1
@@ -587,7 +591,7 @@ func (h *Handler) ListAssignments(w http.ResponseWriter, r *http.Request) {
 	list := []TeacherAssignment{}
 	for rows.Next() {
 		var item TeacherAssignment
-		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupName, &item.QuizID, &item.QuizTitle, &item.Purpose, &item.Status, &item.DueAt, &item.AssignedCount, &item.StartedCount, &item.SubmittedCount, &item.OverdueCount, &item.ExcusedCount, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.GroupID, &item.GroupName, &item.QuizID, &item.QuizTitle, &item.Purpose, &item.Status, &item.DueAt, &item.AssignedCount, &item.StartedCount, &item.SubmittedCount, &item.OverdueCount, &item.ExcusedCount, &item.CreatedAt, &item.AvailableAt, &item.ConceptID); err != nil {
 			middleware.InternalError(w)
 			return
 		}
@@ -631,6 +635,10 @@ func (h *Handler) CreateAssignment(w http.ResponseWriter, r *http.Request) {
 	if in.AttemptLimit < 1 {
 		in.AttemptLimit = 1
 	}
+	if len(in.StudentIDs) > 500 {
+		middleware.BadRequest(w, "student_ids is limited to 500")
+		return
+	}
 	if in.AttemptLimit > 10 || (in.Instructions != nil && len(*in.Instructions) > 4000) {
 		middleware.BadRequest(w, "attempt_limit must be 1–10 and instructions at most 4000 characters")
 		return
@@ -659,10 +667,24 @@ func (h *Handler) CreateAssignment(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "quiz or class is unavailable to this teacher")
 		return
 	}
-	_, err = tx.Exec(r.Context(), `INSERT INTO learning_assignment_recipients(assignment_id,student_id) SELECT $1,gs.user_id FROM group_students gs WHERE gs.group_id=$2 ON CONFLICT DO NOTHING`, id, in.GroupID)
-	if err != nil {
-		middleware.InternalError(w)
-		return
+	if len(in.StudentIDs) > 0 {
+		// Subset: every id must belong to the class, or nothing is created.
+		tag, insErr := tx.Exec(r.Context(), `INSERT INTO learning_assignment_recipients(assignment_id,student_id)
+			SELECT $1,gs.user_id FROM group_students gs WHERE gs.group_id=$2 AND gs.user_id::text = ANY($3::text[]) ON CONFLICT DO NOTHING`, id, in.GroupID, in.StudentIDs)
+		if insErr != nil {
+			middleware.InternalError(w)
+			return
+		}
+		if int(tag.RowsAffected()) != len(uniqueStrings(in.StudentIDs)) {
+			middleware.BadRequest(w, "every student_ids entry must be a student in this class")
+			return
+		}
+	} else {
+		_, err = tx.Exec(r.Context(), `INSERT INTO learning_assignment_recipients(assignment_id,student_id) SELECT $1,gs.user_id FROM group_students gs WHERE gs.group_id=$2 ON CONFLICT DO NOTHING`, id, in.GroupID)
+		if err != nil {
+			middleware.InternalError(w)
+			return
+		}
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		middleware.InternalError(w)
@@ -884,4 +906,16 @@ func (h *Handler) Review(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	middleware.JSON(w, http.StatusOK, map[string]string{"status": in.Status})
+}
+
+func uniqueStrings(in []string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, v := range in {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
 }

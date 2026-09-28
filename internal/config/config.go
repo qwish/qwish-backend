@@ -33,6 +33,8 @@ type Config struct {
 	InstituteURL             string // institution dashboard; provision-admin invites redirect here
 	TeacherURL               string // teacher panel; teacher-verified emails link here to sign in
 	BrandURL                 string // marketing site; institution "apply to join" links point here
+	AnthropicAPIKey          string // optional; enables teacher AI question generation (R11)
+	AnthropicModel           string
 	WebAuthnRPID             string // passkey Relying Party ID (registrable domain, no scheme/port)
 	WebAuthnRPDisplayName    string // passkey RP display name shown by the authenticator
 	WebAuthnRPOrigins        string // comma-separated list of allowed passkey origins (with scheme)
@@ -73,6 +75,8 @@ func Load() *Config {
 		InstituteURL:             getEnv("INSTITUTE_DASHBOARD_URL", "https://institute.qwish.in"),
 		TeacherURL:               getEnv("TEACHER_PANEL_URL", "https://teacher.qwish.in"),
 		BrandURL:                 getEnv("BRAND_URL", "https://qwish.in"),
+		AnthropicAPIKey:          getEnv("ANTHROPIC_API_KEY", ""),
+		AnthropicModel:           getEnv("ANTHROPIC_MODEL", "claude-sonnet-5"),
 		WebAuthnRPID:             getEnv("WEBAUTHN_RP_ID", "localhost"),
 		WebAuthnRPDisplayName:    getEnv("WEBAUTHN_RP_DISPLAY_NAME", "Qwish Admin"),
 		WebAuthnRPOrigins:        getEnv("WEBAUTHN_RP_ORIGINS", "https://superadmin.qwish.in"),

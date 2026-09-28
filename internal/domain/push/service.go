@@ -185,6 +185,27 @@ func (s *Service) SendToUser(ctx context.Context, userID string, p Payload) {
 	if !s.Enabled() || s.db == nil || userID == "" {
 		return
 	}
+	var quietEnabled, championshipsEnabled bool
+	var quietFrom, quietUntil, offsetMinutes int
+	err := s.db.QueryRow(ctx,
+		`SELECT quiet_hours_enabled, quiet_from_minute, quiet_until_minute,
+		        quiet_utc_offset_minutes, push_championships
+		 FROM notification_preferences WHERE user_id=$1`, userID,
+	).Scan(&quietEnabled, &quietFrom, &quietUntil, &offsetMinutes, &championshipsEnabled)
+	if err == nil {
+		if p.Data["kind"] == "championship" && !championshipsEnabled {
+			return
+		}
+		if quietEnabled {
+			now := time.Now().UTC()
+			localMinute := (now.Hour()*60 + now.Minute() + offsetMinutes + 1440) % 1440
+			inside := quietFrom < quietUntil && localMinute >= quietFrom && localMinute < quietUntil ||
+				quietFrom > quietUntil && (localMinute >= quietFrom || localMinute < quietUntil)
+			if inside {
+				return
+			}
+		}
+	}
 	rows, err := s.db.Query(ctx, `SELECT token FROM device_tokens WHERE user_id=$1`, userID)
 	if err != nil {
 		log.Printf("[push] load tokens for user %s: %v", userID, err)

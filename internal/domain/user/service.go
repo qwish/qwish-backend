@@ -857,21 +857,51 @@ type NotifPrefs struct {
 	PushStreakNudge     bool `json:"push_streak_nudge"`
 	PushStudyGroup      bool `json:"push_study_group"`
 	PushAssignments     bool `json:"push_assignments"`
+	PushChampionships   bool `json:"push_championships"`
+	QuietHoursEnabled   bool `json:"quiet_hours_enabled"`
+	QuietFromMinute     int  `json:"quiet_from_minute"`
+	QuietUntilMinute    int  `json:"quiet_until_minute"`
+	QuietUTCOffset      int  `json:"quiet_utc_offset_minutes"`
 	EmailWeeklyInsights bool `json:"email_weekly_insights"`
 }
 
 func defaultNotifPrefs() *NotifPrefs {
-	return &NotifPrefs{true, true, true, true, true, true}
+	return &NotifPrefs{
+		PushRankChanges: true, PushWeeklyDigest: true, PushStreakNudge: true,
+		PushStudyGroup: true, PushAssignments: true, PushChampionships: true,
+		QuietFromMinute: 1350, QuietUntilMinute: 420, QuietUTCOffset: 330,
+		EmailWeeklyInsights: true,
+	}
 }
+
+type NotifPrefsPatch struct {
+	PushRankChanges     *bool `json:"push_rank_changes"`
+	PushWeeklyDigest    *bool `json:"push_weekly_digest"`
+	PushStreakNudge     *bool `json:"push_streak_nudge"`
+	PushStudyGroup      *bool `json:"push_study_group"`
+	PushAssignments     *bool `json:"push_assignments"`
+	PushChampionships   *bool `json:"push_championships"`
+	QuietHoursEnabled   *bool `json:"quiet_hours_enabled"`
+	QuietFromMinute     *int  `json:"quiet_from_minute"`
+	QuietUntilMinute    *int  `json:"quiet_until_minute"`
+	QuietUTCOffset      *int  `json:"quiet_utc_offset_minutes"`
+	EmailWeeklyInsights *bool `json:"email_weekly_insights"`
+}
+
+var ErrInvalidQuietHours = errors.New("quiet hours must be valid local times and UTC offset")
 
 // GetNotifPrefs returns the user's preferences, falling back to all-enabled
 // defaults when no row exists yet.
 func (s *Service) GetNotifPrefs(ctx context.Context, userID string) (*NotifPrefs, error) {
 	p := &NotifPrefs{}
 	err := s.db.QueryRow(ctx,
-		`SELECT push_rank_changes, push_weekly_digest, push_streak_nudge, push_study_group, push_assignments, email_weekly_insights
+		`SELECT push_rank_changes, push_weekly_digest, push_streak_nudge, push_study_group, push_assignments,
+		        push_championships, quiet_hours_enabled, quiet_from_minute, quiet_until_minute,
+		        quiet_utc_offset_minutes, email_weekly_insights
 		 FROM notification_preferences WHERE user_id=$1`, userID,
-	).Scan(&p.PushRankChanges, &p.PushWeeklyDigest, &p.PushStreakNudge, &p.PushStudyGroup, &p.PushAssignments, &p.EmailWeeklyInsights)
+	).Scan(&p.PushRankChanges, &p.PushWeeklyDigest, &p.PushStreakNudge, &p.PushStudyGroup,
+		&p.PushAssignments, &p.PushChampionships, &p.QuietHoursEnabled, &p.QuietFromMinute,
+		&p.QuietUntilMinute, &p.QuietUTCOffset, &p.EmailWeeklyInsights)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return defaultNotifPrefs(), nil
 	}
@@ -883,42 +913,74 @@ func (s *Service) GetNotifPrefs(ctx context.Context, userID string) (*NotifPrefs
 
 // UpdateNotifPrefs upserts the user's preferences, applying only the supplied
 // (non-nil) fields over the current values.
-func (s *Service) UpdateNotifPrefs(ctx context.Context, userID string, in map[string]bool) (*NotifPrefs, error) {
+func (s *Service) UpdateNotifPrefs(ctx context.Context, userID string, in NotifPrefsPatch) (*NotifPrefs, error) {
+	if (in.QuietFromMinute != nil && (*in.QuietFromMinute < 0 || *in.QuietFromMinute > 1439)) ||
+		(in.QuietUntilMinute != nil && (*in.QuietUntilMinute < 0 || *in.QuietUntilMinute > 1439)) ||
+		(in.QuietUTCOffset != nil && (*in.QuietUTCOffset < -720 || *in.QuietUTCOffset > 840)) {
+		return nil, ErrInvalidQuietHours
+	}
 	cur, err := s.GetNotifPrefs(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	if v, ok := in["push_rank_changes"]; ok {
-		cur.PushRankChanges = v
+	if in.PushRankChanges != nil {
+		cur.PushRankChanges = *in.PushRankChanges
 	}
-	if v, ok := in["push_weekly_digest"]; ok {
-		cur.PushWeeklyDigest = v
+	if in.PushWeeklyDigest != nil {
+		cur.PushWeeklyDigest = *in.PushWeeklyDigest
 	}
-	if v, ok := in["push_streak_nudge"]; ok {
-		cur.PushStreakNudge = v
+	if in.PushStreakNudge != nil {
+		cur.PushStreakNudge = *in.PushStreakNudge
 	}
-	if v, ok := in["push_study_group"]; ok {
-		cur.PushStudyGroup = v
+	if in.PushStudyGroup != nil {
+		cur.PushStudyGroup = *in.PushStudyGroup
 	}
-	if v, ok := in["push_assignments"]; ok {
-		cur.PushAssignments = v
+	if in.PushAssignments != nil {
+		cur.PushAssignments = *in.PushAssignments
 	}
-	if v, ok := in["email_weekly_insights"]; ok {
-		cur.EmailWeeklyInsights = v
+	if in.PushChampionships != nil {
+		cur.PushChampionships = *in.PushChampionships
+	}
+	if in.QuietHoursEnabled != nil {
+		cur.QuietHoursEnabled = *in.QuietHoursEnabled
+	}
+	if in.QuietFromMinute != nil {
+		cur.QuietFromMinute = *in.QuietFromMinute
+	}
+	if in.QuietUntilMinute != nil {
+		cur.QuietUntilMinute = *in.QuietUntilMinute
+	}
+	if in.QuietUTCOffset != nil {
+		cur.QuietUTCOffset = *in.QuietUTCOffset
+	}
+	if in.EmailWeeklyInsights != nil {
+		cur.EmailWeeklyInsights = *in.EmailWeeklyInsights
+	}
+	if cur.QuietHoursEnabled && cur.QuietFromMinute == cur.QuietUntilMinute {
+		return nil, ErrInvalidQuietHours
 	}
 	_, err = s.db.Exec(ctx,
 		`INSERT INTO notification_preferences
-		   (user_id, push_rank_changes, push_weekly_digest, push_streak_nudge, push_study_group, push_assignments, email_weekly_insights, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7, now())
+		   (user_id, push_rank_changes, push_weekly_digest, push_streak_nudge, push_study_group,
+		    push_assignments, push_championships, quiet_hours_enabled, quiet_from_minute,
+		    quiet_until_minute, quiet_utc_offset_minutes, email_weekly_insights, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
 		 ON CONFLICT (user_id) DO UPDATE SET
 		   push_rank_changes=EXCLUDED.push_rank_changes,
 		   push_weekly_digest=EXCLUDED.push_weekly_digest,
 		   push_streak_nudge=EXCLUDED.push_streak_nudge,
 		   push_study_group=EXCLUDED.push_study_group,
 		   push_assignments=EXCLUDED.push_assignments,
+		   push_championships=EXCLUDED.push_championships,
+		   quiet_hours_enabled=EXCLUDED.quiet_hours_enabled,
+		   quiet_from_minute=EXCLUDED.quiet_from_minute,
+		   quiet_until_minute=EXCLUDED.quiet_until_minute,
+		   quiet_utc_offset_minutes=EXCLUDED.quiet_utc_offset_minutes,
 		   email_weekly_insights=EXCLUDED.email_weekly_insights,
 		   updated_at=now()`,
-		userID, cur.PushRankChanges, cur.PushWeeklyDigest, cur.PushStreakNudge, cur.PushStudyGroup, cur.PushAssignments, cur.EmailWeeklyInsights)
+		userID, cur.PushRankChanges, cur.PushWeeklyDigest, cur.PushStreakNudge, cur.PushStudyGroup,
+		cur.PushAssignments, cur.PushChampionships, cur.QuietHoursEnabled, cur.QuietFromMinute,
+		cur.QuietUntilMinute, cur.QuietUTCOffset, cur.EmailWeeklyInsights)
 	if err != nil {
 		return nil, err
 	}

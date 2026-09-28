@@ -927,6 +927,22 @@ func (h *Handler) ModerationQueue(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, queue)
 }
 
+// notifyQuizAuthor tells a teacher about a review decision on their public
+// assessment (R7, topic assessment_decisions). No-op for non-teacher authors.
+func (h *Handler) notifyQuizAuthor(r *http.Request, quizID, decision, format string) {
+	if h.notif == nil {
+		return
+	}
+	var authorID, title string
+	if h.db.QueryRow(r.Context(), `SELECT q.created_by, q.title FROM quizzes q JOIN users u ON u.id=q.created_by
+		WHERE q.id=$1 AND u.role='teacher'`, quizID).Scan(&authorID, &title) != nil {
+		return
+	}
+	h.notif.EmitTeacher(r.Context(), authorID, notification.TopicAssessmentDecisions, "quiz_review", "Assessment",
+		fmt.Sprintf(format, title), "quiz:"+quizID+":"+decision+":"+time.Now().UTC().Format("20060102150405"),
+		strings.TrimRight(h.cfg.TeacherURL, "/")+"/assessments/edit?id="+quizID)
+}
+
 // POST /api/v1/admin/quizzes/:quizId/approve
 func (h *Handler) ApproveQuiz(w http.ResponseWriter, r *http.Request) {
 	quizID := chi.URLParam(r, "quizId")
@@ -935,6 +951,7 @@ func (h *Handler) ApproveQuiz(w http.ResponseWriter, r *http.Request) {
 		`UPDATE quizzes SET status='published', published_at=now(), approved_by=$1, approved_at=now(), updated_at=now()
 		 WHERE id=$2 AND status='pending_approval'`, nullableAdmin(adminID), quizID)
 	logAudit(r.Context(), h.db, adminID, "approve_quiz", "quiz", quizID, "")
+	h.notifyQuizAuthor(r, quizID, "approved", "%s was approved and is now published.")
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "quiz approved"})
 }
 
@@ -948,6 +965,7 @@ func (h *Handler) RejectQuiz(w http.ResponseWriter, r *http.Request) {
 	h.db.Exec(r.Context(),
 		`UPDATE quizzes SET status='rejected', rejection_reason=$1, updated_at=now() WHERE id=$2`, req.Reason, quizID)
 	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "reject_quiz", "quiz", quizID, req.Reason)
+	h.notifyQuizAuthor(r, quizID, "rejected", "%s was not approved for public listing.")
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "quiz rejected"})
 }
 
@@ -1706,6 +1724,7 @@ func (h *Handler) RequestEdits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "request_quiz_edits", "quiz", quizID, req.Feedback)
+	h.notifyQuizAuthor(r, quizID, "needs_edits", "%s needs a few edits before it can be published.")
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "edit request sent to teacher"})
 }
 

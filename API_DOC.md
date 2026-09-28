@@ -3737,18 +3737,32 @@ Returns the updated settings. `400 BAD_REQUEST` for an invalid `theme`.
   "push_weekly_digest": true,
   "push_streak_nudge": true,
   "push_study_group": true,
+  "push_assignments": true,
+  "push_championships": true,
+  "quiet_hours_enabled": false,
+  "quiet_from_minute": 1350,
+  "quiet_until_minute": 420,
+  "quiet_utc_offset_minutes": 330,
   "email_weekly_insights": true
 }
 ```
 Missing row ⇒ all categories enabled by default.
 
 ### PATCH `/users/me/notification-preferences`
-Body: any subset of the boolean keys above. Returns the merged preferences.
+Body: any subset of the keys above. Returns the merged preferences. Quiet-hour
+times are minutes after local midnight (0–1439); the UTC offset is minutes
+east of UTC (-720 to 840). Start and end must differ when quiet hours are on.
+The app refreshes the offset when opened in a new time zone.
 
 Push alerts are delivered via FCM (existing `/users/me/devices` registration) and also stored as in-app notifications. Cron-driven categories:
 - **Rank changes** — daily; fires when global rank improves.
 - **Streak nudges** — daily evening; fires if an active streak hasn't been continued today.
 - **Weekly digest** — Mondays; weekly recap push.
+
+Quiet hours suppress mobile push delivery between the chosen times, including
+overnight windows. In-app notifications are still stored. The championships
+preference applies to notifications of kind `championship`; no championship
+publisher is currently scheduled.
 
 ## Score Insights
 

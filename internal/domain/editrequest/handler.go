@@ -6,13 +6,23 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
-type Handler struct{ svc *Service }
+type Handler struct {
+	svc      *Service
+	notif    *notification.Service
+	panelURL string
+}
 
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+
+// SetNotifier tells the proposing teacher when an admin decides (R7).
+func (h *Handler) SetNotifier(n *notification.Service, teacherPanelURL string) {
+	h.notif, h.panelURL = n, teacherPanelURL
+}
 
 // POST /api/v1/teacher/enrollments/{enrollmentId}/edit-requests
 //
@@ -106,6 +116,17 @@ func (h *Handler) Review(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Review: %v", err)
 		middleware.BadRequest(w, err.Error())
 		return
+	}
+	if h.notif != nil {
+		requestID := chi.URLParam(r, "requestId")
+		var teacherID, student, field string
+		if h.svc.db.QueryRow(r.Context(), `SELECT r.requested_by, COALESCE(su.display_name, e.full_name), r.field
+			FROM student_edit_requests r JOIN enrollments e ON e.id=r.enrollment_id LEFT JOIN users su ON su.id=e.user_id
+			WHERE r.id=$1`, requestID).Scan(&teacherID, &student, &field) == nil {
+			label := map[string]string{"roll_number": "roll-number", "grade": "grade", "section": "section", "admission_date": "admission-date"}[field]
+			h.notif.EmitTeacher(r.Context(), teacherID, notification.TopicSuggestionDecisions, "edit_request", "Suggestion",
+				"Your "+label+" correction for "+student+" was "+req.Decision+".", "edit_request:"+requestID, h.panelURL+"/inbox/suggestions")
+		}
 	}
 	middleware.JSON(w, http.StatusOK, map[string]string{"status": req.Decision})
 }

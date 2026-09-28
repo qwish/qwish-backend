@@ -40,7 +40,7 @@ func TestLearningReportEvidence(t *testing.T) {
  CREATE TEMP TABLE promotion_batch_students(enrollment_id text,batch_id text,prior_grade text,outcome text);
  CREATE TEMP TABLE user_education(id text,user_id text,institution_name text,degree text,field text,start_year int,end_year int,is_current bool);
  CREATE TEMP TABLE learning_assignments(id text,status text,due_at timestamptz,available_at timestamptz);
- CREATE TEMP TABLE learning_assignment_recipients(assignment_id text,student_id text,status text);
+ CREATE TEMP TABLE learning_assignment_recipients(assignment_id text,student_id text,status text,due_at_override timestamptz);
  INSERT INTO users VALUES('me','Sample Learner',now()-interval '1 year',3,7,NULL,'student','active'),('empty','New Learner',now(),0,0,NULL,'student','active');
  INSERT INTO users SELECT 'peer'||n,'Peer',now(),0,0,NULL,'student','active' FROM generate_series(1,6) n;
  INSERT INTO institutions VALUES('school','Sample School');
@@ -53,7 +53,7 @@ func TestLearningReportEvidence(t *testing.T) {
  INSERT INTO quiz_attempts VALUES('retake','me','q1',now(),10,10,100,'completed'),('pub','me','public',now(),8,10,80,'completed');
  INSERT INTO quiz_attempts SELECT 'peer'||p||'q'||q,'peer'||p,'q'||q,now(),CASE WHEN p<=3 THEN 4 ELSE 6 END,10,CASE WHEN p<=3 THEN 40 ELSE 60 END,'completed' FROM generate_series(1,6)p CROSS JOIN generate_series(1,3)q;
  INSERT INTO learning_assignments VALUES('homework','published',now()-interval '1 day',NULL);
- INSERT INTO learning_assignment_recipients VALUES('homework','me','started');
+ INSERT INTO learning_assignment_recipients VALUES('homework','me','started',NULL);
  UPDATE quiz_attempts SET score_pct=99;
  `)
 	if err != nil {

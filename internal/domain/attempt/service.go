@@ -154,7 +154,7 @@ func (s *Service) Start(ctx context.Context, userID, quizID, assignmentID string
 				return nil, resumeErr
 			}
 			result, clearErr := s.db.Exec(ctx, `UPDATE learning_assignment_recipients ar
-				SET attempt_id=NULL,status=CASE WHEN a.due_at IS NOT NULL AND a.due_at<=now() THEN 'overdue' ELSE 'assigned' END,
+				SET attempt_id=NULL,status=CASE WHEN COALESCE(ar.due_at_override,a.due_at)<=now() THEN 'overdue' ELSE 'assigned' END,
 				    attempts_started=GREATEST(0,ar.attempts_started-1)
 				FROM learning_assignments a
 				WHERE ar.assignment_id=a.id AND ar.assignment_id=$1 AND ar.student_id=$2 AND ar.attempt_id=$3`,

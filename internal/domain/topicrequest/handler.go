@@ -7,16 +7,25 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
 type Handler struct {
-	db *pgxpool.Pool
+	db       *pgxpool.Pool
+	notif    *notification.Service
+	panelURL string
 }
 
 func NewHandler(db *pgxpool.Pool) *Handler {
 	return &Handler{db: db}
+}
+
+// SetNotifier enables teacher alerts on new requests and the student
+// notification when a request is marked done (R5).
+func (h *Handler) SetNotifier(n *notification.Service, teacherPanelURL string) {
+	h.notif, h.panelURL = n, teacherPanelURL
 }
 
 type TopicRequest struct {
@@ -40,6 +49,8 @@ type TopicRequest struct {
 type updateRequest struct {
 	Status     string  `json:"status"`
 	AssignedTo *string `json:"assigned_to"`
+	// R5 — the assessment the teacher made for this request (teacher route only).
+	QuizID *string `json:"quiz_id"`
 }
 
 // POST /api/v1/topic-requests
@@ -66,6 +77,27 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		middleware.InternalError(w)
 		return
+	}
+	if h.notif != nil {
+		// Teachers of the student's classes; with no class, nobody is paged.
+		rows, qerr := h.db.Query(r.Context(), `SELECT DISTINCT gt.user_id, COALESCE(NULLIF(u.display_name,''),u.full_name,'A student')
+			FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id JOIN users u ON u.id=gs.user_id
+			WHERE gs.user_id=$1`, userID)
+		if qerr == nil {
+			type t struct{ id, name string }
+			list := []t{}
+			for rows.Next() {
+				var v t
+				if rows.Scan(&v.id, &v.name) == nil {
+					list = append(list, v)
+				}
+			}
+			rows.Close()
+			for _, v := range list {
+				h.notif.EmitTeacher(r.Context(), v.id, notification.TopicTopicRequests, "topic_request", "Topic request",
+					v.name+" asked for a topic: “"+tr.Topic+"”", "topic_request:"+tr.ID, h.panelURL+"/inbox")
+			}
+		}
 	}
 	middleware.JSON(w, http.StatusCreated, tr)
 }
@@ -212,23 +244,37 @@ func (h *Handler) TeacherUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reqID := chi.URLParam(r, "requestId")
-	result, err := h.db.Exec(r.Context(),
-		`UPDATE topic_requests
-		 SET status=CASE WHEN $1 != '' THEN $1 ELSE status END,
+	quizID := ""
+	if req.QuizID != nil {
+		quizID = *req.QuizID
+	}
+	var studentID, topic, prevStatus string
+	err := h.db.QueryRow(r.Context(),
+		`WITH prev AS (SELECT id, status FROM topic_requests WHERE id=$3 AND institution_id=$4 FOR UPDATE)
+		 UPDATE topic_requests t
+		 SET status=CASE WHEN $1 != '' THEN $1 ELSE t.status END,
 		     assigned_to=CASE
 		       WHEN $2::text IS NOT NULL THEN NULLIF($2, '')::uuid
-		       WHEN $1 != '' AND assigned_to IS NULL THEN $5::uuid
-		       ELSE assigned_to
-		     END
-		 WHERE id=$3 AND institution_id=$4 AND (assigned_to IS NULL OR assigned_to=$5)`,
-		req.Status, req.AssignedTo, reqID, middleware.GetInstitutionID(r), teacherID)
+		       WHEN $1 != '' AND t.assigned_to IS NULL THEN $5::uuid
+		       ELSE t.assigned_to
+		     END,
+		     resolved_quiz_id=CASE WHEN $6 = '' THEN t.resolved_quiz_id
+		       ELSE (SELECT q.id FROM quizzes q WHERE q.id::text=$6 AND q.created_by=$5) END
+		 FROM prev
+		 WHERE t.id=prev.id AND (t.assigned_to IS NULL OR t.assigned_to=$5)
+		 RETURNING t.student_id, t.topic, prev.status`,
+		req.Status, req.AssignedTo, reqID, middleware.GetInstitutionID(r), teacherID, quizID).Scan(&studentID, &topic, &prevStatus)
 	if err != nil {
-		middleware.InternalError(w)
-		return
-	}
-	if result.RowsAffected() == 0 {
 		middleware.NotFound(w, "topic request")
 		return
+	}
+	if h.notif != nil && req.Status == "done" && prevStatus != "done" {
+		ref := "topic_request:" + reqID
+		if quizID != "" {
+			ref = "quiz:" + quizID + ":topic_request:" + reqID
+		}
+		h.notif.Emit(r.Context(), studentID, "topic_request", "Your topic was covered",
+			"Your teacher covered “"+topic+"”.", notification.WithReference(ref))
 	}
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "updated"})
 }

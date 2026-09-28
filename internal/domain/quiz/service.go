@@ -95,6 +95,25 @@ type AddQuestionReq struct {
 	CorrectAnswer    json.RawMessage `json:"correct_answer"`
 	TimeLimitSeconds int             `json:"time_limit_seconds"`
 	Clues            json.RawMessage `json:"clues,omitempty"`
+	// R11 — AI-suggested misconception per wrong option. Stored unreviewed;
+	// never feeds learning signals until a teacher accepts it.
+	OptionMisconceptions []OptionMisconception `json:"option_misconceptions,omitempty"`
+}
+
+type OptionMisconception struct {
+	Option string `json:"option"`
+	Title  string `json:"title"`
+}
+
+// SaveMisconceptionSuggestions stores AI suggestions for a question the caller owns.
+func (s *Service) SaveMisconceptionSuggestions(ctx context.Context, questionID, ownerID string, items []OptionMisconception) {
+	for i, m := range items {
+		if i >= 10 || m.Option == "" || m.Title == "" || len(m.Option) > 500 || len(m.Title) > 200 {
+			continue
+		}
+		_, _ = s.db.Exec(ctx, `INSERT INTO question_misconception_suggestions(question_id,option_text,title,created_by)
+			SELECT q.id,$2,$3,$4 FROM questions q JOIN quizzes z ON z.id=q.quiz_id WHERE q.id=$1 AND z.created_by=$4`, questionID, m.Option, m.Title, ownerID)
+	}
 }
 
 // SystemUserID is the fixed user seeded for platform-authored content. It

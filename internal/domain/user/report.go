@@ -157,7 +157,7 @@ func (s *Service) GetLearningReport(ctx context.Context, userID string) (*Learni
 	if err != nil {
 		return nil, err
 	}
-	err = tx.QueryRow(ctx, `SELECT COUNT(*),COUNT(*) FILTER(WHERE ar.status='submitted'),COUNT(*) FILTER(WHERE ar.status IN ('assigned','started','overdue') AND a.due_at<now())
+	err = tx.QueryRow(ctx, `SELECT COUNT(*),COUNT(*) FILTER(WHERE ar.status='submitted'),COUNT(*) FILTER(WHERE ar.status IN ('assigned','started','overdue') AND COALESCE(ar.due_at_override,a.due_at)<now())
  FROM learning_assignment_recipients ar JOIN learning_assignments a ON a.id=ar.assignment_id
  WHERE ar.student_id=$1 AND a.status IN ('published','closed') AND ar.status<>'excused' AND (a.available_at IS NULL OR a.available_at<=now())`, userID).Scan(&r.Assigned, &r.Submitted, &r.Overdue)
 	if err != nil {

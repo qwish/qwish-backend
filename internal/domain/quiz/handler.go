@@ -444,6 +444,9 @@ func (h *Handler) TeacherAddQuestion(w http.ResponseWriter, r *http.Request) {
 		middleware.Error(w, http.StatusForbidden, "FORBIDDEN", err.Error())
 		return
 	}
+	if len(req.OptionMisconceptions) > 0 {
+		h.svc.SaveMisconceptionSuggestions(r.Context(), q.ID, middleware.GetUserID(r), req.OptionMisconceptions)
+	}
 	middleware.JSON(w, http.StatusCreated, q)
 }
 

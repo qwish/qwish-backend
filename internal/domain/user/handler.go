@@ -384,13 +384,17 @@ func (h *Handler) GetMyNotifPrefs(w http.ResponseWriter, r *http.Request) {
 
 // PATCH /api/v1/users/me/notification-preferences
 func (h *Handler) UpdateMyNotifPrefs(w http.ResponseWriter, r *http.Request) {
-	var raw map[string]bool
+	var raw NotifPrefsPatch
 	if err := jsonx.NewDecoder(r.Body).Decode(&raw); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
 	p, err := h.svc.UpdateNotifPrefs(r.Context(), middleware.GetUserID(r), raw)
 	if err != nil {
+		if errors.Is(err, ErrInvalidQuietHours) {
+			middleware.BadRequest(w, err.Error())
+			return
+		}
 		middleware.InternalError(w)
 		return
 	}

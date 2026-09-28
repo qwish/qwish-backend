@@ -478,6 +478,7 @@ func main() {
 				r.Patch("/users/me", userH.UpdateMe)
 				r.Delete("/users/me", userH.DeleteMe)
 				r.Get("/users/me/stats", userH.GetMyStats)
+				r.With(mw.RateLimitByUser(30, time.Minute)).Get("/users/me/story-stats", userH.GetMyStoryStats)
 				r.Get("/users/me/sign-ins", authH.MySignIns)
 				r.With(mw.RequireUserRecord(), mw.RateLimitByUser(30, time.Minute)).Get("/users/me/badges", userH.GetMyBadges)
 				r.With(mw.RequireUserRecord(), mw.RateLimitByUser(6, time.Hour)).Post("/users/me/scorecard-shares", userH.RecordMyScorecardShare)

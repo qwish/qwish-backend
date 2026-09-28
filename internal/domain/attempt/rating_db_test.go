@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/domain/quiz"
 	"github.com/qwish/backend/internal/domain/streak"
@@ -107,5 +108,35 @@ func TestCompleteUpdatesSkillRating(t *testing.T) {
 	must("trend", err)
 	if last := trend[len(trend)-1].Value; math.Abs(last-first.QwishScore) > 0.05 {
 		t.Fatalf("trend ends at %v, rating is %v", last, first.QwishScore)
+	}
+
+	// Behavior telemetry: batched inserts, idempotent retries, and one
+	// undelivered question rejects the whole batch.
+	st, err := svc.Start(ctx, student, quizID, "")
+	must("start behavior", err)
+	q0, q1 := st.Questions[0].ID, st.Questions[1].ID
+	events := BehaviorBatch{Events: []BehaviorEvent{
+		{ClientEventID: uuid.NewString(), EventType: "question_viewed", QuestionID: &q0},
+		{ClientEventID: uuid.NewString(), EventType: "question_viewed", QuestionID: &q1},
+		{ClientEventID: uuid.NewString(), EventType: "focus_lost"},
+	}}
+	if n, err := svc.RecordBehavior(ctx, student, st.AttemptID, events); err != nil || n != 3 {
+		t.Fatalf("record: n=%d err=%v", n, err)
+	}
+	if n, err := svc.RecordBehavior(ctx, student, st.AttemptID, events); err != nil || n != 0 {
+		t.Fatalf("retry should be a no-op: n=%d err=%v", n, err)
+	}
+	stranger := uuid.NewString()
+	bad := BehaviorBatch{Events: []BehaviorEvent{
+		{ClientEventID: uuid.NewString(), EventType: "question_viewed", QuestionID: &q0},
+		{ClientEventID: uuid.NewString(), EventType: "question_viewed", QuestionID: &stranger},
+	}}
+	if _, err := svc.RecordBehavior(ctx, student, st.AttemptID, bad); err == nil {
+		t.Fatal("undelivered question accepted")
+	}
+	var stored int
+	must("behavior rows", pool.QueryRow(ctx, `SELECT COUNT(*) FROM attempt_behavior_events WHERE attempt_id=$1`, st.AttemptID).Scan(&stored))
+	if stored != 3 {
+		t.Fatalf("expected 3 stored events, got %d", stored)
 	}
 }

@@ -37,6 +37,25 @@ type pusherAdapter func(ctx context.Context, userID, title, body string, data ma
 // closure that adapts your concrete pusher (e.g. push.Service.SendToUser).
 func (s *Service) SetPusher(fn func(ctx context.Context, userID, title, body string, data map[string]string)) {
 	s.push = pusherAdapter(fn)
+	// A fixed worker pool, not a goroutine per push: an announcement to every
+	// student used to start one goroutine per recipient, each taking pool
+	// connections for its preference/token reads and starving API requests.
+	// ponytail: in-process queue, lost on restart; push is best-effort anyway.
+	s.pushQ = make(chan pushJob, 1024)
+	for range 4 {
+		go func() {
+			for j := range s.pushQ {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				s.push(ctx, j.userID, j.title, j.body, j.data)
+				cancel()
+			}
+		}()
+	}
+}
+
+type pushJob struct {
+	userID, title, body string
+	data                map[string]string
 }
 
 // Emit writes a single in-app notification row. Best-effort — errors are swallowed
@@ -97,8 +116,9 @@ func (s *Service) Emit(ctx context.Context, userID, kind, title, body string, op
 		if kind == "assignment" {
 			data["deep_link"] = "qwish://assignments"
 		}
-		// Spawn so push latency never blocks the request that triggered Emit.
-		go s.push(context.Background(), userID, title, body, data)
+		// Queued so push latency never blocks the request that triggered Emit;
+		// a full queue backpressures bulk senders like the announcement cron.
+		s.pushQ <- pushJob{userID, title, body, data}
 	}
 }
 
@@ -235,6 +255,11 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+
+	// The server's 30s WriteTimeout would otherwise cut every stream just after
+	// its first ping, and each reconnect re-runs the auth query. The ticker
+	// below and client disconnects (r.Context) bound the stream instead.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 
 	userID := middleware.GetUserID(r)
 	ch := h.svc.Subscribe(userID)

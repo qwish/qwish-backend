@@ -1,8 +1,13 @@
 package leaderboard
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/middleware"
@@ -10,11 +15,24 @@ import (
 
 const quizzesRequiredToUnlock = 5
 
-type Handler struct {
-	db *pgxpool.Pool
+// pageTTL bounds how stale a shared leaderboard page can be.
+const pageTTL = 30 * time.Second
+
+type cachedPage struct {
+	entries []Entry
+	total   int
+	expires time.Time
 }
 
-func NewHandler(db *pgxpool.Pool) *Handler { return &Handler{db: db} }
+type Handler struct {
+	db    *pgxpool.Pool
+	mu    sync.Mutex
+	cache map[string]cachedPage
+}
+
+func NewHandler(db *pgxpool.Pool) *Handler {
+	return &Handler{db: db, cache: map[string]cachedPage{}}
+}
 
 type Entry struct {
 	Rank            int     `json:"rank"`
@@ -95,81 +113,10 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	domain := r.URL.Query().Get("domain")
-	var total int
-	var entries []Entry
-
-	if scope == "institution" {
-		if err := h.db.QueryRow(r.Context(), `
-			`+leaderboardScoreCTE+`SELECT COUNT(*) FROM scored s
-			 JOIN users u ON u.id=s.id
-			 WHERE s.institution_id=$1
-			   AND s.completed_quizzes >= 5
-			   AND ($2='' OR LOWER(u.domain)=LOWER($2))`, instID, domain).Scan(&total); err != nil {
-			middleware.InternalError(w)
-			return
-		}
-
-		rows, err := h.db.Query(r.Context(), leaderboardScoreCTE+`
-			SELECT s.id, s.display_name, s.institution_name, s.qwish_score, s.total_points, s.current_streak,
-			       RANK() OVER (ORDER BY s.qwish_score DESC) AS rank
-			  FROM scored s JOIN users u ON u.id=s.id
-			 WHERE s.institution_id=$1
-			   AND s.completed_quizzes >= 5
-			   AND ($2='' OR LOWER(u.domain)=LOWER($2))
-			 ORDER BY s.qwish_score DESC, s.id LIMIT $3 OFFSET $4`, instID, domain, limit, offset)
-		if err != nil {
-			middleware.InternalError(w)
-			return
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var e Entry
-			if err := rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.QwishScore, &e.TotalPoints, &e.CurrentStreak, &e.Rank); err != nil {
-				middleware.InternalError(w)
-				return
-			}
-			entries = append(entries, e)
-		}
-		if rows.Err() != nil {
-			middleware.InternalError(w)
-			return
-		}
-	} else {
-		if err := h.db.QueryRow(r.Context(), leaderboardScoreCTE+`
-			SELECT COUNT(*) FROM scored s JOIN users u ON u.id=s.id
-			 WHERE s.completed_quizzes >= 5
-			   AND ($1='' OR LOWER(u.domain)=LOWER($1))`, domain).Scan(&total); err != nil {
-			middleware.InternalError(w)
-			return
-		}
-
-		rows, err := h.db.Query(r.Context(), leaderboardScoreCTE+`
-			SELECT s.id, s.display_name, s.institution_name, s.qwish_score, s.total_points, s.current_streak,
-			       RANK() OVER (ORDER BY s.qwish_score DESC) AS rank
-			  FROM scored s JOIN users u ON u.id=s.id
-			 WHERE s.completed_quizzes >= 5
-			   AND ($1='' OR LOWER(u.domain)=LOWER($1))
-			 ORDER BY s.qwish_score DESC, s.id LIMIT $2 OFFSET $3`, domain, limit, offset)
-		if err != nil {
-			middleware.InternalError(w)
-			return
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var e Entry
-			if err := rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.QwishScore, &e.TotalPoints, &e.CurrentStreak, &e.Rank); err != nil {
-				middleware.InternalError(w)
-				return
-			}
-			entries = append(entries, e)
-		}
-		if rows.Err() != nil {
-			middleware.InternalError(w)
-			return
-		}
-	}
-	if entries == nil {
-		entries = []Entry{}
+	entries, total, err := h.page(r.Context(), scope, instID, domain, limit, offset)
+	if err != nil {
+		middleware.InternalError(w)
+		return
 	}
 
 	var myRank int
@@ -223,4 +170,102 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 		"my_points":           myPoints,
 		"entries":             entries,
 	}, &middleware.Meta{Page: page, Limit: limit, Total: total})
+}
+
+// page loads one ranked page plus the total. It is identical for every caller
+// with the same key and each miss scans every active student twice, so it is
+// shared through a short-lived cache; my_rank stays live per request.
+func (h *Handler) page(ctx context.Context, scope, instID, domain string, limit, offset int) ([]Entry, int, error) {
+	key := fmt.Sprintf("%s|%s|%s|%d|%d", scope, instID, strings.ToLower(domain), limit, offset)
+	h.mu.Lock()
+	if c, ok := h.cache[key]; ok && time.Now().Before(c.expires) {
+		h.mu.Unlock()
+		return c.entries, c.total, nil
+	}
+	h.mu.Unlock()
+
+	entries, total, err := h.loadPage(ctx, scope, instID, domain, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	now := time.Now()
+	h.mu.Lock()
+	// ponytail: whole-map sweep on insert; keys are pages × institutions, small.
+	for k, c := range h.cache {
+		if now.After(c.expires) {
+			delete(h.cache, k)
+		}
+	}
+	h.cache[key] = cachedPage{entries, total, now.Add(pageTTL)}
+	h.mu.Unlock()
+	return entries, total, nil
+}
+
+func (h *Handler) loadPage(ctx context.Context, scope, instID, domain string, limit, offset int) ([]Entry, int, error) {
+	total := 0
+	entries := []Entry{}
+
+	if scope == "institution" {
+		if err := h.db.QueryRow(ctx, `
+			`+leaderboardScoreCTE+`SELECT COUNT(*) FROM scored s
+			 JOIN users u ON u.id=s.id
+			 WHERE s.institution_id=$1
+			   AND s.completed_quizzes >= 5
+			   AND ($2='' OR LOWER(u.domain)=LOWER($2))`, instID, domain).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+
+		rows, err := h.db.Query(ctx, leaderboardScoreCTE+`
+			SELECT s.id, s.display_name, s.institution_name, s.qwish_score, s.total_points, s.current_streak,
+			       RANK() OVER (ORDER BY s.qwish_score DESC) AS rank
+			  FROM scored s JOIN users u ON u.id=s.id
+			 WHERE s.institution_id=$1
+			   AND s.completed_quizzes >= 5
+			   AND ($2='' OR LOWER(u.domain)=LOWER($2))
+			 ORDER BY s.qwish_score DESC, s.id LIMIT $3 OFFSET $4`, instID, domain, limit, offset)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var e Entry
+			if err := rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.QwishScore, &e.TotalPoints, &e.CurrentStreak, &e.Rank); err != nil {
+				return nil, 0, err
+			}
+			entries = append(entries, e)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, 0, err
+		}
+	} else {
+		if err := h.db.QueryRow(ctx, leaderboardScoreCTE+`
+			SELECT COUNT(*) FROM scored s JOIN users u ON u.id=s.id
+			 WHERE s.completed_quizzes >= 5
+			   AND ($1='' OR LOWER(u.domain)=LOWER($1))`, domain).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+
+		rows, err := h.db.Query(ctx, leaderboardScoreCTE+`
+			SELECT s.id, s.display_name, s.institution_name, s.qwish_score, s.total_points, s.current_streak,
+			       RANK() OVER (ORDER BY s.qwish_score DESC) AS rank
+			  FROM scored s JOIN users u ON u.id=s.id
+			 WHERE s.completed_quizzes >= 5
+			   AND ($1='' OR LOWER(u.domain)=LOWER($1))
+			 ORDER BY s.qwish_score DESC, s.id LIMIT $2 OFFSET $3`, domain, limit, offset)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var e Entry
+			if err := rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.QwishScore, &e.TotalPoints, &e.CurrentStreak, &e.Rank); err != nil {
+				return nil, 0, err
+			}
+			entries = append(entries, e)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, 0, err
+		}
+	}
+	return entries, total, nil
 }

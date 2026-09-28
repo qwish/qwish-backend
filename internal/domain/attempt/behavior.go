@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 const maxBehaviorEventsPerBatch = 50
@@ -125,18 +126,28 @@ func (s *Service) RecordBehavior(ctx context.Context, userID, attemptID string, 
 		return 0, fmt.Errorf("attempt not found")
 	}
 
-	inserted := 0
+	// One membership check for every referenced question, then all inserts
+	// pipelined: this telemetry endpoint is hit throughout every attempt, and
+	// the per-event loop cost two round trips per event.
+	var questionIDs []string
 	for _, event := range batch.Events {
 		if event.QuestionID != nil {
-			var delivered bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS(
-				SELECT 1 FROM quiz_attempt_questions
-				WHERE attempt_id=$1 AND question_id=$2
-			)`, attemptID, *event.QuestionID).Scan(&delivered); err != nil || !delivered {
-				return 0, fmt.Errorf("question was not delivered in this attempt")
-			}
+			questionIDs = append(questionIDs, *event.QuestionID)
 		}
-		tag, err := tx.Exec(ctx, `
+	}
+	if len(questionIDs) > 0 {
+		var delivered bool
+		if err := tx.QueryRow(ctx, `SELECT NOT EXISTS(
+			SELECT 1 FROM unnest($2::text[]) q(id)
+			WHERE NOT EXISTS(SELECT 1 FROM quiz_attempt_questions
+			                 WHERE attempt_id=$1 AND question_id=q.id::uuid)
+		)`, attemptID, questionIDs).Scan(&delivered); err != nil || !delivered {
+			return 0, fmt.Errorf("question was not delivered in this attempt")
+		}
+	}
+	inserts := &pgx.Batch{}
+	for _, event := range batch.Events {
+		inserts.Queue(`
 			INSERT INTO attempt_behavior_events
 			  (client_event_id, attempt_id, user_id, question_id, event_type,
 			   client_elapsed_ms, change_count, hidden_ms)
@@ -144,10 +155,19 @@ func (s *Service) RecordBehavior(ctx context.Context, userID, attemptID string, 
 			ON CONFLICT (attempt_id, client_event_id) DO NOTHING`,
 			event.ClientEventID, attemptID, userID, event.QuestionID, event.EventType,
 			event.ClientElapsedMs, event.ChangeCount, event.HiddenMs)
+	}
+	results := tx.SendBatch(ctx, inserts)
+	inserted := 0
+	for range batch.Events {
+		tag, err := results.Exec()
 		if err != nil {
+			results.Close()
 			return 0, err
 		}
 		inserted += int(tag.RowsAffected())
+	}
+	if err := results.Close(); err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err

@@ -274,12 +274,16 @@ func (s *Service) Start(ctx context.Context, userID, quizID, assignmentID string
 		return nil, err
 	}
 
+	// One pipelined round trip instead of one per question, while the tx holds
+	// a pool connection.
+	batch := &pgx.Batch{}
 	for i, question := range questions {
-		if _, err := tx.Exec(ctx,
+		batch.Queue(
 			`INSERT INTO quiz_attempt_questions (attempt_id, question_id, position, question_revision, question_version_id, option_order) VALUES ($1,$2,$3,$4,$5,$6)`,
-			attemptID, question.ID, i+1, question.Revision, question.VersionID, question.OptionOrder); err != nil {
-			return nil, err
-		}
+			attemptID, question.ID, i+1, question.Revision, question.VersionID, question.OptionOrder)
+	}
+	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
@@ -477,11 +481,14 @@ func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, re
 
 	// Grade and interpret the exact question delivered to this attempt.
 	var correctAnswer, choices json.RawMessage
-	var timeLimitSeconds int
-	err = tx.QueryRow(ctx, `SELECT qv.type,qv.correct_answer,qv.time_limit_seconds,aq.option_choices
+	// cluesUsed: clues actually handed out by the server, not what the client
+	// claims — folded into this read to save a round trip under the row lock.
+	var timeLimitSeconds, cluesUsed int
+	err = tx.QueryRow(ctx, `SELECT qv.type,qv.correct_answer,qv.time_limit_seconds,aq.option_choices,
+ (SELECT COUNT(*) FROM clue_reveals cr WHERE cr.attempt_id=$1 AND cr.question_id=$2)::int
  FROM quiz_attempt_questions aq JOIN question_versions qv ON qv.id=aq.question_version_id
  JOIN questions q ON q.id=aq.question_id
- WHERE aq.attempt_id=$1 AND aq.question_id=$2 AND q.quiz_id=$3`, attemptID, req.QuestionID, quizID).Scan(&qType, &correctAnswer, &timeLimitSeconds, &choices)
+ WHERE aq.attempt_id=$1 AND aq.question_id=$2 AND q.quiz_id=$3`, attemptID, req.QuestionID, quizID).Scan(&qType, &correctAnswer, &timeLimitSeconds, &choices, &cluesUsed)
 	if err != nil {
 		return nil, fmt.Errorf("question snapshot not found")
 	}
@@ -489,13 +496,6 @@ func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, re
 	if err != nil {
 		return nil, err
 	}
-
-	// Clues actually handed out by the server, not what the client claims.
-	var cluesUsed int
-	tx.QueryRow(ctx,
-		`SELECT COUNT(*) FROM clue_reveals WHERE attempt_id=$1 AND question_id=$2`,
-		attemptID, req.QuestionID,
-	).Scan(&cluesUsed)
 
 	resp := scoring.QuestionResponse{
 		QuestionID:      req.QuestionID,

@@ -20,6 +20,7 @@ type Service struct {
 	apiKey    string
 	fromEmail string
 	push      pusherAdapter
+	pushQ     chan pushJob
 
 	// Dashboard URLs used for "go to dashboard" buttons in emails.
 	instituteURL  string // institution admin dashboard

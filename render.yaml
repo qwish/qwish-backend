@@ -11,6 +11,10 @@ services:
         value: 8080
       - key: APP_ENV
         value: production
+      # Soft heap cap under the 512MB instance: the GC works harder near it
+      # instead of letting a traffic spike get the process OOM-killed.
+      - key: GOMEMLIMIT
+        value: 400MiB
       # go.mod requires 1.27.1; Render's default toolchain lags, so pin it.
       - key: GO_VERSION
         value: 1.27.1

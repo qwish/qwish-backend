@@ -4152,6 +4152,41 @@ DELETE /users/me/profile-entries/{entryId}
 `kind` is one of `experience`, `certification`, `achievement`, `course`.
 Education and skills keep their own existing endpoints.
 
+#### Portfolio fields (migration 081)
+Create/PATCH also accept, all optional (omitted on PATCH = unchanged, so older
+clients keep working):
+```
+subtype        project | internship | hackathon | certification | achievement
+details        {string: string} — keys per subtype, closed set:
+               project:       problem, approach, contribution, outcome, mentor, team_type(individual|team)
+               internship:    responsibilities, learnings, supervisor, work_mode(onsite|remote|hybrid)
+               hackathon:     problem, team, contribution, level(college|state|national|international),
+                              result(participant|finalist|winner)
+               certification: credential_id, expiry_date(YYYY-MM-DD)
+               achievement:   category, role
+skills         string[] (≤20)        links    http(s) URL[] (≤5, never fetched)
+ongoing        bool (no end_date)    academic_year "2025-26"    semester 1–12 (0 clears)
+```
+A `subtype` sets `kind` (project/internship → experience, hackathon →
+achievement). `end_date` before `start_date` is rejected.
+
+List rows gain `subtype, details, skills, links, ongoing, academic_year,
+semester, status, pinned, revision` and `review` (latest decision on the current
+revision: `{revision, decision, comment, created_at}`).
+
+`status`: `draft → submitted → reviewed | changes_requested`. **Any PATCH returns
+the entry to `draft`** — a review never carries over to edited content.
+
+```
+POST /users/me/profile-entries/{entryId}/submit   → {status, revision}
+GET  /users/me/profile-entries/{entryId}/reviews  → [{revision, decision, comment, reviewer, created_at}]
+PUT  /users/me/profile-entries/{entryId}/pin      {pinned: bool}
+```
+Submit snapshots an immutable revision (with the student's institution at that
+moment). Idempotent when already `submitted`/`reviewed`. Errors:
+`400 INCOMPLETE_ENTRY` (message lists missing fields), `409 NO_CHANGES`
+(`changes_requested` and not yet edited). Pin errors: `409 PIN_LIMIT` (3 max).
+
 ## Teacher
 
 Teachers manage rosters, never identities. Every call is bounded to classes the
@@ -4641,3 +4676,114 @@ The item types are:
 |---|---|
 | `077_curriculum_structure.sql` | `curriculum_versions.settings` (JSONB), `.copied_from_version_id`, `.updated_at`; `curriculum_chapters.details` and `curriculum_concepts.details` (JSONB); `curriculum_version_revisions` |
 | `078_institute_operations.sql` | `promotion_batch_students.revert_outcome`; `users.verified_at`; `user_sign_ins`; `action_item_owners` |
+
+## Teacher forms and identified polls (migration 082)
+
+Phase 1 of `plans/teacher-forms-events-and-polls.md`. A poll is a one-question form; both are `activities`.
+Responses are **identified** to organisers — show `identity_disclosure` before submit.
+
+### Organiser — `/teacher/...` and `/institution/...` (same handlers)
+
+Organisers are the author, plus institution admins for anything in their institution. Teachers may target
+only classes they teach; `institution_wide` is institution-admin only. Other organisers get `404`.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/activity-templates` | Editable presets (hackathon interest, event registration, workshop preferences, volunteer application, project proposal, post-event feedback, quick poll) |
+| GET | `/activities?status=&kind=` | Up to 200, newest first |
+| POST | `/activities` | Draft. Body below → `201 {id, revision}` |
+| GET | `/activities/{id}` | `{activity, identity_disclosure, results?}` |
+| PUT | `/activities/{id}` | Draft: full body + `revision`. Published/closed: only `{revision, title, description}` (audited); anything else → `409` (duplicate instead) |
+| GET | `/activities/{id}/audience-estimate` | `{students, as_of}` |
+| POST | `/activities/{id}/publish` | `{revision}`; freezes questions into a version. Retry-safe |
+| POST | `/activities/{id}/close` · `/archive` | Idempotent |
+| POST | `/activities/{id}/duplicate` | New draft from the published questions → `201 {id}` |
+| POST | `/activities/{id}/remind` | Once per activity, open only, non-responders only; else `409` |
+| GET | `/activities/{id}/responses?limit=&offset=` | Submitted only (never drafts/withdrawn) + `summary {submitted, eligible_now, eligible_as_of, reach_estimate, reach_estimated_at}` |
+| GET | `/activities/{id}/responses.csv` | Formula-escaped; access rechecked per request, nothing cached |
+
+Body: `{kind: form|poll, title, description, questions[], group_ids[], institution_wide, opens_at, closes_at, allow_edit, result_visibility: after_vote|after_close|organisers, revision}`.
+Stale `revision` → `409 STALE_REVISION`.
+
+Question: `{id, type, label, help?, required?, options?[{id,label}], min_select?, max_select?, min?, max?, max_length?}`.
+Types: `short_text` (≤300), `long_text` (≤5000), `single_choice`, `multiple_choice`, `number`, `date` (`YYYY-MM-DD`), `acknowledgement`.
+Ids match `[a-z0-9_-]{1,40}` and are stable. A poll has exactly one choice question.
+
+`state` (server time): `draft | scheduled | open | closed | archived`.
+
+### Student — `/activities` (role `student`)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/activities?filter=forms\|polls\|mine` | Items addressed to the student, plus ones they responded to; `my_status` |
+| GET | `/activities/{id}` | `{activity (eligible), my_response, identity_disclosure, results}`. `404` outside the audience unless they hold a submitted response |
+| PUT | `/activities/{id}/response/draft` | Forms only; `{answers}`; partial allowed |
+| POST | `/activities/{id}/response` | `{answers: {questionId: value}}`. Identical retry → same receipt. Changing a submission needs `allow_edit`, else `409 ALREADY_SUBMITTED`. Not open → `409 NOT_OPEN` |
+| DELETE | `/activities/{id}/response` | Withdraw; `allow_edit` and open only |
+
+Poll `results` (`{respondents, questions[{question_id, counts{optionId:n}}]}`) follow `result_visibility`;
+multiple-choice percentages may sum above 100%. Notifications: kind `activity`, reference `activity:{id}:new|reminder`,
+push `deep_link` `qwish://activities/{id}`.
+
+## Leadership roles and departments (migration 083)
+
+From `plans/institution-hierarchy-and-access-control.md`, limited to **Director, Principal, Vice Principal, Dean and
+Head of Department**. `users.role` is unchanged — an HOD stays a `teacher` and keeps the teacher panel. Access comes
+from active `staff_role_assignments`, read on every request (revoke/expiry applies to the next request).
+
+| Role key | Scope | Permissions |
+|---|---|---|
+| `director`, `principal` | institution only | `departments.read`, `students.read`, `staff.read`, `reports.read`, `activities.publish` |
+| `vice_principal` | institution or per department | reads only (no copy of Principal publishing) |
+| `dean` | per department | reads only |
+| `hod` | per department | reads + `activities.publish` for that department's classes |
+
+One row = one role × one scope (Dean of 3 departments = 3 rows). Permissions never combine across rows.
+No role reads individual form/poll responses or manages roles. Classes with no department are reachable
+only by institution-scoped roles.
+
+### Institution admin (`/institution/...`)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET/POST | `/departments` | `{name, code?}`; name unique per institution (case-insensitive) → `409` |
+| PATCH | `/departments/{id}` | `{name, code?}` |
+| DELETE | `/departments/{id}` | Archive; `409` while active classes or role assignments point at it |
+| PUT | `/groups/{groupId}/department` | `{department_id: uuid \| null}` |
+| GET | `/staff-role-templates` | Catalogue with labels, scope rule, permissions, plain-language summary |
+| GET | `/staff-roles?user_id=&role=&department_id=&include_ended=true` | `state`: `active \| scheduled \| ended \| revoked`; `access_summary` |
+| POST | `/staff-roles` | `{user_id, role, department_id?, title?, starts_at?, ends_at?, reason}`. Holder must be an active teacher/admin of this institution. Duplicate active → `409` |
+| DELETE | `/staff-roles/{id}` | `{reason}`; idempotent |
+
+All writes are audited atomically to the institution audit log (filter group `access`).
+
+### Role holders (`/leadership/...`, role `teacher` or `institution_admin`)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/access` | `{assignments, permissions: {key: {institution, department_ids}}}` |
+| GET | `/departments` | Departments in scope with class/student counts and HODs |
+| GET | `/departments/{id}/summary` | Per-class student count, teachers, 30-day completed attempts and average score |
+| GET | `/students?department_id=&q=&limit=&offset=` | `{students, total}` |
+| GET | `/staff?department_id=` | Teachers of in-scope classes plus in-scope role holders |
+
+No qualifying assignment → `403`. A `department_id` or id outside scope → `404`.
+Forms/polls: Directors and Principals may publish `institution_wide`; HODs may target any class in their department.
+
+## Staff view of student profile and portfolio
+
+`plans/student-portfolio-and-achievements.md`, teacher/institution side. Package `internal/domain/portfolio`.
+
+| Method | Path | Who | Notes |
+|---|---|---|---|
+| GET | `/teacher/students/{userId}/profile` | teacher (same scope as `/teacher/students`) | Full profile, below |
+| GET | `/institution/students/{userId}/profile` | institution admin (active/suspended enrollment) | Same shape, read-only |
+| GET | `/teacher/portfolio-reviews?category=&limit=` | teacher | Submissions awaiting review for students in scope, oldest first |
+| POST | `/teacher/portfolio-reviews/{revisionId}/decision` | teacher | `{decision: reviewed\|changes_requested, comment}` — comment required for `changes_requested`. `409 STALE_REVISION` once the revision is no longer the one awaiting review; identical retry → `200`. Notifies the student (kind `portfolio_review`) |
+
+Profile: `{student {full_name, email, phone, date_of_birth, gender, address, guardian_*, highest_qualification, domain, interests, …},
+enrollment, classes, departments, education[], skills[], portfolio[], portfolio_summary}`.
+
+`portfolio[]` holds, per entry, the latest revision submitted **within the caller's institution** — never a live draft:
+`{entry_id, revision_id, revision, content, submitted_at, pinned, review_state: submitted|reviewed|changes_requested, review,
+awaiting_review, student_editing}`. Restricted fields (`details.supervisor`) are removed from staff views.

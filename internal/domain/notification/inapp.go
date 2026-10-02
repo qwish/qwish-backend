@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -115,6 +116,9 @@ func (s *Service) Emit(ctx context.Context, userID, kind, title, body string, op
 		}
 		if kind == "assignment" {
 			data["deep_link"] = "qwish://assignments"
+		}
+		if id, _, ok := strings.Cut(strings.TrimPrefix(o.reference, "activity:"), ":"); kind == "activity" && ok {
+			data["deep_link"] = "qwish://activities/" + id
 		}
 		// Queued so push latency never blocks the request that triggered Emit;
 		// a full queue backpressures bulk senders like the announcement cron.

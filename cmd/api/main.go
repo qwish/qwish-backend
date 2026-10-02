@@ -13,6 +13,7 @@ import (
 
 	"github.com/qwish/backend/internal/config"
 	"github.com/qwish/backend/internal/db"
+	"github.com/qwish/backend/internal/domain/activity"
 	"github.com/qwish/backend/internal/domain/admin"
 	"github.com/qwish/backend/internal/domain/analytics"
 	"github.com/qwish/backend/internal/domain/attempt"
@@ -26,6 +27,7 @@ import (
 	"github.com/qwish/backend/internal/domain/featureonboarding"
 	"github.com/qwish/backend/internal/domain/institution"
 	"github.com/qwish/backend/internal/domain/leaderboard"
+	"github.com/qwish/backend/internal/domain/leadership"
 	"github.com/qwish/backend/internal/domain/learning"
 	"github.com/qwish/backend/internal/domain/metrics"
 	"github.com/qwish/backend/internal/domain/notification"
@@ -34,6 +36,7 @@ import (
 	"github.com/qwish/backend/internal/domain/onboardingsession"
 	"github.com/qwish/backend/internal/domain/parent"
 	"github.com/qwish/backend/internal/domain/points"
+	"github.com/qwish/backend/internal/domain/portfolio"
 	"github.com/qwish/backend/internal/domain/push"
 	"github.com/qwish/backend/internal/domain/quiz"
 	"github.com/qwish/backend/internal/domain/recruiter"
@@ -124,6 +127,9 @@ func main() {
 	offlineH := offline.NewHandler(offlineSvc)
 	studyGroupH := studygroup.NewHandler(studyGroupSvc)
 	surveyH := survey.NewHandler(pool)
+	activityH := activity.NewHandler(pool, notifSvc)
+	leadershipH := leadership.NewHandler(pool)
+	portfolioH := portfolio.NewHandler(pool, notifSvc)
 
 	enrollmentStudentH := enrollment.NewStudentHandler(enrollmentSvc)
 	enrollmentInstH := enrollment.NewInstitutionHandler(enrollmentSvc, pool)
@@ -509,6 +515,9 @@ func main() {
 				r.Post("/users/me/profile-entries", profileEntryH.Create)
 				r.Patch("/users/me/profile-entries/{entryId}", profileEntryH.Update)
 				r.Delete("/users/me/profile-entries/{entryId}", profileEntryH.Delete)
+				r.Post("/users/me/profile-entries/{entryId}/submit", profileEntryH.Submit)
+				r.Get("/users/me/profile-entries/{entryId}/reviews", profileEntryH.Reviews)
+				r.Put("/users/me/profile-entries/{entryId}/pin", profileEntryH.Pin)
 				r.Patch("/users/me/domain", userH.UpdateMyDomain)
 				r.Get("/users/me/recommendations", userH.GetMyRecommendations)
 				r.With(mw.RequireUserRecord()).Get("/users/me/content", userH.GetMyAppContent)
@@ -534,6 +543,12 @@ func main() {
 				r.Get("/users/me/learning-summary", learningH.StudentSummary)
 				r.Get("/users/me/assignments", learningH.StudentAssignments)
 				r.With(mw.RequireRole("student")).Get("/users/me/curricula", learningH.StudentCurricula)
+
+				// Teacher forms and polls — student side.
+				r.Group(func(r chi.Router) {
+					r.Use(mw.RequireRole("student"))
+					activityH.StudentRoutes(r)
+				})
 
 				// Offline mode: prefetch practice pack + sync offline results
 				r.Get("/offline/pack", offlineH.GetPack)
@@ -637,6 +652,10 @@ func main() {
 					r.Get("/assignments/{assignmentId}/recipients", learningH.ListRecipients)
 					r.Patch("/assignments/{assignmentId}/recipients", learningH.UpdateRecipients)
 					r.Post("/assignments/{assignmentId}/remind", learningH.RemindRecipients)
+					// Forms and polls (plans/teacher-forms-events-and-polls.md).
+					activityH.OrganiserRoutes(r)
+					// Full student profile + portfolio review (plans/student-portfolio-and-achievements.md).
+					portfolioH.TeacherRoutes(r)
 					r.Get("/support-reviews", teacherH.SupportReviews)
 					r.Get("/students/{userId}/attempts/{attemptId}", teacherH.StudentAttempt)
 					r.Post("/students/{userId}/parent-summaries", teacherH.CreateParentSummary(cfg.TeacherURL))
@@ -701,10 +720,21 @@ func main() {
 					r.Post("/presign", uploadH.PresignUpload)
 				})
 
+				// ---- Leadership (Director, Principal, Vice Principal, Dean, HOD) ----
+				// Scope comes from staff_role_assignments on every request.
+				r.Route("/leadership", func(r chi.Router) {
+					r.Use(mw.RequireRole("teacher", "institution_admin"))
+					leadershipH.Routes(r)
+				})
+
 				// ---- Institution Admin routes ----
 				r.Route("/institution", func(r chi.Router) {
 					r.Use(mw.RequireRole("institution_admin"))
 					curriculumH.InstitutionRoutes(r)
+					activityH.OrganiserRoutes(r)
+					// Departments and leadership role assignments.
+					leadershipH.AdminRoutes(r)
+					portfolioH.InstitutionRoutes(r)
 					r.Get("/overview", institutionH.Overview)
 					r.Get("/learning-summary", learningH.InstitutionSummary)
 					r.Get("/learning-summary/scoped", learningH.InstitutionScopedSummary)

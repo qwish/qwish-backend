@@ -1019,7 +1019,8 @@ func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		           JOIN curriculum_versions v ON v.id=cc.version_id JOIN curricula c ON c.id=v.curriculum_id
 		           JOIN academic_years y ON y.id=cc.academic_year_id
 		          WHERE cc.group_id=g.id AND cc.ended_at IS NULL AND CURRENT_DATE BETWEEN y.starts_on AND y.ends_on
-		          ORDER BY cc.assigned_at DESC LIMIT 1)
+		          ORDER BY cc.assigned_at DESC LIMIT 1),
+		        g.department_id::text
 		   FROM groups g WHERE g.institution_id=$1 ORDER BY g.name`, instID)
 	if err != nil {
 		middleware.InternalError(w)
@@ -1038,12 +1039,13 @@ func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		TeacherNames    []string               `json:"teacher_names"`
 		AverageScore30d *float64               `json:"average_score_30d"`
 		CurrentCurric   map[string]interface{} `json:"current_curriculum"`
+		DepartmentID    *string                `json:"department_id"`
 	}
 	var groups []groupRow
 	for rows.Next() {
 		var g groupRow
 		rows.Scan(&g.ID, &g.Name, &g.Description, &g.InviteCode, &g.ArchivedAt, &g.CreatedAt,
-			&g.StudentCount, &g.TeacherCount, &g.TeacherNames, &g.AverageScore30d, &g.CurrentCurric)
+			&g.StudentCount, &g.TeacherCount, &g.TeacherNames, &g.AverageScore30d, &g.CurrentCurric, &g.DepartmentID)
 		groups = append(groups, g)
 	}
 	if groups == nil {

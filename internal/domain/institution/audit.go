@@ -25,6 +25,10 @@ var auditActionGroups = map[string][]string{
 		"assign_class_curriculum", "end_class_curriculum", "promote_students", "revert_promotion",
 		"review_edit_request",
 	},
+	"access": {
+		"create_department", "update_department", "archive_department", "set_group_department",
+		"grant_staff_role", "revoke_staff_role",
+	},
 	"settings": {"update_settings", "update_point_rules", "request_referral_code_reset", "reset_referral_codes"},
 }
 
@@ -36,6 +40,7 @@ const auditTargetLabel = `CASE al.target_type
 	WHEN 'user' THEN (SELECT COALESCE(NULLIF(u.display_name,''), u.full_name) FROM users u WHERE u.id=al.target_id)
 	WHEN 'enrollment' THEN (SELECT COALESCE(NULLIF(u.display_name,''), e.full_name) FROM enrollments e LEFT JOIN users u ON u.id=e.user_id WHERE e.id=al.target_id)
 	WHEN 'group' THEN (SELECT g.name FROM groups g WHERE g.id=al.target_id)
+	WHEN 'department' THEN (SELECT d.name FROM departments d WHERE d.id=al.target_id)
 	WHEN 'quiz' THEN (SELECT q.title FROM quizzes q WHERE q.id=al.target_id)
 	WHEN 'institution' THEN (SELECT i.name FROM institutions i WHERE i.id=al.target_id)
 	WHEN 'curriculum' THEN COALESCE(

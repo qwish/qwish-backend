@@ -261,6 +261,11 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 
 	uid := middleware.GetSupabaseUID(r)
 	email := middleware.GetEmail(r)
+	if IsDisposableEmail(email) {
+		middleware.Error(w, http.StatusUnprocessableEntity, "DISPOSABLE_EMAIL",
+			"temporary email addresses cannot be used to create an account")
+		return
+	}
 
 	var instID *string
 	role := "student"

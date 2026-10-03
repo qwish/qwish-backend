@@ -589,6 +589,8 @@ func main() {
 				r.With(mw.RequireRole("student")).Post("/students/invites/{inviteId}/accept", enrollmentStudentH.AcceptInvite)
 				r.Get("/users/me/enrollment", enrollmentStudentH.Mine)
 				r.With(mw.RequireRole("student")).Get("/users/me/enrollments", enrollmentStudentH.ListMine)
+				r.With(mw.RequireRole("student")).Get("/users/me/past-classes", enrollmentStudentH.PastClasses)
+				r.With(mw.RequireRole("student")).Get("/users/me/past-classes/{groupId}/concepts", enrollmentStudentH.PastClassConcepts)
 				r.With(mw.RequireRole("student")).Put("/users/me/active-institution", enrollmentStudentH.SetActive)
 				r.With(mw.RequireRole("student")).Post("/users/me/enrollments/{enrollmentId}/leave", enrollmentStudentH.Leave)
 				r.Get("/users/me/emails", userEmailH.List)

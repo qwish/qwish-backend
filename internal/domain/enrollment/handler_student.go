@@ -94,3 +94,25 @@ func (h *StudentHandler) Leave(w http.ResponseWriter, r *http.Request) {
 	}
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "left institute"})
 }
+
+// GET /api/v1/users/me/past-classes — finished stays in main classes, newest first.
+func (h *StudentHandler) PastClasses(w http.ResponseWriter, r *http.Request) {
+	out, err := h.svc.PastClasses(r.Context(), middleware.GetUserID(r))
+	if err != nil {
+		log.Printf("PastClasses: %v", err)
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, out)
+}
+
+// GET /api/v1/users/me/past-classes/{groupId}/concepts — weakest first.
+func (h *StudentHandler) PastClassConcepts(w http.ResponseWriter, r *http.Request) {
+	out, err := h.svc.PastClassConcepts(r.Context(), middleware.GetUserID(r), chi.URLParam(r, "groupId"))
+	if err != nil {
+		log.Printf("PastClassConcepts: %v", err)
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, out)
+}

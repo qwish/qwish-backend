@@ -42,6 +42,9 @@ type Enrollment struct {
 	// the institution's actual name and assigned class instead of local guesses.
 	InstitutionName *string `json:"institution_name,omitempty"`
 	ClassName       *string `json:"class_name,omitempty"`
+	// EndedClassName is the most recently ended main class, set only when the
+	// student has no live main class here ("9-A has ended, join your next").
+	EndedClassName *string `json:"ended_class_name,omitempty"`
 	// Active marks the institute the student's app is currently showing.
 	Active bool `json:"active"`
 }
@@ -107,12 +110,23 @@ func (s *Service) addProfileContext(ctx context.Context, e *Enrollment) error {
 		SELECT g.name
 		FROM groups g
 		JOIN group_students gs ON gs.group_id=g.id
-		WHERE gs.user_id=$1 AND g.institution_id=$2 AND g.archived_at IS NULL
+		WHERE gs.user_id=$1 AND g.institution_id=$2 AND g.archived_at IS NULL AND g.kind='class'
 		ORDER BY gs.joined_at DESC, g.name ASC
 		LIMIT 1`, *e.UserID, e.InstitutionID,
 	).Scan(&className)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
+		var ended string
+		err = s.db.QueryRow(ctx, `SELECT g.name FROM group_students gs JOIN groups g ON g.id=gs.group_id
+			WHERE gs.user_id=$1 AND g.institution_id=$2 AND g.kind='class' AND g.archived_at IS NOT NULL
+			ORDER BY g.archived_at DESC LIMIT 1`, *e.UserID, e.InstitutionID).Scan(&ended)
+		if err == nil {
+			e.EndedClassName = &ended
+			return nil
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
 	}
 	if err != nil {
 		return err

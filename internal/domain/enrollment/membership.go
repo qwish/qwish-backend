@@ -20,8 +20,8 @@ func (s *Service) ListMine(ctx context.Context, userID string) ([]Enrollment, er
 	out := []Enrollment{}
 	for rows.Next() {
 		var e Enrollment
-		if err := rows.Scan(&e.ID, &e.InstitutionID, &e.UserID, &e.FullName, &e.Email, &e.RollNumber, &e.Grade,
-			&e.Section, &e.AdmissionDate, &e.ClaimCode, &e.Status, &e.JoinedAt, &e.EndedAt, &e.Active); err != nil {
+		if err := rows.Scan(&e.ID, &e.InstitutionID, &e.UserID, &e.FullName, &e.Email, &e.Grade,
+			&e.Section, &e.Status, &e.JoinedAt, &e.EndedAt, &e.JoinRoute, &e.Active); err != nil {
 			rows.Close()
 			return nil, err
 		}

@@ -67,7 +67,12 @@ func TestPromoteAdvancesMatchingEnrollmentsOnly(t *testing.T) {
 	svc := NewService(pool)
 	ctx := context.Background()
 
-	// Fixture: StudentEnrollmentID is grade 9 section A; the unclaimed row is 9/B.
+	// Fixture: StudentEnrollmentID is grade 9 section A; another student is 9/B.
+	var sectionB string
+	if err := pool.QueryRow(ctx, `INSERT INTO enrollments (institution_id, user_id, full_name, grade, section, status, joined_at)
+		VALUES ($1,$2,'solo','9','B','active',now()) RETURNING id`, f.InstitutionID, f.SoloStudentID).Scan(&sectionB); err != nil {
+		t.Fatal(err)
+	}
 	n, err := svc.Promote(ctx, f.InstitutionID, PromoteFilter{
 		FromGrade: "9", FromSection: "A", ToGrade: "10", ToSection: "A",
 	})
@@ -83,7 +88,7 @@ func TestPromoteAdvancesMatchingEnrollmentsOnly(t *testing.T) {
 	if grade != "10" {
 		t.Fatalf("grade = %q, want 10", grade)
 	}
-	pool.QueryRow(ctx, `SELECT grade FROM enrollments WHERE id=$1`, f.UnclaimedEnrollmentID).Scan(&grade)
+	pool.QueryRow(ctx, `SELECT grade FROM enrollments WHERE id=$1`, sectionB).Scan(&grade)
 	if grade != "9" {
 		t.Fatalf("section B was promoted too: grade = %q, want 9", grade)
 	}

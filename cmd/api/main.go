@@ -781,11 +781,8 @@ func main() {
 					r.Get("/students/explain", institutionH.ExplainStudent)
 					r.Get("/action-centre", institutionH.ActionCentre)
 					r.Put("/action-centre/owner", institutionH.SetActionOwner)
-					r.Post("/students", enrollmentInstH.CreateStudent)
 					// Enrollment-addressed routes stay off /students/... so they
 					// cannot collide with the existing /students/{userId}/status.
-					r.Patch("/enrollments/{enrollmentId}", enrollmentInstH.UpdateStudent)
-					r.Post("/students/import", enrollmentInstH.ImportStudents)
 					r.Patch("/enrollments/{enrollmentId}/status", enrollmentInstH.SetStudentStatus)
 					r.Post("/enrollments/bulk-status", enrollmentInstH.BulkSetStatus)
 					r.Post("/enrollments/promote", enrollmentInstH.PromoteStudents)

@@ -5,8 +5,6 @@ package enrollment
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base32"
 	"errors"
 	"fmt"
 	"time"
@@ -21,35 +19,8 @@ var (
 	ErrClaimCodeUsed    = errors.New("claim code already used")
 	ErrEnrollmentExists = errors.New("student already holds a live enrollment")
 	ErrClassCodeInvalid = errors.New("class invite code invalid")
-	ErrRollNumberTaken  = errors.New("roll number already in use")
 	ErrNotFound         = errors.New("enrollment not found")
 )
-
-// RosterInput is the institution-owned half of a student record. Empty strings
-// mean "not supplied" and are stored as NULL.
-type RosterInput struct {
-	FullName      string
-	Email         string
-	RollNumber    string
-	Grade         string
-	Section       string
-	AdmissionDate string // YYYY-MM-DD
-	Phone         string
-	GuardianName  string
-	GuardianPhone string
-	GuardianEmail string
-	// SourceRow is the CSV line this came from (header is line 1), so verdicts
-	// point at the line the school can find, not the row's index after errors
-	// were dropped. Zero for rows not from a file.
-	SourceRow int
-}
-
-func nilIfEmpty(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
-}
 
 // isUniqueViolation reports whether err is a Postgres 23505 on the given index.
 func isUniqueViolation(err error, index string) bool {
@@ -63,12 +34,10 @@ type Enrollment struct {
 	UserID        *string    `json:"user_id,omitempty"`
 	FullName      string     `json:"full_name"`
 	Email         *string    `json:"email,omitempty"`
-	RollNumber    *string    `json:"roll_number,omitempty"`
 	Grade         *string    `json:"grade,omitempty"`
 	Section       *string    `json:"section,omitempty"`
-	AdmissionDate *time.Time `json:"admission_date,omitempty"`
-	ClaimCode     *string    `json:"claim_code,omitempty"`
 	Status        string     `json:"status"`
+	JoinRoute     *string    `json:"join_route,omitempty"`
 	JoinedAt      *time.Time `json:"joined_at,omitempty"`
 	EndedAt       *time.Time `json:"ended_at,omitempty"`
 	// Presentation context is read-only. These values let student surfaces use
@@ -79,14 +48,12 @@ type Enrollment struct {
 	Active bool `json:"active"`
 }
 
-const selectCols = `id, institution_id, user_id, full_name, email, roll_number,
-	grade, section, admission_date, claim_code, status, joined_at, ended_at`
+const selectCols = `id, institution_id, user_id, full_name, email, grade, section, status, joined_at, ended_at, join_route`
 
 func scanEnrollment(row pgx.Row) (Enrollment, error) {
 	var e Enrollment
 	err := row.Scan(&e.ID, &e.InstitutionID, &e.UserID, &e.FullName, &e.Email,
-		&e.RollNumber, &e.Grade, &e.Section, &e.AdmissionDate, &e.ClaimCode,
-		&e.Status, &e.JoinedAt, &e.EndedAt)
+		&e.Grade, &e.Section, &e.Status, &e.JoinedAt, &e.EndedAt, &e.JoinRoute)
 	return e, err
 }
 
@@ -101,17 +68,6 @@ func (s *Service) SetMailer(fn func(ctx context.Context, to, subject, html strin
 }
 
 func NewService(db *pgxpool.Pool) *Service { return &Service{db: db} }
-
-// GenerateClaimCode returns a 10-character code from an unambiguous alphabet.
-// Codes are read off paper and typed by hand, so base32 (no 0/1/8/I/O) beats hex.
-func GenerateClaimCode() (string, error) {
-	b := make([]byte, 7)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	enc := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b)
-	return enc[:10], nil
-}
 
 // ActiveByUser returns the live enrollment at the student's active institute,
 // or nil when they have none. A student with no institution is a normal user, not an error case.
@@ -178,51 +134,6 @@ func (s *Service) JoinByClassCode(ctx context.Context, userID, code string) (Enr
 		return Enrollment{}, err
 	}
 	return *r.Enrollment, nil
-}
-
-func (s *Service) CreateRosterEntry(ctx context.Context, instID string, in RosterInput) (Enrollment, error) {
-	code, err := GenerateClaimCode()
-	if err != nil {
-		return Enrollment{}, err
-	}
-
-	e, err := scanEnrollment(s.db.QueryRow(ctx,
-		`INSERT INTO enrollments
-			(institution_id, full_name, email, roll_number, grade, section, admission_date,
-			 import_phone, import_guardian_name, import_guardian_phone, import_guardian_email,
-			 claim_code, status)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending_claim')
-		 RETURNING `+selectCols,
-		instID, in.FullName, nilIfEmpty(in.Email), nilIfEmpty(in.RollNumber),
-		nilIfEmpty(in.Grade), nilIfEmpty(in.Section), nilIfEmpty(in.AdmissionDate),
-		nilIfEmpty(in.Phone), nilIfEmpty(in.GuardianName), nilIfEmpty(in.GuardianPhone),
-		nilIfEmpty(in.GuardianEmail), code))
-	if isUniqueViolation(err, "enrollments_roll_unique") {
-		return Enrollment{}, ErrRollNumberTaken
-	}
-	return e, err
-}
-
-// UpdateRosterEntry writes the institution-owned fields. The institution_id
-// predicate is the authorization check.
-func (s *Service) UpdateRosterEntry(ctx context.Context, instID, enrollmentID string, in RosterInput) error {
-	tag, err := s.db.Exec(ctx,
-		`UPDATE enrollments
-		    SET full_name=$1, email=$2, roll_number=$3, grade=$4, section=$5,
-		        admission_date=$6, updated_at=now()
-		  WHERE id=$7 AND institution_id=$8`,
-		in.FullName, nilIfEmpty(in.Email), nilIfEmpty(in.RollNumber), nilIfEmpty(in.Grade),
-		nilIfEmpty(in.Section), nilIfEmpty(in.AdmissionDate), enrollmentID, instID)
-	if isUniqueViolation(err, "enrollments_roll_unique") {
-		return ErrRollNumberTaken
-	}
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
 }
 
 // terminalStatuses end the relationship: the enrollment is closed and the

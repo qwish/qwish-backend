@@ -114,6 +114,9 @@ func main() {
 	})
 	institutionH := institution.NewHandler(pool, notifSvc, enrollmentSvc, cfg.AppURL, cfg.TeacherURL)
 	teacherH := teacher.NewHandler(pool)
+	teacherH.SetClassEndedNotifier(func(ctx context.Context, classID string) {
+		institution.NotifyClassEnded(ctx, pool, notifSvc, classID)
+	})
 	curriculumH := curriculum.NewHandler(curriculum.NewService(pool))
 	learningH := learning.NewHandler(pool, notifSvc)
 	featureOnboardingH := featureonboarding.NewHandler(pool)
@@ -721,6 +724,8 @@ func main() {
 					// Corrections to institution-owned fields are proposals,
 					// not writes; an admin decides them.
 					r.Get("/classes/{classId}", teacherH.GetClass)
+					r.Post("/classes/{classId}/end", teacherH.EndClass)
+					r.Post("/classes/{classId}/reopen", teacherH.ReopenClass)
 					r.Get("/reports/quiz-analytics", teacherH.QuizAnalyticsReport)
 					r.Get("/reports/student-performance", teacherH.StudentPerformanceReport)
 					r.Get("/topic-requests", topicH.TeacherList)
@@ -799,6 +804,7 @@ func main() {
 					r.Delete("/invites/{inviteId}", enrollmentInstH.RevokeInvite)
 					r.Patch("/groups/{groupId}", institutionH.UpdateGroup)
 					r.Delete("/groups/{groupId}", institutionH.ArchiveGroup)
+					r.Post("/groups/{groupId}/reopen", institutionH.ReopenGroup)
 					r.Post("/groups/{groupId}/students", institutionH.AddStudentToGroup)
 					r.Delete("/groups/{groupId}/students/{userId}", institutionH.RemoveStudentFromGroup)
 					r.Post("/groups/{groupId}/teachers", institutionH.AddTeacherToGroup)

@@ -986,7 +986,7 @@ func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		           JOIN academic_years y ON y.id=cc.academic_year_id
 		          WHERE cc.group_id=g.id AND cc.ended_at IS NULL AND CURRENT_DATE BETWEEN y.starts_on AND y.ends_on
 		          ORDER BY cc.assigned_at DESC LIMIT 1),
-		        g.department_id::text
+		        g.department_id::text, g.grade, g.section, g.kind, g.joining_enabled
 		   FROM groups g WHERE g.institution_id=$1 ORDER BY g.name`, instID)
 	if err != nil {
 		middleware.InternalError(w)
@@ -1006,12 +1006,17 @@ func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		AverageScore30d *float64               `json:"average_score_30d"`
 		CurrentCurric   map[string]interface{} `json:"current_curriculum"`
 		DepartmentID    *string                `json:"department_id"`
+		Grade           *string                `json:"grade"`
+		Section         *string                `json:"section"`
+		Kind            string                 `json:"kind"`
+		JoiningEnabled  bool                   `json:"joining_enabled"`
 	}
 	var groups []groupRow
 	for rows.Next() {
 		var g groupRow
 		rows.Scan(&g.ID, &g.Name, &g.Description, &g.InviteCode, &g.ArchivedAt, &g.CreatedAt,
-			&g.StudentCount, &g.TeacherCount, &g.TeacherNames, &g.AverageScore30d, &g.CurrentCurric, &g.DepartmentID)
+			&g.StudentCount, &g.TeacherCount, &g.TeacherNames, &g.AverageScore30d, &g.CurrentCurric, &g.DepartmentID,
+			&g.Grade, &g.Section, &g.Kind, &g.JoiningEnabled)
 		groups = append(groups, g)
 	}
 	if groups == nil {
@@ -1026,25 +1031,30 @@ func (h *Handler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name        string  `json:"name"`
 		Description *string `json:"description"`
+		Grade       *string `json:"grade"`
+		Section     *string `json:"section"`
 	}
 	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 		middleware.BadRequest(w, "name is required")
 		return
 	}
 	inviteCode := generateCode(8)
-	var id, name, code string
+	var id, name, code, kind string
+	var grade, section *string
 	var createdAt time.Time
 	if err := h.db.QueryRow(r.Context(),
-		`INSERT INTO groups (institution_id, name, description, invite_code) VALUES ($1,$2,$3,$4)
-		 RETURNING id, name, invite_code, created_at`,
-		instID, req.Name, req.Description, inviteCode,
-	).Scan(&id, &name, &code, &createdAt); err != nil {
+		`INSERT INTO groups (institution_id, name, description, invite_code, grade, section)
+		 VALUES ($1,$2,$3,$4,NULLIF(btrim($5),''),NULLIF(btrim($6),''))
+		 RETURNING id, name, invite_code, created_at, grade, section, kind`,
+		instID, req.Name, req.Description, inviteCode, req.Grade, req.Section,
+	).Scan(&id, &name, &code, &createdAt, &grade, &section, &kind); err != nil {
 		middleware.InternalError(w)
 		return
 	}
 	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), instID, "create_group", "group", id, req.Name)
 	middleware.JSON(w, http.StatusCreated, map[string]interface{}{
 		"id": id, "name": name, "invite_code": code, "created_at": createdAt,
+		"grade": grade, "section": section, "kind": kind,
 	})
 }
 
@@ -1055,10 +1065,13 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 
 	var name, inviteCode string
 	var joiningEnabled bool
+	var groupGrade, groupSection *string
+	var groupKind string
+	var archivedAt *time.Time
 	var description *string
 	if err := h.db.QueryRow(r.Context(),
-		`SELECT name, description, invite_code, joining_enabled FROM groups WHERE id=$1 AND institution_id=$2`,
-		groupID, instID).Scan(&name, &description, &inviteCode, &joiningEnabled); err != nil {
+		`SELECT name, description, invite_code, joining_enabled, grade, section, kind, archived_at FROM groups WHERE id=$1 AND institution_id=$2`,
+		groupID, instID).Scan(&name, &description, &inviteCode, &joiningEnabled, &groupGrade, &groupSection, &groupKind, &archivedAt); err != nil {
 		middleware.NotFound(w, "group not found")
 		return
 	}
@@ -1144,6 +1157,7 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"id": groupID, "name": name, "description": description, "invite_code": inviteCode, "joining_enabled": joiningEnabled,
+		"grade": groupGrade, "section": groupSection, "kind": groupKind, "archived_at": archivedAt,
 		"student_count": studentCount, "average_score": avgScore,
 		"students": students, "teachers": teachers,
 	})
@@ -1221,32 +1235,94 @@ func (h *Handler) RemoveTeacherFromGroup(w http.ResponseWriter, r *http.Request)
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "teacher removed from group"})
 }
 
-// PATCH /api/v1/institution/groups/:groupId
+// PATCH /api/v1/institution/groups/:groupId — omitted fields are unchanged;
+// an empty grade or section clears it.
 func (h *Handler) UpdateGroup(w http.ResponseWriter, r *http.Request) {
-	groupID := chi.URLParam(r, "groupId")
 	var req struct {
-		Name        string  `json:"name"`
+		Name        *string `json:"name"`
 		Description *string `json:"description"`
+		Grade       *string `json:"grade"`
+		Section     *string `json:"section"`
 	}
-	jsonx.NewDecoder(r.Body).Decode(&req)
-	if _, err := h.db.Exec(r.Context(),
-		`UPDATE groups SET name=$1, description=$2 WHERE id=$3`, req.Name, req.Description, groupID); err != nil {
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.BadRequest(w, "invalid request body")
+		return
+	}
+	if req.Name != nil && strings.TrimSpace(*req.Name) == "" {
+		middleware.BadRequest(w, "name cannot be empty")
+		return
+	}
+	groupID, instID := chi.URLParam(r, "groupId"), middleware.GetInstitutionID(r)
+	tag, err := h.db.Exec(r.Context(), `UPDATE groups SET
+		name=COALESCE($1,name), description=COALESCE($2,description),
+		grade=CASE WHEN $3::text IS NULL THEN grade ELSE NULLIF(btrim($3),'') END,
+		section=CASE WHEN $4::text IS NULL THEN section ELSE NULLIF(btrim($4),'') END
+		WHERE id=$5 AND institution_id=$6`, req.Name, req.Description, req.Grade, req.Section, groupID, instID)
+	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
-	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), "update_group", "group", groupID, req.Name)
+	if tag.RowsAffected() == 0 {
+		middleware.NotFound(w, "group")
+		return
+	}
+	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), instID, "update_group", "group", groupID, "")
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "group updated"})
 }
 
-// DELETE /api/v1/institution/groups/:groupId  (archive)
+// DELETE /api/v1/institution/groups/:groupId — ends the class. Members stay
+// listed so they keep it as a past class and come back on reopen.
 func (h *Handler) ArchiveGroup(w http.ResponseWriter, r *http.Request) {
-	groupID := chi.URLParam(r, "groupId")
-	if _, err := h.db.Exec(r.Context(), `UPDATE groups SET archived_at=now() WHERE id=$1`, groupID); err != nil {
+	groupID, instID := chi.URLParam(r, "groupId"), middleware.GetInstitutionID(r)
+	tag, err := h.db.Exec(r.Context(), `UPDATE groups SET archived_at=now() WHERE id=$1 AND institution_id=$2 AND archived_at IS NULL`, groupID, instID)
+	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
-	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), "archive_group", "group", groupID, "")
-	middleware.JSON(w, http.StatusOK, map[string]string{"message": "group archived"})
+	if tag.RowsAffected() == 0 {
+		middleware.NotFound(w, "group")
+		return
+	}
+	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), instID, "archive_group", "group", groupID, "")
+	NotifyClassEnded(r.Context(), h.db, h.notif, groupID)
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "class ended"})
+}
+
+// POST /api/v1/institution/groups/:groupId/reopen
+func (h *Handler) ReopenGroup(w http.ResponseWriter, r *http.Request) {
+	groupID, instID := chi.URLParam(r, "groupId"), middleware.GetInstitutionID(r)
+	code, errCode := qdb.ReopenClass(r.Context(), h.db, groupID, "institution_id=$2", instID)
+	if code != http.StatusOK {
+		middleware.Error(w, code, errCode, reopenMessages[errCode])
+		return
+	}
+	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), instID, "reopen_group", "group", groupID, "")
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "class reopened"})
+}
+
+var reopenMessages = map[string]string{
+	"NOT_FOUND":            "Class not found.",
+	"CLASS_REOPEN_EXPIRED": "This class ended more than 90 days ago. Create a new class instead.",
+	"INTERNAL":             "Something went wrong.",
+}
+
+// NotifyClassEnded tells each member their class has ended. Best-effort.
+func NotifyClassEnded(ctx context.Context, pool *pgxpool.Pool, notif *notification.Service, groupID string) {
+	if notif == nil {
+		return
+	}
+	rows, err := pool.Query(ctx, `SELECT gs.user_id::text, g.name FROM group_students gs JOIN groups g ON g.id=gs.group_id WHERE gs.group_id=$1`, groupID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var uid, name string
+		if rows.Scan(&uid, &name) == nil {
+			notif.Emit(ctx, uid, "system", name+" has ended", "Join your next class with the code your teacher shares.",
+				notification.WithIcon("school"), notification.WithReference("class-ended:"+groupID))
+		}
+	}
 }
 
 // GET /api/v1/institution/settings

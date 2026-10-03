@@ -1,6 +1,7 @@
 package teacher
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -22,6 +23,13 @@ func (h *Handler) canSeeStudent(r *http.Request, teacherID, institutionID, stude
 
 type Handler struct {
 	db *pgxpool.Pool
+	// onClassEnded notifies a class's members; nil in tests.
+	onClassEnded func(ctx context.Context, classID string)
+}
+
+// SetClassEndedNotifier wires the "your class has ended" notification.
+func (h *Handler) SetClassEndedNotifier(fn func(ctx context.Context, classID string)) {
+	h.onClassEnded = fn
 }
 
 func NewHandler(db *pgxpool.Pool) *Handler {
@@ -492,11 +500,14 @@ func (h *Handler) UpdateStudentSupport(w http.ResponseWriter, r *http.Request) {
 
 // ─── Classes (read-only group view) ──────────────────────────────────────────
 
-// GET /api/v1/teacher/classes
+// GET /api/v1/teacher/classes[?include_ended=1] — ended classes are listed
+// only on request, so class pickers keep showing live classes.
 func (h *Handler) ListClasses(w http.ResponseWriter, r *http.Request) {
 	teacherID := middleware.GetUserID(r)
+	includeEnded := r.URL.Query().Get("include_ended") == "1"
 	rows, err := h.db.Query(r.Context(), `
 		SELECT g.id, g.name, g.description, g.invite_code, g.archived_at, g.created_at,
+		       g.grade, g.section, g.kind, g.joining_enabled,
 		       (SELECT COUNT(DISTINCT gs.user_id)
 		          FROM group_students gs
 		          JOIN users u ON u.id=gs.user_id
@@ -507,8 +518,8 @@ func (h *Handler) ListClasses(w http.ResponseWriter, r *http.Request) {
 		         WHERE gs.group_id=g.id) AS student_count
 		FROM groups g
 		JOIN group_teachers gt ON gt.group_id=g.id
-		WHERE gt.user_id=$1 AND g.archived_at IS NULL
-		ORDER BY g.name`, teacherID)
+		WHERE gt.user_id=$1 AND ($2 OR g.archived_at IS NULL)
+		ORDER BY g.archived_at IS NOT NULL, g.name`, teacherID, includeEnded)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -521,12 +532,17 @@ func (h *Handler) ListClasses(w http.ResponseWriter, r *http.Request) {
 		InviteCode   string     `json:"invite_code"`
 		ArchivedAt   *time.Time `json:"archived_at,omitempty"`
 		CreatedAt    time.Time  `json:"created_at"`
+		Grade        *string    `json:"grade"`
+		Section      *string    `json:"section"`
+		Kind         string     `json:"kind"`
+		Joining      bool       `json:"joining_enabled"`
 		StudentCount int        `json:"student_count"`
 	}
 	classes := []classRow{}
 	for rows.Next() {
 		var c classRow
-		rows.Scan(&c.ID, &c.Name, &c.Description, &c.InviteCode, &c.ArchivedAt, &c.CreatedAt, &c.StudentCount)
+		rows.Scan(&c.ID, &c.Name, &c.Description, &c.InviteCode, &c.ArchivedAt, &c.CreatedAt,
+			&c.Grade, &c.Section, &c.Kind, &c.Joining, &c.StudentCount)
 		classes = append(classes, c)
 	}
 	middleware.JSON(w, http.StatusOK, classes)
@@ -553,9 +569,13 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 	var studentCount int
 	var avgScore float64
 	var joiningEnabled bool
+	var classGrade, classSection *string
+	var classKind string
+	var archivedAt *time.Time
 	// Class details + roster size + average, in one round-trip.
 	h.db.QueryRow(r.Context(), `SELECT
 		g.name, g.description, g.invite_code, g.created_at, g.joining_enabled,
+		g.grade, g.section, g.kind, g.archived_at,
 		(SELECT COUNT(DISTINCT gs.user_id)
 		   FROM group_students gs
 		   JOIN users u ON u.id=gs.user_id
@@ -569,7 +589,8 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 		 JOIN quizzes q ON q.id=qa.quiz_id AND (q.institution_id=g.institution_id OR q.visibility='public')
 		 WHERE gs.group_id=$1 AND qa.status='completed')
 		FROM groups g WHERE g.id=$1`, classID,
-	).Scan(&name, &description, &inviteCode, &createdAt, &joiningEnabled, &studentCount, &avgScore)
+	).Scan(&name, &description, &inviteCode, &createdAt, &joiningEnabled,
+		&classGrade, &classSection, &classKind, &archivedAt, &studentCount, &avgScore)
 
 	sRows, _ := h.db.Query(r.Context(), `
 		SELECT u.id, e.id, u.display_name, u.email, e.grade, e.section,
@@ -616,6 +637,10 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 		"description":     description,
 		"invite_code":     inviteCode,
 		"joining_enabled": joiningEnabled,
+		"grade":           classGrade,
+		"section":         classSection,
+		"kind":            classKind,
+		"archived_at":     archivedAt,
 		"created_at":      createdAt,
 		"student_count":   studentCount,
 		"average_score":   avgScore,

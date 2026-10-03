@@ -31,6 +31,13 @@ SELECT e.id, e.user_id::text, i.name, e.end_warned_at,
 // EndInactive warns students 7 days before, and ends enrollments that have had
 // no live class for 90 days. Callers send the notifications.
 func (s *Service) EndInactive(ctx context.Context, now time.Time) (warn, ended []EndNotice, err error) {
+	// Anyone back in a live class (by code, teacher or admin) drops a stale
+	// warning, so a later classless stretch is warned again.
+	if _, err = s.db.Exec(ctx, `UPDATE enrollments e SET end_warned_at=NULL
+		WHERE e.end_warned_at IS NOT NULL AND EXISTS (SELECT 1 FROM group_students gs JOIN groups g ON g.id=gs.group_id
+		  WHERE gs.user_id=e.user_id AND g.institution_id=e.institution_id AND g.archived_at IS NULL)`); err != nil {
+		return nil, nil, err
+	}
 	rows, err := s.db.Query(ctx, classlessSQL)
 	if err != nil {
 		return nil, nil, err
@@ -52,8 +59,11 @@ func (s *Service) EndInactive(ctx context.Context, now time.Time) (warn, ended [
 	rows.Close()
 	for _, r := range all {
 		endsOn := r.since.Add(autoEndAfter)
+		// Never end without a warning at least 7 days old: an enrollment first
+		// noticed late (e.g. on deploy day) is warned now and ended later.
+		warnedLongEnough := r.warned != nil && !now.Before(r.warned.Add(warnBefore))
 		switch {
-		case !now.Before(endsOn):
+		case !now.Before(endsOn) && warnedLongEnough:
 			tag, err := s.db.Exec(ctx, `UPDATE enrollments SET status='left', ended_by='system', ended_at=$2, updated_at=now()
 				WHERE id=$1 AND status IN ('active','suspended')`, r.id, now)
 			if err != nil {
@@ -65,6 +75,9 @@ func (s *Service) EndInactive(ctx context.Context, now time.Time) (warn, ended [
 		case !now.Before(endsOn.Add(-warnBefore)) && r.warned == nil:
 			if _, err := s.db.Exec(ctx, `UPDATE enrollments SET end_warned_at=$2 WHERE id=$1`, r.id, now); err != nil {
 				return warn, ended, err
+			}
+			if endsOn.Before(now.Add(warnBefore)) {
+				endsOn = now.Add(warnBefore) // the grace period after a late warning
 			}
 			warn = append(warn, EndNotice{r.user, r.inst, endsOn})
 		}

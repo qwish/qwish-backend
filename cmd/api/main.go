@@ -348,6 +348,24 @@ func main() {
 					}
 					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
 				})
+				r.Post("/end-inactive-enrollments", func(w http.ResponseWriter, r *http.Request) {
+					warn, ended, err := enrollmentSvc.EndInactive(r.Context(), time.Now())
+					if err != nil {
+						mw.InternalError(w)
+						return
+					}
+					for _, n := range warn {
+						notifSvc.Emit(r.Context(), n.UserID, "system", "Join a class to stay at "+n.InstitutionName,
+							"Your enrollment ends on "+n.EndsOn.Format("2 Jan")+" unless you join a class.",
+							notification.WithIcon("school"), notification.WithReference("autoend-warn:"+n.UserID+":"+n.InstitutionName))
+					}
+					for _, n := range ended {
+						notifSvc.Emit(r.Context(), n.UserID, "system", "You left "+n.InstitutionName,
+							"You had no class there for 90 days. Your history is still in Past classes.",
+							notification.WithIcon("school"), notification.WithReference("autoend:"+n.UserID+":"+n.InstitutionName))
+					}
+					mw.JSON(w, http.StatusOK, map[string]int{"warned": len(warn), "ended": len(ended)})
+				})
 			})
 		}
 

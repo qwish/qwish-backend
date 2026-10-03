@@ -152,6 +152,7 @@ services:
       post recompute-question-difficulty;
       post purge-onboarding-sessions;
       post purge-attempt-behavior;
+      post end-inactive-enrollments;
       '
     envVars: *cronEnv
 

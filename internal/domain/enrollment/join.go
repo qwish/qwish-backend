@@ -154,7 +154,9 @@ func ensureEnrollment(ctx context.Context, tx pgx.Tx, userID string, p JoinPrevi
 		if e.Status == "suspended" {
 			return e, ErrJoinSuspended
 		}
-		return e, nil
+		// Joining a class cancels a pending auto-end warning.
+		_, err = tx.Exec(ctx, `UPDATE enrollments SET end_warned_at=NULL WHERE id=$1 AND end_warned_at IS NOT NULL`, e.ID)
+		return e, err
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return e, err

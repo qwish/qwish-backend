@@ -155,42 +155,15 @@ func (s *Service) addProfileContext(ctx context.Context, e *Enrollment) error {
 	return nil
 }
 
-// Claim binds a pending_claim roster row to an authenticated student.
-//
-// Import-supplied personal values are copied onto the users row only where the
-// student left the field blank — the student's own entry always wins.
-func (s *Service) Claim(ctx context.Context, userID, code string) (Enrollment, error) {
-	e, err := s.legacyJoin(ctx, userID, code, "claim")
-	if errors.Is(err, ErrJoinCodeInvalid) {
-		err = ErrClaimCodeInvalid
-	}
-	return e, err
-}
-
-// JoinByClassCode is the self-signup path: a student with no institution joins
-// a class directly. Academic fields stay blank for an admin to fill in later.
-func (s *Service) JoinByClassCode(ctx context.Context, userID, inviteCode string) (Enrollment, error) {
-	e, err := s.legacyJoin(ctx, userID, inviteCode, "class")
-	if errors.Is(err, ErrJoinCodeInvalid) {
-		err = ErrClassCodeInvalid
-	}
-	return e, err
-}
-
-func (s *Service) legacyJoin(ctx context.Context, user, code, kind string) (Enrollment, error) {
-	p, err := s.PreviewJoin(ctx, user, code)
+// JoinByClassCode is the legacy one-shot join used by /students/join-class.
+func (s *Service) JoinByClassCode(ctx context.Context, userID, code string) (Enrollment, error) {
+	p, err := s.PreviewJoin(ctx, userID, code)
 	if err != nil {
 		return Enrollment{}, err
 	}
-	if p.Kind != kind {
-		return Enrollment{}, ErrJoinCodeInvalid
-	}
-	r, err := s.ConfirmJoin(ctx, user, code, p.Kind, p.TargetID)
+	r, err := s.ConfirmJoin(ctx, userID, code, p.TargetID)
 	if err != nil {
 		return Enrollment{}, err
-	}
-	if r.Status != "joined" {
-		return Enrollment{}, ErrAdmissionPending
 	}
 	return *r.Enrollment, nil
 }

@@ -12,24 +12,6 @@ type StudentHandler struct{ svc *Service }
 
 func NewStudentHandler(svc *Service) *StudentHandler { return &StudentHandler{svc: svc} }
 
-// POST /api/v1/students/claim  {claim_code}
-func (h *StudentHandler) Claim(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		ClaimCode string `json:"claim_code"`
-	}
-	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.ClaimCode == "" {
-		middleware.BadRequest(w, "claim_code is required")
-		return
-	}
-
-	e, err := h.svc.Claim(r.Context(), middleware.GetUserID(r), req.ClaimCode)
-	if err != nil {
-		joinError(w, err)
-		return
-	}
-	middleware.JSON(w, http.StatusOK, e)
-}
-
 // POST /api/v1/students/join-class  {invite_code}
 func (h *StudentHandler) JoinClass(w http.ResponseWriter, r *http.Request) {
 	var req struct {

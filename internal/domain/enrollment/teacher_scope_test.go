@@ -24,9 +24,11 @@ func TestAddAndRemoveStudentInOwnClass(t *testing.T) {
 	svc := NewService(pool)
 	ctx := context.Background()
 
-	// Give the solo student an enrollment at this institution first.
-	if _, err := svc.Claim(ctx, f.SoloStudentID, f.ClaimCode); err != nil {
-		t.Fatalf("Claim: %v", err)
+	// Give the solo student an enrollment at this institution first, via a
+	// second open class (joining the fixture class itself would add them).
+	_, code := newClass(t, pool, f.InstitutionID, true)
+	if _, err := svc.JoinByClassCode(ctx, f.SoloStudentID, code); err != nil {
+		t.Fatalf("JoinByClassCode: %v", err)
 	}
 
 	if err := svc.AddStudentToClass(ctx, f.TeacherID, f.GroupID, f.SoloStudentID); err != nil {

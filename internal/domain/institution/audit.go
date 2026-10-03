@@ -17,7 +17,6 @@ var auditActionGroups = map[string][]string{
 		"suspend_teacher", "reactivate_teacher", "verify_teacher", "remove_teacher", "invite_teacher",
 		"add_student_to_group", "remove_student_from_group", "add_teacher_to_group", "remove_teacher_from_group",
 	},
-	"admissions": {"update_admission_policy", "admission_approve", "admission_decline"},
 	"academics": {
 		"create_group", "update_group", "archive_group",
 		"create_academic_year", "update_academic_year",
@@ -46,7 +45,6 @@ const auditTargetLabel = `CASE al.target_type
 	WHEN 'curriculum' THEN COALESCE(
 		(SELECT v.subject || ' · Grade ' || v.grade || ' · ' || v.label FROM curriculum_versions v WHERE v.id=al.target_id),
 		(SELECT y.name FROM academic_years y WHERE y.id=al.target_id))
-	WHEN 'admission' THEN (SELECT COALESCE(NULLIF(u.display_name,''), u.full_name) FROM admission_requests ar JOIN users u ON u.id=ar.user_id WHERE ar.id=al.target_id)
 	END`
 
 // auditChange is one field's before and after.

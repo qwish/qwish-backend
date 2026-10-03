@@ -303,7 +303,7 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if assignedRole == "student" {
-			middleware.Error(w, 409, "JOIN_FLOW_REQUIRED", "Create your account without a referral code, then open Join a class to review your invitation.")
+			middleware.Error(w, 409, "JOIN_FLOW_REQUIRED", "Create your account without a referral code, then join your class with its class code.")
 			return
 		}
 		instID = &id
@@ -347,14 +347,6 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 	if acceptedInviteID != "" {
 		if err := h.svc.MarkTeacherInviteAccepted(r.Context(), acceptedInviteID); err != nil {
 			log.Printf("CreateProfile: failed to mark teacher invite %s accepted: %v", acceptedInviteID, err)
-		}
-	}
-
-	// A referral-code signup is a real enrollment; without one the student
-	// carries an institution_id that no roster query would ever surface.
-	if instID != nil && role == "student" {
-		if _, err := h.svc.CreateStudentEnrollment(r.Context(), *instID, newUser.ID, req.FullName); err != nil {
-			log.Printf("CreateProfile: enrollment for %s: %v", newUser.ID, err)
 		}
 	}
 

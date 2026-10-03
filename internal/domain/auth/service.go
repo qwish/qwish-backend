@@ -322,19 +322,6 @@ func (s *Service) CreateUser(ctx context.Context, supabaseUID, fullName, email, 
 	return u, nil
 }
 
-// CreateStudentEnrollment records a referral-code signup as an active
-// enrollment with the academic fields left blank for an admin to fill in.
-//
-// Without this the student would carry an institution_id that no roster query
-// would ever surface, since rosters are built from enrollments.
-func (s *Service) CreateStudentEnrollment(ctx context.Context, instID, userID, fullName string) (string, error) {
-	var id string
-	err := s.db.QueryRow(ctx,
-		`INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at)
-		 VALUES ($1,$2,$3,'active',now()) RETURNING id`, instID, userID, fullName).Scan(&id)
-	return id, err
-}
-
 // TeacherInvite is a pending teacher invitation looked up by its email token.
 type TeacherInvite struct {
 	ID              string    `json:"id"`
@@ -399,15 +386,15 @@ func (s *Service) GetInstitutionName(ctx context.Context, id string) string {
 	return name
 }
 
-// UpdateUserInstitution is the legacy staff referral path. Students must use
-// enrollment's reviewed join flow, which owns admissions and transfers.
+// UpdateUserInstitution is the staff referral path. Students join classes by
+// class code instead.
 func (s *Service) UpdateUserInstitution(ctx context.Context, userID, code string) error {
 	var currentRole string
 	if err := s.db.QueryRow(ctx, `SELECT role FROM users WHERE id=$1`, userID).Scan(&currentRole); err != nil {
 		return err
 	}
 	if currentRole != "teacher" && currentRole != "institution_admin" {
-		return errors.New("use Join a class to request institute membership or a transfer")
+		return errors.New("join your class with its class code instead")
 	}
 	instID, role, err := s.FindInstitutionByReferralCode(ctx, code)
 	if err != nil {

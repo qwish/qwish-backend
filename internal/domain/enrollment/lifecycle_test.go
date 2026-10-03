@@ -44,16 +44,9 @@ func TestGraduatedStudentCanEnrollElsewhere(t *testing.T) {
 		t.Fatalf("SetStatus: %v", err)
 	}
 
-	var code string
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO enrollments (institution_id, full_name, claim_code, status)
-		VALUES ($1, 'Transferred In', 'XFER-'||$2, 'pending_claim')
-		RETURNING claim_code`, f.OtherInstitutionID, f.StudentEnrollmentID).Scan(&code); err != nil {
-		t.Fatalf("seed target enrollment: %v", err)
-	}
-
-	if _, err := svc.Claim(ctx, f.StudentID, code); err != nil {
-		t.Fatalf("Claim after transfer out: %v", err)
+	_, code := newClass(t, pool, f.OtherInstitutionID, true)
+	if _, err := svc.JoinByClassCode(ctx, f.StudentID, code); err != nil {
+		t.Fatalf("join after transfer out: %v", err)
 	}
 }
 

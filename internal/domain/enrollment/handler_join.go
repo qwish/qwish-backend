@@ -32,28 +32,18 @@ func readJoinRequest(w http.ResponseWriter, r *http.Request) (joinRequest, bool)
 
 func joinError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, ErrAdmissionPending):
-		middleware.Error(w, 409, "ADMISSION_PENDING", "Your request is awaiting approval. Open Join a class to track it.")
-	case errors.Is(err, ErrPendingElsewhere):
-		middleware.Error(w, 409, "ADMISSION_ELSEWHERE", "You have an open request at another institute. Cancel it in Join a class before requesting this institute.")
-	case errors.Is(err, ErrRequestClosed):
-		middleware.Error(w, 409, "ADMISSION_CLOSED", "This request has changed. Refresh its status.")
-	case errors.Is(err, ErrNotFound):
-		middleware.NotFound(w, "admission request")
-	case errors.Is(err, ErrAdmissionRules):
-		middleware.BadRequest(w, "Choose a valid admission mode and at least one valid rule for custom admissions.")
-	case errors.Is(err, ErrJoinCodeInvalid), errors.Is(err, ErrClaimCodeInvalid), errors.Is(err, ErrClassCodeInvalid):
-		middleware.Error(w, 400, "JOIN_CODE_INVALID", "We couldn't identify that code. Check it with your institution and try again.")
-	case errors.Is(err, ErrClaimCodeUsed):
-		middleware.Error(w, 409, "CLAIM_CODE_USED", "This enrollment is already connected. Sign in to the account you used, or ask your institution for help.")
-	case errors.Is(err, ErrEnrollmentExists):
-		middleware.Error(w, 409, "ENROLLMENT_EXISTS", "You already have an institution enrollment. Your current enrollment has not been changed. Ask your institution for help.")
+	case errors.Is(err, ErrJoinCodeInvalid):
+		middleware.Error(w, 400, "JOIN_CODE_INVALID", "We couldn't find a class with that code. Check it with your teacher.")
+	case errors.Is(err, ErrJoinClosed):
+		middleware.Error(w, 403, "JOIN_CLOSED", "This class is invite-only. Ask your teacher for an invite, or add your school or college email in Profile → Emails.")
+	case errors.Is(err, ErrInstituteCap):
+		middleware.Error(w, 409, "INSTITUTE_LIMIT", "You already belong to 2 institutes. Leave one in Profile before joining another.")
 	case errors.Is(err, ErrJoinSuspended):
-		middleware.Error(w, 403, "JOIN_SUSPENDED", "Your enrollment is suspended. Contact your institution to restore access.")
+		middleware.Error(w, 403, "JOIN_SUSPENDED", "Your enrollment at this institute is suspended. Contact the institute.")
 	case errors.Is(err, ErrJoinChanged):
-		middleware.Error(w, 409, "JOIN_CHANGED", "This invitation has changed. Enter your code again to review the current details.")
+		middleware.Error(w, 409, "JOIN_CHANGED", "This class has changed. Enter the code again.")
 	case errors.Is(err, ErrJoinRole):
-		middleware.Error(w, 403, "JOIN_ROLE", "Only student accounts can use this invitation.")
+		middleware.Error(w, 403, "JOIN_ROLE", "Only student accounts can join classes.")
 	default:
 		log.Printf("student join: %v", err)
 		middleware.InternalError(w)
@@ -73,16 +63,17 @@ func (h *StudentHandler) PreviewJoin(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, p)
 }
 
+// ConfirmJoin ignores any client-sent kind: every code is a class code now.
 func (h *StudentHandler) ConfirmJoin(w http.ResponseWriter, r *http.Request) {
 	req, ok := readJoinRequest(w, r)
 	if !ok {
 		return
 	}
-	if req.TargetID == "" || (req.Kind != "claim" && req.Kind != "class" && req.Kind != "institution") {
+	if req.TargetID == "" {
 		middleware.BadRequest(w, "review your invitation before joining")
 		return
 	}
-	result, err := h.svc.ConfirmJoin(r.Context(), middleware.GetUserID(r), req.Code, req.Kind, req.TargetID)
+	result, err := h.svc.ConfirmJoin(r.Context(), middleware.GetUserID(r), req.Code, req.TargetID)
 	if err != nil {
 		joinError(w, err)
 		return

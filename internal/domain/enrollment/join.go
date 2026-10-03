@@ -8,27 +8,33 @@ import (
 )
 
 var (
-	ErrJoinCodeInvalid = errors.New("join code invalid or ambiguous")
+	ErrJoinCodeInvalid = errors.New("join code invalid")
+	ErrJoinClosed      = errors.New("class is invite-only")
 	ErrJoinChanged     = errors.New("join destination changed")
 	ErrJoinSuspended   = errors.New("enrollment suspended")
 	ErrJoinRole        = errors.New("only students can join")
+	ErrInstituteCap    = errors.New("student is at the institute limit")
 )
 
-// JoinPreview contains destination information only, never the roster's personal
-// information. Codes are case-sensitive. A collision across code namespaces is
-// rejected instead of guessing which destination the student intended.
+// MaxLiveInstitutes is how many institutes a student may belong to at once.
+const MaxLiveInstitutes = 2
+
+// verifiedEmailsCTE lists every address the student has proven they control:
+// the login email plus verified secondary emails. $1 is the user id.
+const verifiedEmailsCTE = `emails AS (
+	SELECT lower(btrim(email)) AS email FROM users WHERE id=$1
+	UNION SELECT email FROM user_emails WHERE user_id=$1 AND verified_at IS NOT NULL)`
+
+// JoinPreview describes the class behind a code and how the student would be
+// admitted. Kind is always "class"; it stays for older clients.
 type JoinPreview struct {
-	AlreadyRequested bool   `json:"already_requested"`
-	Kind             string `json:"kind"`
-	TargetID         string `json:"target_id"`
-	InstitutionID    string `json:"institution_id"`
-	InstitutionName  string `json:"institution_name"`
-	ClassName        string `json:"class_name,omitempty"`
-	AlreadyJoined    bool   `json:"already_joined"`
-	RequiresApproval bool   `json:"requires_approval"`
-	TransferRequired bool   `json:"transfer_required"`
-	RequestID        string `json:"request_id,omitempty"`
-	RequestStatus    string `json:"request_status,omitempty"`
+	Kind            string `json:"kind"`
+	TargetID        string `json:"target_id"`
+	InstitutionID   string `json:"institution_id"`
+	InstitutionName string `json:"institution_name"`
+	ClassName       string `json:"class_name"`
+	Route           string `json:"route"`
+	AlreadyJoined   bool   `json:"already_joined"`
 }
 
 type JoinResult struct {
@@ -38,217 +44,129 @@ type JoinResult struct {
 }
 
 type joinQuerier interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
 func resolveJoin(ctx context.Context, q joinQuerier, userID, code string) (JoinPreview, error) {
-	rows, err := q.Query(ctx, `
- SELECT 'claim', e.id::text, i.id::text, i.name, '', e.status, COALESCE(e.user_id::text,'')
- FROM enrollments e JOIN institutions i ON i.id=e.institution_id
- WHERE e.claim_code=$1 AND i.status='verified'
- UNION ALL
- SELECT 'institution', i.id::text, i.id::text, i.name, '', '', ''
- FROM institutions i WHERE i.student_referral_code=$1 AND i.status='verified'
- UNION ALL
- SELECT 'class', g.id::text, i.id::text, i.name, g.name, '', ''
- FROM groups g JOIN institutions i ON i.id=g.institution_id
- WHERE g.invite_code=$1 AND g.archived_at IS NULL AND i.status='verified'`, code)
-	if err != nil {
-		return JoinPreview{}, err
-	}
-	var p JoinPreview
-	var status, owner string
-	count := 0
-	for rows.Next() {
-		count++
-		if err := rows.Scan(&p.Kind, &p.TargetID, &p.InstitutionID, &p.InstitutionName, &p.ClassName, &status, &owner); err != nil {
-			rows.Close()
-			return p, err
-		}
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return p, err
-	}
-	if count != 1 {
+	p := JoinPreview{Kind: "class"}
+	var joining bool
+	err := q.QueryRow(ctx, `SELECT g.id::text, i.id::text, i.name, g.name, g.joining_enabled
+		FROM groups g JOIN institutions i ON i.id=g.institution_id
+		WHERE g.invite_code=$1 AND g.archived_at IS NULL AND i.status='verified'`, code).
+		Scan(&p.TargetID, &p.InstitutionID, &p.InstitutionName, &p.ClassName, &joining)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return p, ErrJoinCodeInvalid
 	}
-	if p.Kind == "claim" && status != "pending_claim" && !(status == "active" && owner == userID) {
-		return p, ErrClaimCodeUsed
-	}
-	var enrollmentID, instID, enrollmentStatus string
-	err = q.QueryRow(ctx, `SELECT id::text, institution_id::text, status FROM enrollments WHERE user_id=$1 AND status IN ('active','suspended')`, userID).Scan(&enrollmentID, &instID, &enrollmentStatus)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return p, nil
-	}
 	if err != nil {
 		return p, err
 	}
-	if instID != p.InstitutionID {
-		if enrollmentStatus == "suspended" {
-			return p, ErrJoinSuspended
-		}
-		p.TransferRequired = true
-		return p, nil
+	if err = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM group_students WHERE group_id=$1 AND user_id=$2)`,
+		p.TargetID, userID).Scan(&p.AlreadyJoined); err != nil {
+		return p, err
 	}
-	if enrollmentStatus == "suspended" {
-		return p, ErrJoinSuspended
+	var invite, domain bool
+	if err = q.QueryRow(ctx, `WITH `+verifiedEmailsCTE+` SELECT
+		EXISTS(SELECT 1 FROM student_invites si JOIN emails e ON e.email=si.email
+		        WHERE si.status='pending' AND si.institution_id=$2 AND (si.group_id IS NULL OR si.group_id=$3)),
+		EXISTS(SELECT 1 FROM emails e JOIN institution_domains d ON d.domain=split_part(e.email,'@',2)
+		        WHERE d.verified_at IS NOT NULL AND d.institution_id=$2)`,
+		userID, p.InstitutionID, p.TargetID).Scan(&invite, &domain); err != nil {
+		return p, err
 	}
-	if p.Kind == "claim" && enrollmentID != p.TargetID {
-		return p, ErrEnrollmentExists
+	switch {
+	case invite:
+		p.Route = "invite"
+	case domain:
+		p.Route = "domain"
+	case joining:
+		p.Route = "code"
+	default:
+		return p, ErrJoinClosed
 	}
-	p.AlreadyJoined = true
-	if p.Kind == "class" {
-		err = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM group_students WHERE group_id=$1 AND user_id=$2)`, p.TargetID, userID).Scan(&p.AlreadyJoined)
-	}
-	return p, err
+	return p, nil
 }
 
 func (s *Service) PreviewJoin(ctx context.Context, userID, code string) (JoinPreview, error) {
-	p, err := resolveJoin(ctx, s.db, userID, code)
-	if err == nil {
-		err = decorateJoin(ctx, s.db, userID, code, &p)
-	}
-	return p, err
+	return resolveJoin(ctx, s.db, userID, code)
 }
 
-// ConfirmJoin revalidates the reviewed destination and serializes this student's
-// joins. Repeating a completed request returns its result; class membership and
-// enrollment commit together. Existing memberships are never transferred.
-func (s *Service) ConfirmJoin(ctx context.Context, userID, code, kind, targetID string) (JoinResult, error) {
+// ConfirmJoin admits the student to the class. The users row lock serializes a
+// student's joins, which is what makes the institute cap safe under concurrency.
+func (s *Service) ConfirmJoin(ctx context.Context, userID, code, targetID string) (JoinResult, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return JoinResult{}, err
 	}
 	defer tx.Rollback(ctx)
-	var name, role string
-	var userInstitution *string
-	err = tx.QueryRow(ctx, `SELECT full_name, role, institution_id::text FROM users WHERE id=$1 FOR UPDATE`, userID).Scan(&name, &role, &userInstitution)
-	if err != nil {
+
+	var role string
+	if err = tx.QueryRow(ctx, `SELECT role FROM users WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, userID).Scan(&role); err != nil {
 		return JoinResult{}, err
 	}
 	if role != "student" {
 		return JoinResult{}, ErrJoinRole
 	}
+	var locked string
+	if err = tx.QueryRow(ctx, `SELECT id::text FROM groups WHERE id=$1 AND invite_code=$2 AND archived_at IS NULL FOR SHARE`,
+		targetID, code).Scan(&locked); err != nil {
+		return JoinResult{}, ErrJoinChanged
+	}
 	p, err := resolveJoin(ctx, tx, userID, code)
 	if err != nil {
 		return JoinResult{}, err
 	}
-	if p.Kind != kind || p.TargetID != targetID {
+	if p.TargetID != targetID {
 		return JoinResult{}, ErrJoinChanged
 	}
-	if userInstitution != nil && *userInstitution != p.InstitutionID {
-		p.TransferRequired = true
-	}
-	// Keep the destination valid until commit, including concurrent code resets,
-	// roster claims, class archival and institution suspension.
-	var lockedID string
-	err = tx.QueryRow(ctx, `SELECT id::text FROM institutions WHERE id=$1 AND status='verified' FOR SHARE`, p.InstitutionID).Scan(&lockedID)
-	if err != nil {
-		return JoinResult{}, ErrJoinChanged
-	}
-	switch p.Kind {
-	case "claim":
-		err = tx.QueryRow(ctx, `SELECT id::text FROM enrollments WHERE id=$1 AND claim_code=$2 FOR UPDATE`, p.TargetID, code).Scan(&lockedID)
-	case "class":
-		err = tx.QueryRow(ctx, `SELECT id::text FROM groups WHERE id=$1 AND invite_code=$2 AND archived_at IS NULL FOR SHARE`, p.TargetID, code).Scan(&lockedID)
-	case "institution":
-		err = tx.QueryRow(ctx, `SELECT id::text FROM institutions WHERE id=$1 AND student_referral_code=$2`, p.TargetID, code).Scan(&lockedID)
-	}
-	if err != nil {
-		return JoinResult{}, ErrJoinChanged
-	}
-	p, err = resolveJoin(ctx, tx, userID, code)
+
+	e, err := ensureEnrollment(ctx, tx, userID, p)
 	if err != nil {
 		return JoinResult{}, err
 	}
-	if p.Kind != kind || p.TargetID != targetID {
-		return JoinResult{}, ErrJoinChanged
-	}
-	if err = decorateJoin(ctx, tx, userID, code, &p); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO group_students (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, p.TargetID, userID); err != nil {
 		return JoinResult{}, err
 	}
-	if p.RequiresApproval || p.TransferRequired || p.RequestID != "" {
-		var source *string
-		if p.TransferRequired {
-			source = userInstitution
-			if source == nil {
-				var existing string
-				if err = tx.QueryRow(ctx, `SELECT institution_id FROM enrollments WHERE user_id=$1 AND status='active'`, userID).Scan(&existing); err != nil {
-					return JoinResult{}, err
-				}
-				source = &existing
-			}
-		}
-		id, err := queueAdmission(ctx, tx, userID, code, p, source)
-		if err != nil {
-			return JoinResult{}, err
-		}
-		p.RequestID = id
-		if err = tx.QueryRow(ctx, `SELECT status FROM admission_requests WHERE id=$1`, id).Scan(&p.RequestStatus); err != nil {
-			return JoinResult{}, err
-		}
-		if err = tx.Commit(ctx); err != nil {
-			return JoinResult{}, err
-		}
-		return JoinResult{Destination: p, Status: p.RequestStatus}, nil
-	}
-	e, err := activateEnrollment(ctx, tx, userID, name, p)
-	if err != nil {
-		return JoinResult{}, err
-	}
-	if p.Kind == "class" {
-		if _, err = tx.Exec(ctx, `INSERT INTO group_students (group_id,user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, p.TargetID, userID); err != nil {
+	if p.Route == "invite" {
+		if _, err = tx.Exec(ctx, `WITH `+verifiedEmailsCTE+`
+			UPDATE student_invites si SET status='accepted', accepted_by=$1, accepted_at=now()
+			  FROM emails e WHERE e.email=si.email AND si.status='pending' AND si.institution_id=$2
+			   AND (si.group_id IS NULL OR si.group_id=$3)`, userID, p.InstitutionID, p.TargetID); err != nil {
 			return JoinResult{}, err
 		}
 	}
+	// The class the student just joined is what they want to see next.
 	if _, err = tx.Exec(ctx, `UPDATE users SET institution_id=$1, updated_at=now() WHERE id=$2`, p.InstitutionID, userID); err != nil {
 		return JoinResult{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return JoinResult{}, err
 	}
+	p.AlreadyJoined = true
 	return JoinResult{Destination: p, Enrollment: &e, Status: "joined"}, nil
 }
 
-func decorateJoin(ctx context.Context, q joinQuerier, user, code string, p *JoinPreview) error {
-	var role, status string
-	var inst *string
-	if err := q.QueryRow(ctx, `SELECT role,status,institution_id::text FROM users WHERE id=$1`, user).Scan(&role, &status, &inst); err != nil {
-		return err
-	}
-	if role != "student" {
-		return ErrJoinRole
-	}
-	if status != "active" {
-		return ErrJoinSuspended
-	}
-	if inst != nil && *inst != p.InstitutionID {
-		p.TransferRequired = true
-	}
-	var member bool
-	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM enrollments WHERE user_id=$1 AND institution_id=$2 AND status='active')`, user, p.InstitutionID).Scan(&member); err != nil {
-		return err
-	}
-	if member {
-		return nil
-	}
-	var requestInst string
-	err := q.QueryRow(ctx, `SELECT id,institution_id,status FROM admission_requests WHERE user_id=$1 AND status IN ('pending','approved')`, user).Scan(&p.RequestID, &requestInst, &p.RequestStatus)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return err
-	}
-	if err == nil && requestInst != p.InstitutionID {
-		return ErrPendingElsewhere
-	}
-	if p.RequestID != "" {
-		if err = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM admission_targets WHERE request_id=$1 AND kind=$2 AND target_id=$3 AND code=$4)`, p.RequestID, p.Kind, p.TargetID, code).Scan(&p.AlreadyRequested); err != nil {
-			return err
+// ensureEnrollment returns the live enrollment at the class's institute,
+// creating it when the student is under the institute cap.
+func ensureEnrollment(ctx context.Context, tx pgx.Tx, userID string, p JoinPreview) (Enrollment, error) {
+	e, err := scanEnrollment(tx.QueryRow(ctx, `SELECT `+selectCols+` FROM enrollments
+		WHERE user_id=$1 AND institution_id=$2 AND status IN ('active','suspended')`, userID, p.InstitutionID))
+	if err == nil {
+		if e.Status == "suspended" {
+			return e, ErrJoinSuspended
 		}
+		return e, nil
 	}
-	p.RequiresApproval, err = needsReview(ctx, q, user, p.InstitutionID)
-	p.RequiresApproval = p.RequiresApproval || p.RequestID != ""
-	return err
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return e, err
+	}
+	var live int
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM enrollments WHERE user_id=$1 AND status IN ('active','suspended')`, userID).Scan(&live); err != nil {
+		return e, err
+	}
+	if live >= MaxLiveInstitutes {
+		return e, ErrInstituteCap
+	}
+	return scanEnrollment(tx.QueryRow(ctx, `INSERT INTO enrollments (institution_id, user_id, full_name, email, status, joined_at, join_route)
+		SELECT $1, id, COALESCE(NULLIF(full_name,''), display_name), email, 'active', now(), $3 FROM users WHERE id=$2
+		RETURNING `+selectCols, p.InstitutionID, userID, p.Route))
 }

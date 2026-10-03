@@ -78,15 +78,12 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Work waiting on the institution: drives the overview strip and sidebar counts.
-	var pendingAdmissions, pendingEdits, unclaimed int
-	var oldestAdmission *time.Time
+	var pendingEdits, unclaimed int
 	h.db.QueryRow(r.Context(), `SELECT
-		(SELECT COUNT(*) FROM admission_requests WHERE institution_id=$1 AND status='pending'),
-		(SELECT MIN(created_at) FROM admission_requests WHERE institution_id=$1 AND status='pending'),
 		(SELECT COUNT(*) FROM student_edit_requests sr JOIN enrollments e ON e.id=sr.enrollment_id WHERE e.institution_id=$1 AND sr.status='pending'),
 		(SELECT COUNT(*) FROM enrollments WHERE institution_id=$1 AND status='pending_claim')`,
 		instID,
-	).Scan(&pendingAdmissions, &oldestAdmission, &pendingEdits, &unclaimed)
+	).Scan(&pendingEdits, &unclaimed)
 
 	// Activity chart: quizzes completed per day over last 30 days
 	rows, _ := h.db.Query(r.Context(),
@@ -140,8 +137,6 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		"activity_chart":            chart,
 		"top_quizzes":               topQuizzes,
 		"pending": map[string]interface{}{
-			"admissions":            pendingAdmissions,
-			"oldest_admission_at":   oldestAdmission,
 			"edit_requests":         pendingEdits,
 			"unclaimed_enrollments": unclaimed,
 		},
@@ -1574,7 +1569,7 @@ func (h *Handler) AuditLog(w http.ResponseWriter, r *http.Request) {
 	if g := q.Get("action_group"); g != "" {
 		actions, ok := auditActionGroups[g]
 		if !ok {
-			middleware.BadRequest(w, "action_group must be membership, admissions, academics or settings")
+			middleware.BadRequest(w, "action_group must be membership, academics or settings")
 			return
 		}
 		where += fmt.Sprintf(` AND al.action_type = ANY($%d::text[])`, len(args)+1)

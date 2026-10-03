@@ -1100,7 +1100,8 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 	h.db.QueryRow(r.Context(),
 		`SELECT COALESCE(AVG(qa.score_pct),0) FROM quiz_attempts qa
 		 JOIN group_students gs ON gs.user_id=qa.user_id
-		 WHERE gs.group_id=$1 AND qa.status='completed'`, groupID).Scan(&avgScore)
+		 JOIN quizzes q ON q.id=qa.quiz_id AND (q.institution_id=$2 OR q.visibility='public')
+		 WHERE gs.group_id=$1 AND qa.status='completed'`, groupID, instID).Scan(&avgScore)
 
 	type studentRow struct {
 		EnrollmentID  *string    `json:"enrollment_id"`
@@ -1124,8 +1125,9 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 		`SELECT e.id, u.id, COALESCE(u.display_name, ''), COALESCE(u.email, ''),
 		        COALESCE(e.status, 'active'), e.roll_number,
 		        COALESCE(u.total_points,0), COALESCE(u.current_streak,0), u.last_active_at,
-		        COALESCE((SELECT AVG(score_pct) FROM quiz_attempts
-		                   WHERE user_id=u.id AND status='completed'),0),
+		        COALESCE((SELECT AVG(qa.score_pct) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
+		                   WHERE qa.user_id=u.id AND qa.status='completed'
+		                     AND (q.institution_id=$2 OR q.visibility='public')),0),
 		        (SELECT AVG(qa.score_pct) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
 		          WHERE qa.user_id=u.id AND qa.status='completed' AND q.group_id=gs.group_id),
 		        (SELECT COUNT(*) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id

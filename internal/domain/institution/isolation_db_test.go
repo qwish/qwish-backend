@@ -52,3 +52,26 @@ func TestGetGroupReportsJoiningSwitch(t *testing.T) {
 		t.Fatalf("group detail must report the joining switch: %d %s", w.Code, w.Body)
 	}
 }
+
+func TestGroupRosterAverageIsInstituteIsolated(t *testing.T) {
+	pool := openTestDB(t)
+	s := seedTwoInstitutes(t, pool)
+	ctx := context.Background()
+	quiz := func(inst, author string, score float64) string {
+		var id string
+		pool.QueryRow(ctx, `INSERT INTO quizzes (institution_id, created_by, title, type, status) VALUES ($1,$2,'q','knowledge_check','published') RETURNING id`, inst, author).Scan(&id)
+		pool.Exec(ctx, `INSERT INTO quiz_attempts (quiz_id,user_id,status,completed_at,score_pct) VALUES ($1,$2,'completed',now(),$3)`, id, s.Student, score)
+		return id
+	}
+	qa, qb := quiz(s.InstA, s.AdminA, 10), quiz(s.InstB, s.AdminB, 90)
+	t.Cleanup(func() {
+		pool.Exec(ctx, `DELETE FROM quiz_attempts WHERE quiz_id IN ($1,$2)`, qa, qb)
+		pool.Exec(ctx, `DELETE FROM quizzes WHERE id IN ($1,$2)`, qa, qb)
+	})
+	r := withURLParam(withAuth(httptest.NewRequest("GET", "/", nil), s.AdminB, "institution_admin", s.InstB), "groupId", s.ClassB)
+	w := httptest.NewRecorder()
+	NewHandler(pool, nil, nil, "", "").GetGroup(w, r)
+	if !strings.Contains(w.Body.String(), `"average_score":90`) {
+		t.Fatalf("B's class roster average must exclude A's quizzes: %s", w.Body)
+	}
+}

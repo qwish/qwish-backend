@@ -105,3 +105,39 @@ func TestGetClassReportsJoiningSwitch(t *testing.T) {
 		t.Fatalf("class detail must report the joining switch: %d %s", w.Code, w.Body)
 	}
 }
+
+// Institute B's roster average must not include attempts on institute A's
+// private quizzes (D15).
+func TestRosterAverageIgnoresOtherInstitutesQuizzes(t *testing.T) {
+	pool := openTestDB(t)
+	s := seedTwoInstitutes(t, pool)
+	ctx := context.Background()
+	quiz := func(inst string, score float64) string {
+		var id string
+		if err := pool.QueryRow(ctx, `INSERT INTO quizzes (institution_id, created_by, title, type, status, visibility)
+			VALUES ($1,$2,'q','knowledge_check','published','institution') RETURNING id`, inst, s.TeacherB).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		pool.Exec(ctx, `INSERT INTO quiz_attempts (quiz_id,user_id,status,completed_at,score_pct) VALUES ($1,$2,'completed',now(),$3)`, id, s.Student, score)
+		return id
+	}
+	qa, qb := quiz(s.InstA, 10), quiz(s.InstB, 90)
+	t.Cleanup(func() {
+		pool.Exec(ctx, `DELETE FROM quiz_attempts WHERE quiz_id IN ($1,$2)`, qa, qb)
+		pool.Exec(ctx, `DELETE FROM quizzes WHERE id IN ($1,$2)`, qa, qb)
+	})
+	w := httptest.NewRecorder()
+	NewHandler(pool).ListStudents(w, teacherRequest(httptest.NewRequest("GET", "/", nil), s.TeacherB, s.InstB))
+	if !strings.Contains(w.Body.String(), `"average_score":90`) {
+		t.Fatalf("B's roster average must use only B's (or public) quizzes: %s", w.Body)
+	}
+	req := teacherRequest(httptest.NewRequest("GET", "/", nil), s.TeacherB, s.InstB)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("classId", s.ClassB)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w = httptest.NewRecorder()
+	NewHandler(pool).GetClass(w, req)
+	if n := strings.Count(w.Body.String(), `"average_score":90`); n != 2 {
+		t.Fatalf("class and roster averages must both exclude A's quizzes (want 2 matches, got %d): %s", n, w.Body)
+	}
+}

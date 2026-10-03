@@ -265,9 +265,10 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Query(r.Context(),
 		`SELECT u.id, e.id, u.display_name, u.email, e.roll_number, e.grade, e.section,
 		        u.total_points, u.current_streak, u.last_active_at, u.status, e.join_route,
-		        COALESCE((SELECT AVG(score_pct) FROM quiz_attempts
-		                   WHERE user_id=u.id AND status='completed'
-		                     AND completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)),0) as avg_score
+		        COALESCE((SELECT AVG(qa.score_pct) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
+		                   WHERE qa.user_id=u.id AND qa.status='completed'
+		                     AND qa.completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)
+		                     AND (q.institution_id=e.institution_id OR q.visibility='public')),0) as avg_score
 		 FROM enrollments e JOIN users u ON u.id = e.user_id
 		 WHERE `+where+` ORDER BY `+sortCol+
 			fmt.Sprintf(` LIMIT $%d OFFSET $%d`, n, n+1),
@@ -570,6 +571,7 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 		  WHERE gs.group_id=$1),
 		(SELECT COALESCE(AVG(qa.score_pct),0) FROM quiz_attempts qa
 		 JOIN group_students gs ON gs.user_id=qa.user_id
+		 JOIN quizzes q ON q.id=qa.quiz_id AND (q.institution_id=g.institution_id OR q.visibility='public')
 		 WHERE gs.group_id=$1 AND qa.status='completed')
 		FROM groups g WHERE g.id=$1`, classID,
 	).Scan(&name, &description, &inviteCode, &createdAt, &joiningEnabled, &studentCount, &avgScore)
@@ -577,9 +579,10 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 	sRows, _ := h.db.Query(r.Context(), `
 		SELECT u.id, e.id, u.display_name, u.email, e.roll_number, e.grade, e.section,
 		       u.total_points, u.current_streak, u.last_active_at, u.status, e.join_route,
-		       COALESCE((SELECT AVG(score_pct) FROM quiz_attempts
-		                  WHERE user_id=u.id AND status='completed'
-		                    AND completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)),0) AS avg_score
+		       COALESCE((SELECT AVG(qa.score_pct) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
+		                   WHERE qa.user_id=u.id AND qa.status='completed'
+		                     AND qa.completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)
+		                     AND (q.institution_id=e.institution_id OR q.visibility='public')),0) AS avg_score
 		FROM users u
 		JOIN group_students gs ON gs.user_id=u.id
 		JOIN groups g ON g.id=gs.group_id

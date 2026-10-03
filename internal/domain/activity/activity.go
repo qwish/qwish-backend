@@ -23,7 +23,7 @@ import (
 )
 
 // IdentityDisclosure is shown before every submission in the first release.
-const IdentityDisclosure = "Your name, roll number and class are shared with the organisers along with your answers."
+const IdentityDisclosure = "Your name and class are shared with the organisers along with your answers."
 
 type Handler struct {
 	db    *pgxpool.Pool

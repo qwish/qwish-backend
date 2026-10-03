@@ -68,3 +68,20 @@ func TestClaimedEnrollmentSurvives(t *testing.T) {
 		t.Fatalf("claimed enrollment: status=%q err=%v", status, err)
 	}
 }
+
+// The status default must satisfy the narrowed check (pending_claim is gone).
+func TestEnrollmentStatusDefaultIsValid(t *testing.T) {
+	if columnExists(t, "enrollments", "claim_code") {
+		t.Skip("085 not applied yet")
+	}
+	pool := openTestDB(t)
+	f := seedFixture(t, pool)
+	var status string
+	if err := pool.QueryRow(context.Background(), `INSERT INTO enrollments (institution_id, user_id, full_name)
+		VALUES ($1,$2,'default') RETURNING status`, f.OtherInstitutionID, f.SoloStudentID).Scan(&status); err != nil {
+		t.Fatalf("insert without status must use a valid default: %v", err)
+	}
+	if status != "active" {
+		t.Fatalf("default status = %q, want active", status)
+	}
+}

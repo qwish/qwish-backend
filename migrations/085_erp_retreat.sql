@@ -42,6 +42,11 @@ ALTER TABLE enrollments
 ALTER TABLE enrollments DROP CONSTRAINT IF EXISTS enrollments_status_check;
 ALTER TABLE enrollments ADD CONSTRAINT enrollments_status_check
   CHECK (status IN ('active','suspended','graduated','transferred','left'));
+-- The old default was 'pending_claim', which the check above now forbids.
+ALTER TABLE enrollments ALTER COLUMN status SET DEFAULT 'active';
+
+-- Activity responses stored a respondent snapshot that included roll_number.
+UPDATE activity_responses SET respondent = respondent - 'roll_number' WHERE respondent ? 'roll_number';
 
 ALTER TABLE users
   DROP COLUMN IF EXISTS date_of_birth,

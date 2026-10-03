@@ -4295,14 +4295,6 @@ same state change, so they are one endpoint.
 `PATCH /institution/students/{userId}/status` still exists with its original
 `{action: suspend|reactivate}` body and now routes through the same service.
 
-### POST `/institution/enrollments/promote`
-```json
-{ "from_grade": "9", "from_section": "A", "to_grade": "10", "to_section": "A" }
-```
-Advances a cohort in one transaction. `from_section` empty means the whole
-grade; `to_section` empty leaves each student's section unchanged. Returns
-`{"promoted": 42}`.
-
 ### PATCH `/institution/enrollments/{enrollmentId}/status`
 Now audited as `set_enrollment_status`, with the `reason` recorded.
 
@@ -4316,17 +4308,6 @@ and the rest still apply.
 ```json
 { "updated": 62, "skipped": [{ "enrollment_id": "uuid", "name": "Rohan Pawar", "reason": "not on your roster" }] }
 ```
-
-### Promotions
-`POST /institution/promotions` already takes a per-student reason for each
-retained student: `retained: [{ "enrollment_id", "reason" }]`.
-
-`POST /institution/promotions/{batchId}/revert` now also returns
-`skipped_students: [{ enrollment_id, name, reason }]`.
-
-`GET /institution/promotions` rows add:
-- `skipped_students`: students a revert left in place;
-- `retained_students`: `[{ enrollment_id, name, reason }]`.
 
 ## Super Admin
 

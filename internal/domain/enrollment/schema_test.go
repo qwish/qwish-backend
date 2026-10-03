@@ -5,57 +5,45 @@ import (
 	"testing"
 )
 
-// A student may hold only one live enrollment, but any number of unredeemed
-// roster rows may point at them across institutions.
-func TestOneActiveEnrollmentPerUser(t *testing.T) {
+// A student may hold one live enrollment per institute, at several institutes.
+func TestOneLiveEnrollmentPerInstitute(t *testing.T) {
 	pool := openTestDB(t)
 	f := seedFixture(t, pool)
 	ctx := context.Background()
 
-	_, err := pool.Exec(ctx, `
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at)
-		VALUES ($1, $2, 'dupe', 'active', now())`, f.OtherInstitutionID, f.StudentID)
-	if err == nil {
-		t.Fatal("expected a second active enrollment to violate enrollments_one_active_per_user")
+		VALUES ($1, $2, 'second', 'active', now())`, f.OtherInstitutionID, f.StudentID); err != nil {
+		t.Fatalf("a live enrollment at a second institute must be allowed: %v", err)
 	}
-
-	_, err = pool.Exec(ctx, `
-		INSERT INTO enrollments (institution_id, full_name, claim_code, status)
-		VALUES ($1, 'pre-provisioned', 'OTHERCODE-'||$2, 'pending_claim')`,
-		f.OtherInstitutionID, f.StudentID)
-	if err != nil {
-		t.Fatalf("pending_claim rows must be exempt from the one-active index: %v", err)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at)
+		VALUES ($1, $2, 'dupe', 'active', now())`, f.InstitutionID, f.StudentID); err == nil {
+		t.Fatal("expected a second live enrollment at the same institute to be rejected")
 	}
 }
 
-// Roll numbers collide only among live enrollments; ending one frees its number.
-func TestRollNumberUniquePerLiveEnrollment(t *testing.T) {
+// The active-institute pointer survives a second join and moves off an ended one.
+func TestActiveInstitutePointer(t *testing.T) {
 	pool := openTestDB(t)
 	f := seedFixture(t, pool)
 	ctx := context.Background()
 
-	var roll string
-	if err := pool.QueryRow(ctx,
-		`SELECT roll_number FROM enrollments WHERE id=$1`, f.StudentEnrollmentID).Scan(&roll); err != nil {
-		t.Fatalf("read roll_number: %v", err)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at)
+		VALUES ($1, $2, 'second', 'active', now())`, f.OtherInstitutionID, f.StudentID); err != nil {
+		t.Fatal(err)
 	}
-
-	_, err := pool.Exec(ctx, `
-		INSERT INTO enrollments (institution_id, full_name, roll_number, claim_code, status)
-		VALUES ($1, 'collides', $2, 'C-'||$2, 'pending_claim')`, f.InstitutionID, roll)
-	if err == nil {
-		t.Fatal("expected duplicate roll_number in a live enrollment to be rejected")
+	var active string
+	pool.QueryRow(ctx, `SELECT institution_id::text FROM users WHERE id=$1`, f.StudentID).Scan(&active)
+	if active != f.InstitutionID {
+		t.Fatalf("second enrollment must not steal the active pointer: got %s", active)
 	}
-
-	if _, err := pool.Exec(ctx,
-		`UPDATE enrollments SET status='graduated', ended_at=now() WHERE id=$1`,
-		f.StudentEnrollmentID); err != nil {
-		t.Fatalf("graduate: %v", err)
+	if _, err := pool.Exec(ctx, `UPDATE enrollments SET status='left', ended_at=now() WHERE id=$1`, f.StudentEnrollmentID); err != nil {
+		t.Fatal(err)
 	}
-	_, err = pool.Exec(ctx, `
-		INSERT INTO enrollments (institution_id, full_name, roll_number, claim_code, status)
-		VALUES ($1, 'reuses', $2, 'C2-'||$2, 'pending_claim')`, f.InstitutionID, roll)
-	if err != nil {
-		t.Fatalf("roll_number must be reusable after the enrollment ends: %v", err)
+	pool.QueryRow(ctx, `SELECT institution_id::text FROM users WHERE id=$1`, f.StudentID).Scan(&active)
+	if active != f.OtherInstitutionID {
+		t.Fatalf("ending the active enrollment must re-point to the other live one: got %s", active)
 	}
 }

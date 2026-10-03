@@ -36,8 +36,9 @@ func TestLearningReportEvidence(t *testing.T) {
  CREATE TEMP TABLE quiz_attempts(id text,user_id text,quiz_id text,completed_at timestamptz,total_correct int,total_questions int,score_pct float8,status text);
  CREATE TEMP TABLE institutions(id text,name text);
  CREATE TEMP TABLE enrollments(id text,user_id text,institution_id text,status text,ended_at timestamptz,joined_at timestamptz,created_at timestamptz,grade text);
- CREATE TEMP TABLE promotion_batches(id text,to_grade text,created_at timestamptz,reverted_at timestamptz);
- CREATE TEMP TABLE promotion_batch_students(enrollment_id text,batch_id text,prior_grade text,outcome text);
+ CREATE TEMP TABLE groups(id text,institution_id text,kind text,grade text,archived_at timestamptz);
+ CREATE TEMP TABLE group_students(group_id text,user_id text,joined_at timestamptz);
+ CREATE TEMP TABLE group_student_history(group_id text,user_id text,joined_at timestamptz,left_at timestamptz,grade text);
  CREATE TEMP TABLE user_education(id text,user_id text,institution_name text,degree text,field text,start_year int,end_year int,is_current bool);
  CREATE TEMP TABLE learning_assignments(id text,status text,due_at timestamptz,available_at timestamptz);
  CREATE TEMP TABLE learning_assignment_recipients(assignment_id text,student_id text,status text,due_at_override timestamptz);
@@ -45,8 +46,9 @@ func TestLearningReportEvidence(t *testing.T) {
  INSERT INTO users SELECT 'peer'||n,'Peer',now(),0,0,NULL,'student','active' FROM generate_series(1,6) n;
  INSERT INTO institutions VALUES('school','Sample School');
  INSERT INTO enrollments VALUES('e','me','school','active',NULL,now()-interval '100 days',now()-interval '100 days','Grade 10');
- INSERT INTO promotion_batches VALUES('p','Grade 10',now()-interval '40 days',NULL);
- INSERT INTO promotion_batch_students VALUES('e','p','Grade 9','promoted');
+ INSERT INTO groups VALUES('g9','school','class','Grade 9',now()-interval '40 days'),('g10','school','class','Grade 10',NULL),('rem','school','remedial',NULL,NULL);
+ INSERT INTO group_student_history VALUES('g9','me',now()-interval '100 days',now()-interval '40 days','Grade 9');
+ INSERT INTO group_students VALUES('g10','me',now()-interval '40 days'),('rem','me',now()-interval '20 days');
  INSERT INTO quizzes SELECT 'q'||n,'school','mathematics' FROM generate_series(1,3)n;
  INSERT INTO quizzes VALUES('public',NULL,'logic');
  INSERT INTO quiz_attempts SELECT 'a'||n,'me','q'||n,now()-CASE WHEN n=1 THEN interval '60 days' ELSE interval '10 days' END,6,10,60,'completed' FROM generate_series(1,3)n;

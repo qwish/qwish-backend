@@ -104,22 +104,25 @@ func (s *Service) GetLearningReport(ctx context.Context, userID string) (*Learni
 		return nil, err
 	}
 
-	// Promotion records preserve grade boundaries. Only unreverted promotions
-	// count. Association is by institution and time, never by the current grade
-	// retroactively applied to a learner's entire history.
-	rows, err = tx.Query(ctx, reportAttempts+`, promotions AS (
- SELECT ps.enrollment_id,ps.prior_grade,b.to_grade,b.created_at
- FROM promotion_batch_students ps JOIN promotion_batches b ON b.id=ps.batch_id
- JOIN enrollments e ON e.id=ps.enrollment_id
- WHERE e.user_id=$1 AND ps.outcome='promoted' AND b.reverted_at IS NULL
- ), boundaries AS (
- SELECT e.id,e.institution_id,e.status,e.ended_at,COALESCE(e.joined_at,e.created_at) AS start,
- COALESCE((SELECT prior_grade FROM promotions p WHERE p.enrollment_id=e.id ORDER BY created_at LIMIT 1),e.grade,'Not recorded') AS grade
- FROM enrollments e WHERE e.user_id=$1
+	// Grade stages come from main classes with a grade: live, ended (archived
+	// but still listed) and left (history). An enrollment with none is one
+	// "Not recorded" stage.
+	// ponytail: two simultaneous graded main classes double-count attempts; pick a primary class if that ever happens.
+	rows, err = tx.Query(ctx, reportAttempts+`, memberships AS (
+ SELECT g.institution_id, g.grade, gs.joined_at AS start, g.archived_at AS finish
+ FROM group_students gs JOIN groups g ON g.id=gs.group_id
+ WHERE gs.user_id=$1 AND g.kind='class' AND g.grade IS NOT NULL
  UNION ALL
- SELECT e.id,e.institution_id,e.status,e.ended_at,p.created_at,p.to_grade FROM enrollments e JOIN promotions p ON p.enrollment_id=e.id
+ SELECT g.institution_id, h.grade, h.joined_at, h.left_at
+ FROM group_student_history h JOIN groups g ON g.id=h.group_id
+ WHERE h.user_id=$1 AND g.kind='class' AND h.grade IS NOT NULL
  ), stages AS (
- SELECT *,LEAD(start,1,ended_at) OVER(PARTITION BY id ORDER BY start) AS finish FROM boundaries
+ SELECT e.id, e.institution_id, e.status, COALESCE(m.grade,'Not recorded') AS grade,
+        GREATEST(COALESCE(m.start, e.joined_at, e.created_at), COALESCE(e.joined_at, e.created_at)) AS start,
+        CASE WHEN m.finish IS NULL THEN e.ended_at WHEN e.ended_at IS NULL THEN m.finish ELSE LEAST(m.finish, e.ended_at) END AS finish
+ FROM enrollments e LEFT JOIN memberships m ON m.institution_id=e.institution_id
+  AND m.start < COALESCE(e.ended_at,'infinity') AND COALESCE(m.finish,'infinity') > COALESCE(e.joined_at, e.created_at)
+ WHERE e.user_id=$1
  ) SELECT i.name,s.grade,s.status,s.start,s.finish,COUNT(a.quiz_id),COALESCE(SUM(a.total_questions),0),COALESCE(SUM(a.total_correct),0)
  FROM stages s JOIN institutions i ON i.id=s.institution_id LEFT JOIN first_attempts a
  ON a.user_id=$1 AND a.institution_id=s.institution_id AND a.completed_at>=s.start AND (s.finish IS NULL OR a.completed_at<s.finish)

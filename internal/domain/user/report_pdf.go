@@ -45,7 +45,7 @@ func learningReportLines(r *LearningReport) []reportLine {
 		add(fmt.Sprintf("%d institution assessments | %s", s.Assessments, reportAccuracy(s.Correct, s.Questions)))
 	}
 	add("Stage results cover Qwish assessments from that institution during the recorded period. Public practice is included in overall/domain results, not assigned to a school stage.")
-	add("History follows recorded promotions. Direct grade edits and periods before Qwish may be incomplete. These are practice outcomes, not academic marks or degree verification.")
+	add("Grade history follows the student's classes. Periods before Qwish may be incomplete. These are practice outcomes, not academic marks or degree verification.")
 	for _, e := range r.Education {
 		heading(e.InstitutionName + " | Self-reported education")
 		add(strings.TrimSpace(e.Degree + " " + e.Field))
@@ -119,7 +119,7 @@ func learningReportLines(r *LearningReport) []reportLine {
 	}
 	add("Use this report with teacher feedback and official academic records; it covers only learning recorded on Qwish.")
 	heading("06 / How to read and trust this report")
-	add("Source: Qwish completed assessment records, institution-managed enrollments and promotions, assignment records, and separately labelled self-reported education. All sections use one database snapshot.")
+	add("Source: Qwish completed assessment records, institution enrollments and class membership, assignment records, and separately labelled self-reported education. All sections use one database snapshot.")
 	add("Accuracy = correct answers / total questions in first completed scored attempts. Unanswered questions remain in the denominator. Retakes do not replace first scores. Active assessment days count these first attempts only.")
 	add("Domain standing averages the percentage of other active students with strictly lower first-attempt accuracy on the same quiz ID. Ties are not counted as lower. Sampled questions and revisions can differ. Cohorts are all-time as of generation, not a national or age-matched sample. No other student's identity is exported.")
 	add("Small-sample thresholds are reporting safeguards, not confidence intervals. Assessments may differ in difficulty and coverage; domain labels are descriptive, not certifications. This report does not infer intelligence, employability, or overall academic performance.")

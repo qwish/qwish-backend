@@ -1934,8 +1934,6 @@ this section lists each route once, with its current contract.
     { "id": "uuid", "title": "Biology Ch3", "type": "knowledge_check", "teacher_name": "M. Joshi", "completions": 89 }
   ],
   "pending": {
-    "admissions": 12,
-    "oldest_admission_at": "2026-09-20T04:12:00Z",
     "edit_requests": 4,
     "unclaimed_enrollments": 37
   }
@@ -2520,7 +2518,7 @@ records the before/after of each changed rule.
 | Param | Description |
 |-------|-------------|
 | `action_type` | One action, e.g. `update_point_rules` |
-| `action_group` | `membership`, `admissions`, `academics` or `settings` |
+| `action_group` | `membership`, `academics` or `settings` |
 | `date_from`, `date_to` | ISO timestamps (inclusive) |
 | `page`, `limit` | Pagination (max `limit` 50) |
 
@@ -4068,71 +4066,93 @@ A student record has two halves. The **person** is a `users` row. The
 have no student-facing write path — that table boundary *is* the permission
 model, not a per-field permission flag.
 
-A student may hold **at most one live enrollment**. A student with **none** is
-institution-less and entirely valid: they own their whole record, never appear
-in a roster, and can join later without anything being migrated.
+A student may hold **live enrollments at up to 2 institutes** (one per
+institute). `users.institution_id` is the student's **active** institute — the
+one the app is showing — never the definition of membership: every institute
+query decides membership from `enrollments`. A student with no enrollment is
+institution-less and entirely valid. (Spec: `docs/superpowers/specs/2026-10-03-learning-layer-design.md`.)
+
+Every join lands the student in a **class**. Claim codes, the admissions queue
+and student referral codes are retired.
 
 ## Student
 
 ### POST `/students/join/preview`
-Resolve any student join code without consuming it. Requires a signed-in student.
+Resolve a class code without consuming it.
 ```json
-{ "code": "K7M2QX9P4T" }
+{ "code": "K7M2QX9P" }
 ```
-Returns `kind` (`claim`, `institution`, or `class`), `target_id`,
-`institution_id`, `institution_name`, optional `class_name`, and
-`already_joined`. It never returns the roster student's personal details.
+Returns `kind` (always `class`), `target_id`, `institution_id`,
+`institution_name`, `class_name`, `already_joined`, and `route` — how the
+student would be admitted, strongest proof first:
+
+| `route` | Meaning |
+|---|---|
+| `invite` | A pending invite exists for one of the student's verified emails |
+| `domain` | A verified email is on one of the institute's verified domains |
+| `code` | The class has joining switched on |
+
+With none of these, the preview fails with `403 JOIN_CLOSED`.
 
 ### POST `/students/join/confirm`
-Confirm the destination previously shown to the student.
 ```json
-{ "code": "K7M2QX9P4T", "kind": "claim", "target_id": "uuid-from-preview" }
+{ "code": "K7M2QX9P", "target_id": "uuid-from-preview" }
 ```
-Returns `destination` and `enrollment`. The server rechecks the code and
-reviewed target before writing. Repeating a completed request returns the
-current enrollment. A class join adds `group_students` in the same transaction.
-An existing enrollment at another institution is never moved.
+Any `kind` sent by older clients is ignored. Returns `destination`,
+`enrollment` and `status: "joined"`. Reuses the live enrollment at that
+institute, or creates one (`join_route` recorded) if the student is under the
+limit. Consumes a matching invite. Sets the joined institute as active.
 
-Errors: `400 JOIN_CODE_INVALID`, `409 CLAIM_CODE_USED`,
-`409 ENROLLMENT_EXISTS`, `409 JOIN_CHANGED`, `403 JOIN_SUSPENDED`.
-
-### POST `/students/claim`
-Redeem a roster row the institution pre-provisioned.
-```json
-{ "claim_code": "K7M2QX9P4T" }
-```
-Returns the enrollment. Import-supplied personal values (phone, guardian
-contact) are copied onto the user row **only where the student left the field
-blank** — the student's own entry always wins.
-
-Errors: `400 CLAIM_CODE_INVALID`, `409 CLAIM_CODE_USED`,
-`409 ENROLLMENT_EXISTS` (already enrolled elsewhere; leave first).
+Errors: `400 JOIN_CODE_INVALID`, `403 JOIN_CLOSED`, `409 INSTITUTE_LIMIT`
+(already at 2 institutes), `409 JOIN_CHANGED`, `403 JOIN_SUSPENDED`,
+`403 JOIN_ROLE`.
 
 ### POST `/students/join-class`
-Self-signup path — join a class directly with its `groups.invite_code`.
-```json
-{ "invite_code": "INV1738..." }
-```
-Creates an `active` enrollment with `roll_number`, `grade` and `section` left
-`null` for an admin to fill in, and adds the student to the class.
+Legacy one-shot `{ "invite_code": "..." }`: preview + confirm in one call.
+Returns the enrollment. Same errors.
 
-Errors: `400 CLAIM_CODE_INVALID`, `409 ENROLLMENT_EXISTS`.
+### GET `/students/invites`
+Pending invites addressed to any of the student's verified emails:
+`[{ "id", "institution_name", "class_name" }]`.
 
-### PATCH `/auth/referral-code`
-Unchanged on the wire, but it now creates an enrollment for a student rather
-than only setting `users.institution_id` — without one the student would be
-invisible to the roster, which is built from enrollments. Moving institutions
-ends the previous enrollment as `transferred` in the same transaction, since a
-student may hold only one live enrollment. Re-entering the code for the
-institution the student is already at is a no-op.
+### POST `/students/invites/{inviteId}/accept`
+Joins the invited class through the normal join path (same limit and errors).
+An institute-level invite (created only by migration) creates the enrollment
+without a class.
 
-Teachers take the column-only path: a teacher's institution relationship is the
-`users` row plus `group_teachers`, not an enrollment.
+### GET `/users/me/enrollments`
+Every live enrollment, active first. Each item is the enrollment plus
+`institution_name`, `class_name` and `active`.
+
+### PUT `/users/me/active-institution`
+`{ "institution_id": "uuid" }` → `200 {message}`. Only an `active` enrollment can
+be the active institute (a suspended one is paused). `404` otherwise.
+
+### POST `/users/me/enrollments/{enrollmentId}/leave`
+Ends the student's own enrollment as `left` (`ended_by: student`), removes them
+from that institute's live classes (ended classes stay as history), and moves
+the active pointer to the other live institute if any. `200 {message}`.
 
 ### GET `/users/me/enrollment`
-Returns the live enrollment, or **`null`** for an institution-less student.
-numpie keys its shell off this: `null` hides institution navigation and shows
-the join prompt.
+The enrollment at the **active** institute, or `null`. Kept for older clients.
+
+### Secondary emails
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/users/me/emails` | `[{ id, email, verified, verified_at }]` (login email not included) |
+| POST | `/users/me/emails` | `{email}` → `201`; sends a 6-digit code (10 min). `400 EMAIL_INVALID` (also disposable), `400 EMAIL_IS_LOGIN`, `409 EMAIL_TAKEN` |
+| POST | `/users/me/emails/{id}/verify` | `{code}`. `400 CODE_INVALID`, `429 CODE_LOCKED` after 5 misses |
+| POST | `/users/me/emails/{id}/resend` | New code for an unverified address |
+| DELETE | `/users/me/emails/{id}` | `200 {message}`. Memberships it earned are kept |
+
+A verified address is unique across all accounts.
+
+### PATCH `/users/me`
+Accepts `display_name` and `full_name` (1–120 chars). The student owns one
+name; enrollment copies follow it.
+
+### PATCH `/auth/referral-code`
+Staff only. Students get an error telling them to join with a class code.
 
 ### PATCH `/users/me`
 Now also accepts the student-owned personal fields. Omitting a field leaves it
@@ -4199,6 +4219,40 @@ DELETE /teacher/classes/{classId}/students/{userId}
 ```
 The student must already hold a live enrollment at the same institution, so a
 teacher cannot pull in an outsider.
+
+### Class joining and invites
+```
+PATCH  /teacher/classes/{classId}/joining   {joining_enabled}   → {joining_enabled}
+POST   /teacher/classes/{classId}/invites   {emails: [...]}     → 201 {created, rejected}
+GET    /teacher/classes/{classId}/invites                       → pending invites
+DELETE /teacher/invites/{inviteId}                              → 200 {message}
+```
+Institution admins have the same under `/institution/groups/{groupId}/joining`,
+`/institution/groups/{groupId}/invites` and `DELETE /institution/invites/{inviteId}`.
+
+- With joining off, a class code only admits students holding an invite or a
+  verified email on one of the institute's verified domains.
+- Invites accept 1–500 addresses. Each is judged alone: `rejected[].reason` is
+  `invalid`, `not_institute_domain` (only verified institute domains can be
+  invited) or `already_member`. Invited addresses get an email.
+- `GET /teacher/classes/{classId}` and `GET /institution/groups/{groupId}` return
+  `joining_enabled`. Teacher roster rows return `join_route`
+  (`domain` | `invite` | `code`).
+
+### Institute email domains (super-admin)
+```
+GET    /admin/institutions/{institutionId}/domains
+POST   /admin/institutions/{institutionId}/domains          {domain}  → 201
+DELETE /admin/institutions/{institutionId}/domains/{domain}            → 200 {message}
+```
+Adding a domain records it as verified — add only after confirming ownership.
+`400 DOMAIN_INVALID`, `400 DOMAIN_FREE_MAIL` (free-mail and disposable providers),
+`409 DOMAIN_TAKEN` (verified for another institute).
+
+### Auto-end (cron)
+`POST /internal/cron/end-inactive-enrollments` (nightly): an enrollment with no
+live class at its institute for 90 days ends as `left` (`ended_by: system`); the
+student is warned 7 days before. Joining a class clears the warning.
 
 ### GET `/teacher/students` — shape change
 Now built from enrollments rather than `users`. Rows gain `enrollment_id`,
@@ -4393,8 +4447,8 @@ institution keeps its historical roster count.
 | `EMAIL_FAILED` | 502 | An invitation email couldn't be sent; nothing else changed |
 
 ### Class joining and admissions
-
-The class join flow now supports institute admission policies, grouped approval requests, and explicitly confirmed transfers. See [the admission API and rollout guide](docs/ADMISSIONS.md) for contracts, compatibility behavior, and migration order.
+Retired by migration 084. Joining is by class code only (see **Student**); open
+requests were approved or declined during the migration and students were notified.
 
 ### Misconception evidence integrity (migration 075)
 
@@ -4444,43 +4498,7 @@ The caller's 20 most recent successful sign-ins, for a "was that me?" list.
 `method` is `email_code` or `passkey`. Recorded from migration 078 onwards.
 
 ### Admissions
-
-#### GET `/institution/admissions/requests`
-Unchanged parameters (`filter=open|history`, `offset`). When an institution reviewer reads the list, each request adds:
-
-| Field | Meaning |
-|---|---|
-| `source_institution_name` | The institute a transfer comes from |
-| `approved_at` | When an admin approved it (`approved`/`joined` only) |
-| `email_verified` | Always `true`: accounts sign in with an emailed code |
-| `rule_checks` | Pending only: `[{ rule: "email_domain"\|"email_list"\|"roster", detail, matched }]` against the **current** policy |
-| `reason_code`, `reason_hint` | Open requests only: the case that explains it, and one line for the admin |
-| `targets[].meta` | Class targets: `{ student_count, archived }` |
-
-`reason_code` values:
-- `staff_account`, `blocked`, `suspended_member_new_code`: the account can't join as is.
-- `claim_code_used`, `claim_email_mismatch`: problems with the roster record being claimed.
-- `graduated_rejoin`: they left this institution before.
-- `destination_closed`: a requested class is archived or its code changed.
-- `transfer`, `transfer_waiting`: moving from another institute, before and after approval.
-
-#### GET `/institution/admissions/requests/counts`
-`{ "open": 12, "history": 140 }`
-
-#### POST `/institution/admissions/policy/test`
-Dry-runs the current policy against an email address. Nothing is stored.
-```json
-{ "email": "student@school.edu" }
-```
-```json
-{ "mode": "custom", "match": "any", "admit": false,
-  "checks": [
-    { "rule": "email_domain", "detail": "@sahyadri.edu.in", "matched": false },
-    { "rule": "email_list", "detail": "14 addresses", "matched": false },
-    { "rule": "roster", "detail": "37 unclaimed records", "matched": false } ] }
-```
-`PUT /institution/admissions/policy` now records the previous and new policy
-in the audit log (`changes` on the entry).
+Retired by migration 084 (`/institution/admissions/*` removed).
 
 ### Curriculum
 
@@ -4597,7 +4615,7 @@ Learning evidence for one curriculum version, grouped by chapter, with coverage.
 ### Find a student
 
 Search matches only people connected to this institution: an enrollment in
-any state (including unclaimed roster records) or an admission request. An
+any state (including unclaimed roster records). An
 unconnected email returns nothing. That is deliberate: this endpoint must not
 reveal whether an account exists elsewhere on Qwish.
 
@@ -4607,32 +4625,26 @@ reveal whether an account exists elsewhere on Qwish.
 [{ "user_id": "uuid-or-null", "enrollment_id": "uuid-or-null", "name": "Mira Thakur",
    "email": "mira@x.in", "roll_number": null, "state": "request_approved" }]
 ```
-`state` is the enrollment status, or `request_<status>` when the only link is an admission request.
+`state` is the enrollment status.
 
 #### GET `/institution/students/explain?user_id=` or `?enrollment_id=`
 ```json
 {
   "name": "Mira Thakur", "email": "mira@x.in",
-  "user_id": "uuid", "enrollment_id": null, "admission_request_id": "uuid",
-  "on_roster": false, "account_since": "2024-03-01T00:00:00Z",
+  "user_id": "uuid", "enrollment_id": "uuid",
+  "on_roster": true, "account_since": "2024-03-01T00:00:00Z",
   "chain": [
     { "key": "account", "label": "Account", "state": "Exists", "tone": "ok", "detail": "Verified email · student role" },
-    { "key": "admission", "label": "Admission request", "state": "Approved", "tone": "ok", "detail": "23 Sep · transfer · Mathematics B" },
-    { "key": "transfer", "label": "Transfer", "state": "Waiting for student", "tone": "wait", "detail": "Pending their confirmation to leave Deccan Heights Academy" },
-    { "key": "enrollment", "label": "Institute enrollment", "state": "None here yet", "tone": "none", "detail": "Active at Deccan Heights Academy" },
-    { "key": "classes", "label": "Class membership", "state": "0 of 1 requested", "tone": "none", "detail": "Not in any class" }
+    { "key": "enrollment", "label": "Institute enrollment", "state": "Active", "tone": "ok", "detail": "" },
+    { "key": "classes", "label": "Class membership", "state": "1 class", "tone": "ok", "detail": "Mathematics B" }
   ],
-  "diagnosis": {
-    "code": "transfer_waiting", "headline": "Approved, waiting for the student",
-    "detail": "Approval isn't enrollment. They join your roster when they confirm the transfer in NumPie. Nothing needs repair on your side.",
-    "actions": ["withdraw_approval"]
-  },
-  "events": [{ "at": "2026-09-20T10:42:00Z", "what": "Requested to join · Mathematics B", "by": "Mira Thakur · NumPie" }]
+  "diagnosis": { "code": "on_roster", "headline": "On your roster", "detail": "Active enrollment in Mathematics B.", "actions": ["open_profile"] },
+  "events": [{ "at": "2026-09-20T10:42:00Z", "what": "Joined the institute", "by": "Mira Thakur" }]
 }
 ```
 - `tone` is `ok`, `wait`, `none` or `fail`.
-- `diagnosis.code` is one of: `on_roster`, `suspended`, `unclaimed`, `awaiting_review`, `transfer_waiting`, `declined`, `cancelled`, `ended`.
-- `actions` names what the admin can do, and the client maps each to an existing endpoint: `open_profile`, `reactivate`, `copy_claim_code`, `review_request`, `withdraw_approval` (decline the request).
+- `diagnosis.code` is one of: `on_roster`, `suspended`, `unclaimed`, `ended`.
+- `actions` names what the admin can do: `open_profile`, `reactivate`, `copy_claim_code`.
 - `claim_code` is included for an unclaimed roster record.
 - `404` when nothing connects the person to the institution.
 
@@ -4642,7 +4654,6 @@ reveal whether an account exists elsewhere on Qwish.
 Everything waiting on the institution in one queue, oldest first.
 
 The item types are:
-- `admission`: pending, and approved transfers waiting on the student;
 - `teacher_verification`;
 - `edit_request`;
 - `unclaimed_records`: grouped by grade and section;
@@ -4655,7 +4666,7 @@ The item types are:
     "subtitle": "12 roster records still unclaimed", "waiting_since": "…", "link_id": "11|B",
     "owner_id": null, "owner_name": null, "assignable": true
   }],
-  "queues": [{ "type": "admission", "count": 12, "oldest": "…" }],
+  "queues": [{ "type": "teacher_verification", "count": 2, "oldest": "…" }],
   "counts": { "all": 58, "mine": 9, "unowned": 41, "stale": 3 },
   "page": 1, "limit": 20, "stale_after_days": 7, "updated_at": "…"
 }

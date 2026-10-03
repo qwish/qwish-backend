@@ -780,12 +780,6 @@ func main() {
 					// cannot collide with the existing /students/{userId}/status.
 					r.Patch("/enrollments/{enrollmentId}/status", enrollmentInstH.SetStudentStatus)
 					r.Post("/enrollments/bulk-status", enrollmentInstH.BulkSetStatus)
-					r.Post("/enrollments/promote", enrollmentInstH.PromoteStudents)
-					// Class-based promotion: pick a class, pick students, pick
-					// where they go. Recorded as a batch so it can be undone.
-					r.Post("/promotions", enrollmentInstH.CreatePromotion)
-					r.Get("/promotions", enrollmentInstH.ListPromotions)
-					r.Post("/promotions/{batchId}/revert", enrollmentInstH.RevertPromotion)
 					r.Get("/students/{userId}", institutionH.GetStudent)
 					r.Patch("/students/{userId}/status", institutionH.UpdateStudentStatus)
 					r.Get("/teachers", institutionH.ListTeachers)

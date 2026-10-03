@@ -51,34 +51,6 @@ func (h *InstitutionHandler) SetStudentStatus(w http.ResponseWriter, r *http.Req
 	middleware.JSON(w, http.StatusOK, map[string]string{"status": req.Status})
 }
 
-// POST /api/v1/institution/enrollments/promote
-//
-//	{from_grade, from_section, to_grade, to_section}
-func (h *InstitutionHandler) PromoteStudents(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		FromGrade   string `json:"from_grade"`
-		FromSection string `json:"from_section"`
-		ToGrade     string `json:"to_grade"`
-		ToSection   string `json:"to_section"`
-	}
-	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
-		middleware.BadRequest(w, "invalid request body")
-		return
-	}
-
-	n, err := h.svc.Promote(r.Context(), middleware.GetInstitutionID(r), PromoteFilter{
-		FromGrade: req.FromGrade, FromSection: req.FromSection,
-		ToGrade: req.ToGrade, ToSection: req.ToSection,
-	})
-	if err != nil {
-		middleware.BadRequest(w, err.Error())
-		return
-	}
-	middleware.JSON(w, http.StatusOK, map[string]int64{"promoted": n})
-}
-
-// POST /api/v1/institution/enrollments/bulk-status {enrollment_ids, status, reason}
-// Applies one lifecycle change to many enrollments. Each is independent: one
 // that can't change is reported and skipped, the rest still apply.
 func (h *InstitutionHandler) BulkSetStatus(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -122,4 +94,15 @@ func (h *InstitutionHandler) BulkSetStatus(w http.ResponseWriter, r *http.Reques
 	}
 	h.logAudit(r, adminID, instID, "set_enrollment_status", "enrollment", "", note)
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{"updated": updated, "skipped": skipped})
+}
+
+// logAudit mirrors the institution package's writer, so enrollment status
+// changes land in the same audit log as everything else.
+func (h *InstitutionHandler) logAudit(r *http.Request, adminID, instID, action, targetType, targetID, reason string) {
+	var name, role string
+	h.db.QueryRow(r.Context(), `SELECT display_name, role FROM users WHERE id=$1`, adminID).Scan(&name, &role)
+	h.db.Exec(r.Context(),
+		`INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, reason, institution_id)
+		 VALUES ($1,$2,$3,$4,$5,NULLIF($6,'')::uuid,$7,$8)`,
+		adminID, name, role, action, targetType, targetID, reason, instID)
 }

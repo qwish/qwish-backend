@@ -22,11 +22,14 @@ const classlessSQL = `
 SELECT e.id, e.user_id::text, i.name, e.end_warned_at,
        GREATEST(COALESCE(e.joined_at, e.created_at),
                 COALESCE((SELECT max(g.archived_at) FROM group_students gs JOIN groups g ON g.id=gs.group_id
-                          WHERE gs.user_id=e.user_id AND g.institution_id=e.institution_id), '-infinity')) AS since
+                          WHERE gs.user_id=e.user_id AND g.institution_id=e.institution_id AND g.kind='class'), '-infinity'),
+                COALESCE((SELECT max(h.left_at) FROM group_student_history h JOIN groups g ON g.id=h.group_id
+                          WHERE h.user_id=e.user_id AND g.institution_id=e.institution_id AND g.kind='class'), '-infinity')) AS since
   FROM enrollments e JOIN institutions i ON i.id=e.institution_id
  WHERE e.status IN ('active','suspended') AND e.user_id IS NOT NULL
    AND NOT EXISTS (SELECT 1 FROM group_students gs JOIN groups g ON g.id=gs.group_id
-                    WHERE gs.user_id=e.user_id AND g.institution_id=e.institution_id AND g.archived_at IS NULL)`
+                    WHERE gs.user_id=e.user_id AND g.institution_id=e.institution_id
+                      AND g.archived_at IS NULL AND g.kind='class')`
 
 // EndInactive warns students 7 days before, and ends enrollments that have had
 // no live class for 90 days. Callers send the notifications.
@@ -35,7 +38,7 @@ func (s *Service) EndInactive(ctx context.Context, now time.Time) (warn, ended [
 	// warning, so a later classless stretch is warned again.
 	if _, err = s.db.Exec(ctx, `UPDATE enrollments e SET end_warned_at=NULL
 		WHERE e.end_warned_at IS NOT NULL AND EXISTS (SELECT 1 FROM group_students gs JOIN groups g ON g.id=gs.group_id
-		  WHERE gs.user_id=e.user_id AND g.institution_id=e.institution_id AND g.archived_at IS NULL)`); err != nil {
+		  WHERE gs.user_id=e.user_id AND g.institution_id=e.institution_id AND g.archived_at IS NULL AND g.kind='class')`); err != nil {
 		return nil, nil, err
 	}
 	rows, err := s.db.Query(ctx, classlessSQL)

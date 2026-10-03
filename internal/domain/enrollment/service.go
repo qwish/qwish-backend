@@ -176,36 +176,6 @@ func (s *Service) SetStatus(ctx context.Context, instID, enrollmentID, status st
 	return tx.Commit(ctx)
 }
 
-// PromoteFilter selects the cohort to advance. FromSection empty means the
-// whole grade; ToSection empty leaves each student's section unchanged.
-type PromoteFilter struct {
-	FromGrade   string
-	FromSection string
-	ToGrade     string
-	ToSection   string
-}
-
-// Promote advances a cohort in one statement. Only live enrollments move.
-func (s *Service) Promote(ctx context.Context, instID string, f PromoteFilter) (int64, error) {
-	if f.FromGrade == "" || f.ToGrade == "" {
-		return 0, fmt.Errorf("from_grade and to_grade are required")
-	}
-	tag, err := s.db.Exec(ctx,
-		`UPDATE enrollments
-		    SET grade=$1,
-		        section = CASE WHEN $2 <> '' THEN $2 ELSE section END,
-		        updated_at = now()
-		  WHERE institution_id=$3
-		    AND grade=$4
-		    AND ($5='' OR section=$5)
-		    AND status IN ('active','suspended')`,
-		f.ToGrade, f.ToSection, instID, f.FromGrade, f.FromSection)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
-}
-
 var ErrNotYourClass = errors.New("teacher is not assigned to this class")
 
 // TeacherOwnsClass is the scope check for every teacher write: a teacher may

@@ -70,6 +70,9 @@ func TestNeverEndWithoutPriorWarning(t *testing.T) {
 	ctx := context.Background()
 	pool.Exec(ctx, `UPDATE enrollments SET joined_at=now()-interval '200 days' WHERE id=$1`, f.StudentEnrollmentID)
 	pool.Exec(ctx, `DELETE FROM group_students WHERE user_id=$1`, f.StudentID)
+	// The removal is recorded as history; make it long ago too.
+	pool.Exec(ctx, `UPDATE group_student_history SET joined_at=now()-interval '300 days', left_at=now()-interval '200 days' WHERE user_id=$1`, f.StudentID)
+	t.Cleanup(func() { pool.Exec(ctx, `DELETE FROM group_student_history WHERE user_id=$1`, f.StudentID) })
 
 	warn, ended, err := svc.EndInactive(ctx, time.Now())
 	if err != nil || hasUser(ended, f.StudentID) || !hasUser(warn, f.StudentID) {
@@ -100,5 +103,25 @@ func TestLiveClassClearsStaleWarning(t *testing.T) {
 	pool.QueryRow(ctx, `SELECT end_warned_at FROM enrollments WHERE id=$1`, f.StudentEnrollmentID).Scan(&warned)
 	if warned != nil {
 		t.Fatal("a live class must clear the auto-end warning")
+	}
+}
+func TestRemedialGroupDoesNotKeepEnrollmentAlive(t *testing.T) {
+	pool := openTestDB(t)
+	f := seedFixture(t, pool)
+	svc := NewService(pool)
+	ctx := context.Background()
+	pool.Exec(ctx, `UPDATE enrollments SET joined_at=now()-interval '200 days' WHERE id=$1`, f.StudentEnrollmentID)
+	pool.Exec(ctx, `UPDATE groups SET archived_at=now()-interval '91 days' WHERE id=$1`, f.GroupID)
+	rg, _ := newClass(t, pool, f.InstitutionID, false)
+	pool.Exec(ctx, `UPDATE groups SET kind='remedial' WHERE id=$1`, rg)
+	pool.Exec(ctx, `INSERT INTO group_students (group_id, user_id) VALUES ($1,$2)`, rg, f.StudentID)
+	// Warned first (a remedial group doesn't count as a class), ended a week later.
+	warn, _, err := svc.EndInactive(ctx, time.Now())
+	if err != nil || !hasUser(warn, f.StudentID) {
+		t.Fatalf("remedial-only student must be warned: %v %v", warn, err)
+	}
+	_, ended, err := svc.EndInactive(ctx, time.Now().Add(7*24*time.Hour))
+	if err != nil || !hasUser(ended, f.StudentID) {
+		t.Fatalf("remedial-only student must be ended: %v %v", ended, err)
 	}
 }

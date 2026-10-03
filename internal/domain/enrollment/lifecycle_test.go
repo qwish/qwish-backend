@@ -61,38 +61,6 @@ func TestSetStatusIsInstitutionScoped(t *testing.T) {
 	}
 }
 
-func TestPromoteAdvancesMatchingEnrollmentsOnly(t *testing.T) {
-	pool := openTestDB(t)
-	f := seedFixture(t, pool)
-	svc := NewService(pool)
-	ctx := context.Background()
-
-	// Fixture: StudentEnrollmentID is grade 9 section A; another student is 9/B.
-	var sectionB string
-	if err := pool.QueryRow(ctx, `INSERT INTO enrollments (institution_id, user_id, full_name, grade, section, status, joined_at)
-		VALUES ($1,$2,'solo','9','B','active',now()) RETURNING id`, f.InstitutionID, f.SoloStudentID).Scan(&sectionB); err != nil {
-		t.Fatal(err)
-	}
-	n, err := svc.Promote(ctx, f.InstitutionID, PromoteFilter{
-		FromGrade: "9", FromSection: "A", ToGrade: "10", ToSection: "A",
-	})
-	if err != nil {
-		t.Fatalf("Promote: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("promoted %d rows, want 1", n)
-	}
-
-	var grade string
-	pool.QueryRow(ctx, `SELECT grade FROM enrollments WHERE id=$1`, f.StudentEnrollmentID).Scan(&grade)
-	if grade != "10" {
-		t.Fatalf("grade = %q, want 10", grade)
-	}
-	pool.QueryRow(ctx, `SELECT grade FROM enrollments WHERE id=$1`, sectionB).Scan(&grade)
-	if grade != "9" {
-		t.Fatalf("section B was promoted too: grade = %q, want 9", grade)
-	}
-}
 func TestSuspensionIsPerInstitute(t *testing.T) {
 	pool := openTestDB(t)
 	f := seedFixture(t, pool)

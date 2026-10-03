@@ -126,34 +126,24 @@ type education struct {
 }
 
 type enrollment struct {
-	RollNumber    *string    `json:"roll_number"`
-	Grade         *string    `json:"grade"`
-	Section       *string    `json:"section"`
-	AdmissionDate *string    `json:"admission_date"`
-	Status        string     `json:"status"`
-	JoinedAt      *time.Time `json:"joined_at"`
+	Grade    *string    `json:"grade"`
+	Section  *string    `json:"section"`
+	Status   string     `json:"status"`
+	JoinedAt *time.Time `json:"joined_at"`
 }
 
 type profile struct {
 	Student struct {
-		ID                   string     `json:"id"`
-		FullName             string     `json:"full_name"`
-		DisplayName          string     `json:"display_name"`
-		Email                string     `json:"email"`
-		Phone                *string    `json:"phone"`
-		DateOfBirth          *string    `json:"date_of_birth"`
-		Gender               *string    `json:"gender"`
-		Address              *string    `json:"address"`
-		GuardianName         *string    `json:"guardian_name"`
-		GuardianPhone        *string    `json:"guardian_phone"`
-		GuardianEmail        *string    `json:"guardian_email"`
-		HighestQualification *string    `json:"highest_qualification"`
-		Domain               *string    `json:"domain"`
-		Interests            []string   `json:"interests"`
-		PreferredLanguage    string     `json:"preferred_language"`
-		Status               string     `json:"status"`
-		MemberSince          time.Time  `json:"member_since"`
-		LastActiveAt         *time.Time `json:"last_active_at"`
+		ID                string     `json:"id"`
+		FullName          string     `json:"full_name"`
+		DisplayName       string     `json:"display_name"`
+		Email             string     `json:"email"`
+		Domain            *string    `json:"domain"`
+		Interests         []string   `json:"interests"`
+		PreferredLanguage string     `json:"preferred_language"`
+		Status            string     `json:"status"`
+		MemberSince       time.Time  `json:"member_since"`
+		LastActiveAt      *time.Time `json:"last_active_at"`
 	} `json:"student"`
 	Enrollment  *enrollment      `json:"enrollment"`
 	Classes     []string         `json:"classes"`
@@ -193,25 +183,22 @@ func (h *Handler) serveProfile(w http.ResponseWriter, r *http.Request, scope str
 func (h *Handler) loadProfile(ctx context.Context, studentID, inst string) (profile, error) {
 	var p profile
 	s := &p.Student
-	err := h.db.QueryRow(ctx, `SELECT u.id, u.full_name, u.display_name, u.email, NULLIF(u.phone,''), to_char(u.date_of_birth,'YYYY-MM-DD'),
-		NULLIF(u.gender,''), NULLIF(u.address,''), NULLIF(u.guardian_name,''), NULLIF(u.guardian_phone,''), NULLIF(u.guardian_email,''),
-		NULLIF(u.highest_qualification,''), NULLIF(u.domain,''), u.interest_domains, u.preferred_language, u.status, u.member_since, u.last_active_at,
+	err := h.db.QueryRow(ctx, `SELECT u.id, u.full_name, u.display_name, u.email, NULLIF(u.domain,''), u.interest_domains, u.preferred_language, u.status, u.member_since, u.last_active_at,
 		COALESCE((SELECT array_agg(g.name ORDER BY g.name) FROM group_students gs JOIN groups g ON g.id=gs.group_id
 			WHERE gs.user_id=u.id AND g.institution_id=$2 AND g.archived_at IS NULL),'{}'),
 		COALESCE((SELECT array_agg(DISTINCT d.name) FROM group_students gs JOIN groups g ON g.id=gs.group_id JOIN departments d ON d.id=g.department_id
 			WHERE gs.user_id=u.id AND g.institution_id=$2 AND g.archived_at IS NULL AND d.archived_at IS NULL),'{}'),
 		COALESCE((SELECT array_agg(skill_name ORDER BY skill_name) FROM user_skills WHERE user_id=u.id),'{}')
-		FROM users u WHERE u.id=$1`, studentID, inst).Scan(&s.ID, &s.FullName, &s.DisplayName, &s.Email, &s.Phone, &s.DateOfBirth,
-		&s.Gender, &s.Address, &s.GuardianName, &s.GuardianPhone, &s.GuardianEmail, &s.HighestQualification, &s.Domain,
+		FROM users u WHERE u.id=$1`, studentID, inst).Scan(&s.ID, &s.FullName, &s.DisplayName, &s.Email, &s.Domain,
 		&s.Interests, &s.PreferredLanguage, &s.Status, &s.MemberSince, &s.LastActiveAt, &p.Classes, &p.Departments, &p.Skills)
 	if err != nil {
 		return p, err
 	}
 
 	en := &enrollment{}
-	err = h.db.QueryRow(ctx, `SELECT roll_number, grade, section, to_char(admission_date,'YYYY-MM-DD'), status, joined_at
+	err = h.db.QueryRow(ctx, `SELECT grade, section, status, joined_at
 		FROM enrollments WHERE user_id=$1 AND institution_id=$2 AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1`, studentID, inst).
-		Scan(&en.RollNumber, &en.Grade, &en.Section, &en.AdmissionDate, &en.Status, &en.JoinedAt)
+		Scan(&en.Grade, &en.Section, &en.Status, &en.JoinedAt)
 	if err == nil {
 		p.Enrollment = en
 	} else if !errors.Is(err, pgx.ErrNoRows) {

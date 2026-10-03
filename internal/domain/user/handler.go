@@ -45,8 +45,7 @@ func (h *Handler) GetMe(w http.ResponseWriter, r *http.Request) {
 
 // PATCH /api/v1/users/me
 func (h *Handler) UpdateMe(w http.ResponseWriter, r *http.Request) {
-	// The body is read once and unmarshalled twice: display_name goes through
-	// the service, the rest are plain column writes.
+	// Retired personal fields sent by older app builds are ignored.
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		middleware.BadRequest(w, "invalid request body")
@@ -79,19 +78,6 @@ func (h *Handler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var pf personalFields
-	if err := json.Unmarshal(body, &pf); err != nil {
-		middleware.BadRequest(w, "invalid request body")
-		return
-	}
-	if set, args := buildUserPatch(pf); set != "" {
-		args = append(args, userID)
-		if err := h.svc.UpdatePersonalFields(r.Context(), set, args); err != nil {
-			log.Printf("UpdateMe: personal fields: %v", err)
-			middleware.InternalError(w)
-			return
-		}
-	}
 	profile, _ := h.svc.GetProfile(r.Context(), userID)
 	middleware.JSON(w, http.StatusOK, profile)
 }

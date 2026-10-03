@@ -60,3 +60,33 @@ func TestUpdateMeSetsFullName(t *testing.T) {
 		t.Fatalf("blank name must be rejected, got %d", c)
 	}
 }
+
+// Older app builds still send personal fields; they are ignored, not a 400/500.
+func TestUpdateMeIgnoresRetiredFields(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	var id string
+	tag := fmt.Sprintf("%d", time.Now().UnixNano())
+	if err := pool.QueryRow(ctx, `INSERT INTO users (supabase_uid, full_name, display_name, email, role)
+		VALUES (gen_random_uuid(),'Old','Old','rf'||$1||'@example.test','student') RETURNING id`, tag).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pool.Exec(ctx, `DELETE FROM users WHERE id=$1`, id) })
+	r := httptest.NewRequest("PATCH", "/users/me", strings.NewReader(`{"display_name":"Riya","guardian_name":"X","date_of_birth":"2010-01-01"}`))
+	r = r.WithContext(context.WithValue(r.Context(), middleware.ContextKeyUserID, id))
+	w := httptest.NewRecorder()
+	NewHandler(NewService(pool)).UpdateMe(w, r)
+	var name string
+	pool.QueryRow(ctx, `SELECT display_name FROM users WHERE id=$1`, id).Scan(&name)
+	if w.Code != 200 || name != "Riya" {
+		t.Fatalf("code=%d display_name=%q body=%s", w.Code, name, w.Body)
+	}
+}

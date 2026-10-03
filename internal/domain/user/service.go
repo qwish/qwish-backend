@@ -3,7 +3,6 @@ package user
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -456,16 +455,6 @@ func (s *Service) UpdateFullName(ctx context.Context, userID, name string) error
 func (s *Service) UpdateDisplayName(ctx context.Context, userID, name string) error {
 	_, err := s.db.Exec(ctx,
 		`UPDATE users SET display_name = $1, updated_at = now() WHERE id = $2`, name, userID)
-	return err
-}
-
-// UpdatePersonalFields applies a SET clause built by buildUserPatch. The
-// clause is assembled from a fixed column list, never from client input; the
-// caller appends the user id as the final argument.
-func (s *Service) UpdatePersonalFields(ctx context.Context, set string, args []interface{}) error {
-	_, err := s.db.Exec(ctx,
-		fmt.Sprintf(`UPDATE users SET %s, updated_at = now() WHERE id = $%d`, set, len(args)),
-		args...)
 	return err
 }
 

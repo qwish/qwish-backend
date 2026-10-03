@@ -135,6 +135,7 @@ func main() {
 	enrollmentStudentH := enrollment.NewStudentHandler(enrollmentSvc)
 	enrollmentInstH := enrollment.NewInstitutionHandler(enrollmentSvc, pool)
 	enrollmentTeacherH := enrollment.NewTeacherHandler(enrollmentSvc)
+	domainH := enrollment.NewDomainHandler(enrollmentSvc)
 	editRequestH := editrequest.NewHandler(editrequest.NewService(pool))
 	userEmailH := useremail.NewHandler(useremail.NewService(pool, func(ctx context.Context, to, code string) error {
 		return notifSvc.SendLoginOTP(ctx, to, code, 10)
@@ -929,6 +930,9 @@ func main() {
 
 					// Announcements
 					r.Get("/announcements", adminH.ListAnnouncements)
+					r.With(mw.RequireRole("super_admin")).Get("/institutions/{institutionId}/domains", domainH.List)
+					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/domains", domainH.Add)
+					r.With(mw.RequireRole("super_admin")).Delete("/institutions/{institutionId}/domains/{domain}", domainH.Remove)
 					r.With(mw.RequireRole("super_admin", "moderator")).Post("/announcements", adminH.CreateAnnouncement)
 					r.With(mw.RequireRole("super_admin")).Post("/announcements/{announcementId}/publish", adminH.PublishAnnouncement)
 					r.With(mw.RequireRole("super_admin", "moderator")).Patch("/announcements/{announcementId}/retract", adminH.RetractAnnouncement)

@@ -89,5 +89,5 @@ func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	middleware.JSON(w, http.StatusOK, map[string]string{"message": "email removed"})
 }

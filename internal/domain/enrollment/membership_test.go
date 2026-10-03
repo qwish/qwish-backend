@@ -61,3 +61,19 @@ func TestCannotLeaveWhileSuspended(t *testing.T) {
 		t.Fatalf("want ErrLeaveSuspended, got %v", err)
 	}
 }
+
+func TestCannotSwitchToSuspendedInstitute(t *testing.T) {
+	pool := openTestDB(t)
+	f := seedFixture(t, pool)
+	svc := NewService(pool)
+	ctx := context.Background()
+	g2, c2 := newClass(t, pool, f.OtherInstitutionID, true)
+	if _, err := svc.ConfirmJoin(ctx, f.StudentID, c2, g2); err != nil {
+		t.Fatal(err)
+	}
+	pool.Exec(ctx, `UPDATE institutions SET status='suspended' WHERE id=$1`, f.InstitutionID)
+	t.Cleanup(func() { pool.Exec(ctx, `UPDATE institutions SET status='verified' WHERE id=$1`, f.InstitutionID) })
+	if err := svc.SetActive(ctx, f.StudentID, f.InstitutionID); err != ErrNotFound {
+		t.Fatalf("switching to a suspended institute: want ErrNotFound, got %v", err)
+	}
+}

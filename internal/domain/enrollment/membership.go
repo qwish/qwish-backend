@@ -41,7 +41,8 @@ func (s *Service) ListMine(ctx context.Context, userID string) ([]Enrollment, er
 
 func (s *Service) SetActive(ctx context.Context, userID, instID string) error {
 	tag, err := s.db.Exec(ctx, `UPDATE users SET institution_id=$2, updated_at=now()
-		WHERE id=$1 AND EXISTS(SELECT 1 FROM enrollments WHERE user_id=$1 AND institution_id=$2 AND status='active')`,
+		WHERE id=$1 AND EXISTS(SELECT 1 FROM enrollments e JOIN institutions i ON i.id=e.institution_id AND i.status='verified'
+		  WHERE e.user_id=$1 AND e.institution_id=$2 AND e.status='active')`,
 		userID, instID)
 	if err == nil && tag.RowsAffected() == 0 {
 		return ErrNotFound

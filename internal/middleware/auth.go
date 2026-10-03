@@ -158,11 +158,17 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 				return
 			}
 
-			// Check institution suspension for non-admin users
-			if u.InstitutionID != nil && (u.Role == "student" || u.Role == "teacher") &&
-				instStatus == "suspended" {
-				Error(w, http.StatusForbidden, "INSTITUTION_SUSPENDED", "your institution is currently suspended")
-				return
+			// Institution suspension: staff are blocked; a student only loses that
+			// institute for this request, so their other institute still works.
+			if u.InstitutionID != nil {
+				block, drop := instituteGate(u.Role, instStatus)
+				if block {
+					Error(w, http.StatusForbidden, "INSTITUTION_SUSPENDED", "your institution is currently suspended")
+					return
+				}
+				if drop {
+					u.InstitutionID = nil
+				}
 			}
 
 			ctx := context.WithValue(r.Context(), ContextKeyUserID, u.ID)
@@ -186,6 +192,22 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// instituteGate decides what a suspended active institute means for a user:
+// block the request (staff) or drop the institute from it (students, who may
+// belong to a second institute and must still be able to switch).
+func instituteGate(role, instStatus string) (block, dropInstitute bool) {
+	if instStatus != "suspended" {
+		return false, false
+	}
+	switch role {
+	case "teacher":
+		return true, false
+	case "student":
+		return false, true
+	}
+	return false, false
 }
 
 // RequireUserRecord rejects an admin_accounts-only principal from routes whose

@@ -90,3 +90,18 @@ func TestTeacherSeesStudentWhoseActiveInstituteIsOther(t *testing.T) {
 		t.Fatalf("roster rows must say how the student joined: %s", w.Body)
 	}
 }
+
+func TestGetClassReportsJoiningSwitch(t *testing.T) {
+	pool := openTestDB(t)
+	s := seedTwoInstitutes(t, pool)
+	pool.Exec(context.Background(), `UPDATE groups SET joining_enabled=false WHERE id=$1`, s.ClassB)
+	req := teacherRequest(httptest.NewRequest("GET", "/", nil), s.TeacherB, s.InstB)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("classId", s.ClassB)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	NewHandler(pool).GetClass(w, req)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"joining_enabled":false`) {
+		t.Fatalf("class detail must report the joining switch: %d %s", w.Code, w.Body)
+	}
+}

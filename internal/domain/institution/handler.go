@@ -1084,10 +1084,11 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
 
 	var name, inviteCode string
+	var joiningEnabled bool
 	var description *string
 	if err := h.db.QueryRow(r.Context(),
-		`SELECT name, description, invite_code FROM groups WHERE id=$1 AND institution_id=$2`,
-		groupID, instID).Scan(&name, &description, &inviteCode); err != nil {
+		`SELECT name, description, invite_code, joining_enabled FROM groups WHERE id=$1 AND institution_id=$2`,
+		groupID, instID).Scan(&name, &description, &inviteCode, &joiningEnabled); err != nil {
 		middleware.NotFound(w, "group not found")
 		return
 	}
@@ -1171,7 +1172,7 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 	trows.Close()
 
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
-		"id": groupID, "name": name, "description": description, "invite_code": inviteCode,
+		"id": groupID, "name": name, "description": description, "invite_code": inviteCode, "joining_enabled": joiningEnabled,
 		"student_count": studentCount, "average_score": avgScore,
 		"students": students, "teachers": teachers,
 	})

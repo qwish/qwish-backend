@@ -40,3 +40,15 @@ func TestStudentDetailIsInstituteIsolated(t *testing.T) {
 		t.Fatalf("institute A must see only its own attempts: %d %s", w.Code, body)
 	}
 }
+
+func TestGetGroupReportsJoiningSwitch(t *testing.T) {
+	pool := openTestDB(t)
+	s := seedTwoInstitutes(t, pool)
+	pool.Exec(context.Background(), `UPDATE groups SET joining_enabled=false WHERE id=$1`, s.ClassB)
+	r := withURLParam(withAuth(httptest.NewRequest("GET", "/", nil), s.AdminB, "institution_admin", s.InstB), "groupId", s.ClassB)
+	w := httptest.NewRecorder()
+	NewHandler(pool, nil, nil, "", "").GetGroup(w, r)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"joining_enabled":false`) {
+		t.Fatalf("group detail must report the joining switch: %d %s", w.Code, w.Body)
+	}
+}

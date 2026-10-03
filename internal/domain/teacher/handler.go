@@ -556,9 +556,10 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 	var createdAt time.Time
 	var studentCount int
 	var avgScore float64
+	var joiningEnabled bool
 	// Class details + roster size + average, in one round-trip.
 	h.db.QueryRow(r.Context(), `SELECT
-		g.name, g.description, g.invite_code, g.created_at,
+		g.name, g.description, g.invite_code, g.created_at, g.joining_enabled,
 		(SELECT COUNT(DISTINCT gs.user_id)
 		   FROM group_students gs
 		   JOIN users u ON u.id=gs.user_id
@@ -571,7 +572,7 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 		 JOIN group_students gs ON gs.user_id=qa.user_id
 		 WHERE gs.group_id=$1 AND qa.status='completed')
 		FROM groups g WHERE g.id=$1`, classID,
-	).Scan(&name, &description, &inviteCode, &createdAt, &studentCount, &avgScore)
+	).Scan(&name, &description, &inviteCode, &createdAt, &joiningEnabled, &studentCount, &avgScore)
 
 	sRows, _ := h.db.Query(r.Context(), `
 		SELECT u.id, e.id, u.display_name, u.email, e.roll_number, e.grade, e.section,
@@ -613,14 +614,15 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 	}
 
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
-		"id":            classID,
-		"name":          name,
-		"description":   description,
-		"invite_code":   inviteCode,
-		"created_at":    createdAt,
-		"student_count": studentCount,
-		"average_score": avgScore,
-		"students":      students,
+		"id":              classID,
+		"name":            name,
+		"description":     description,
+		"invite_code":     inviteCode,
+		"joining_enabled": joiningEnabled,
+		"created_at":      createdAt,
+		"student_count":   studentCount,
+		"average_score":   avgScore,
+		"students":        students,
 	})
 }
 

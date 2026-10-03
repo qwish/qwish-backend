@@ -47,6 +47,7 @@ import (
 	"github.com/qwish/backend/internal/domain/teacher"
 	"github.com/qwish/backend/internal/domain/topicrequest"
 	"github.com/qwish/backend/internal/domain/upload"
+	"github.com/qwish/backend/internal/domain/useremail"
 	"github.com/qwish/backend/internal/domain/user"
 	mw "github.com/qwish/backend/internal/middleware"
 	"github.com/qwish/backend/internal/playintegrity"
@@ -135,6 +136,9 @@ func main() {
 	enrollmentInstH := enrollment.NewInstitutionHandler(enrollmentSvc, pool)
 	enrollmentTeacherH := enrollment.NewTeacherHandler(enrollmentSvc)
 	editRequestH := editrequest.NewHandler(editrequest.NewService(pool))
+	userEmailH := useremail.NewHandler(useremail.NewService(pool, func(ctx context.Context, to, code string) error {
+		return notifSvc.SendLoginOTP(ctx, to, code, 10)
+	}))
 	editRequestH.SetNotifier(notifSvc, cfg.TeacherURL)
 	questionGenerator := &teacher.Generator{APIKey: cfg.AnthropicAPIKey, Model: cfg.AnthropicModel}
 	studentAdminH := admin.NewStudentAdminHandler(pool)
@@ -563,6 +567,11 @@ func main() {
 				r.With(mw.RequireRole("student")).Post("/students/claim", enrollmentStudentH.Claim)
 				r.With(mw.RequireRole("student")).Post("/students/join-class", enrollmentStudentH.JoinClass)
 				r.Get("/users/me/enrollment", enrollmentStudentH.Mine)
+				r.Get("/users/me/emails", userEmailH.List)
+				r.With(mw.RateLimitByUser(10, time.Hour)).Post("/users/me/emails", userEmailH.Add)
+				r.With(mw.RateLimitByUser(30, time.Hour)).Post("/users/me/emails/{emailId}/verify", userEmailH.Verify)
+				r.With(mw.RateLimitByUser(10, time.Hour)).Post("/users/me/emails/{emailId}/resend", userEmailH.Resend)
+				r.Delete("/users/me/emails/{emailId}", userEmailH.Remove)
 
 				// Social: batchmate follows
 				r.Post("/users/{userId}/follow", studyGroupH.Follow)

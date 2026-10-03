@@ -42,6 +42,12 @@ func TestTeacherEndsAndReopensOwnClass(t *testing.T) {
 	if w.Code != 200 || archived != nil {
 		t.Fatalf("reopen: %d archived=%v", w.Code, archived)
 	}
+	var audited int
+	pool.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE admin_id=$1 AND target_id=$2 AND institution_id=$3
+		AND action_type IN ('archive_group','reopen_group')`, s.TeacherB, s.ClassB, s.InstB).Scan(&audited)
+	if audited != 2 {
+		t.Fatalf("teacher end+reopen must be audited, got %d rows", audited)
+	}
 
 	req := teacherRequest(httptest.NewRequest("GET", "/", nil), s.TeacherB, s.InstB)
 	rctx := chi.NewRouteContext()

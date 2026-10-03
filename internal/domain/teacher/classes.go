@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	qdb "github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/middleware"
 )
@@ -24,6 +25,7 @@ func (h *Handler) EndClass(w http.ResponseWriter, r *http.Request) {
 		middleware.NotFound(w, "class")
 		return
 	}
+	logClassAudit(r, h.db, "archive_group", classID)
 	if h.onClassEnded != nil {
 		h.onClassEnded(r.Context(), classID)
 	}
@@ -43,5 +45,14 @@ func (h *Handler) ReopenClass(w http.ResponseWriter, r *http.Request) {
 		middleware.Error(w, status, code, msg)
 		return
 	}
+	logClassAudit(r, h.db, "reopen_group", chi.URLParam(r, "classId"))
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "class reopened"})
+}
+
+// logClassAudit writes the same audit rows the institute end/reopen does, so
+// the institute's audit log shows which teacher ended a class. Best-effort.
+func logClassAudit(r *http.Request, pool *pgxpool.Pool, action, classID string) {
+	pool.Exec(r.Context(), `INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, reason, institution_id)
+		SELECT id, COALESCE(display_name,''), role, $2, 'group', $3, '', NULLIF($4,'')::uuid FROM users WHERE id=$1`,
+		middleware.GetUserID(r), action, classID, middleware.GetInstitutionID(r))
 }

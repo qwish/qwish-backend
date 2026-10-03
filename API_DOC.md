@@ -4722,7 +4722,7 @@ Groups carry `grade`, `section` (nullable, for reports only, never shown to stud
 The detail endpoints also return `archived_at`. A student who joins a class with a grade takes that grade and section onto their enrollment. Remedial groups never set grade.
 
 - `POST /institution/groups`: `{ "name", "description?", "grade?", "section?" }`.
-- `PATCH /institution/groups/{groupId}`: partial; any of `name`, `description`, `grade`, `section`. An empty `grade`/`section` clears it. `grade`/`section` over 40 characters return `400`. `404` outside your institute.
+- `PATCH /institution/groups/{groupId}`: partial; any of `name`, `description`, `grade`, `section`. An empty `grade`/`section` clears it. Changing `grade` relabels the class's current members' report stages; it doesn't change their enrollments. `grade`/`section` over 40 characters return `400`. `404` outside your institute.
 
 ### Ending and reopening
 | Route | Who | Response |
@@ -4733,6 +4733,7 @@ The detail endpoints also return `archived_at`. A student who joins a class with
 | `POST /teacher/classes/{classId}/reopen` | assigned teacher | `200 {"message":"class reopened"}` |
 
 - Ending notifies the class's students that the class ended and prompts them to join their next class.
+- Teacher and admin end/reopen both write `archive_group` / `reopen_group` to the institute audit log.
 - Reopen works for 90 days after ending. After that it returns `409 CLASS_REOPEN_EXPIRED`. Reopening a live class is a no-op `200`.
 - An unknown class, or one outside your scope, returns `404 NOT_FOUND`.
 - `GET /teacher/classes?include_ended=1` includes ended classes. They are excluded by default.

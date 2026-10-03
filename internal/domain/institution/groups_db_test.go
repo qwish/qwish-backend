@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/qwish/backend/internal/domain/notification"
 )
 
 func TestGroupWritesAreInstituteScoped(t *testing.T) {
@@ -107,5 +109,38 @@ func TestListGroupsCarriesClassFields(t *testing.T) {
 		if !strings.Contains(b, want) {
 			t.Fatalf("list groups missing %s: %s", want, b)
 		}
+	}
+}
+
+// Only students still enrolled hear that their class ended.
+func TestClassEndedNotifiesOnlyEnrolledStudents(t *testing.T) {
+	pool := openTestDB(t)
+	s := seedTwoInstitutes(t, pool)
+	ctx := context.Background()
+	var ex string
+	if err := pool.QueryRow(ctx, `INSERT INTO users (supabase_uid, full_name, display_name, email, role)
+		VALUES (gen_random_uuid(), 'ex', 'ex', 'ex-'||gen_random_uuid()||'@example.test', 'student') RETURNING id`).Scan(&ex); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(ctx, `DELETE FROM user_notifications WHERE user_id = ANY($1)`, []string{ex, s.Student})
+		pool.Exec(ctx, `DELETE FROM group_students WHERE user_id=$1`, ex)
+		pool.Exec(ctx, `DELETE FROM enrollments WHERE user_id=$1`, ex)
+		pool.Exec(ctx, `DELETE FROM users WHERE id=$1`, ex)
+	})
+	if _, err := pool.Exec(ctx, `INSERT INTO enrollments (institution_id, user_id, full_name, status) VALUES ($1,$2,'ex','left')`, s.InstB, ex); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO group_students (group_id, user_id) VALUES ($1,$2)`, s.ClassB, ex); err != nil {
+		t.Fatal(err)
+	}
+	NotifyClassEnded(ctx, pool, notification.NewService(pool, "", "", ""), s.ClassB)
+	notified := func(uid string) bool {
+		var n int
+		pool.QueryRow(ctx, `SELECT count(*) FROM user_notifications WHERE user_id=$1 AND reference=$2`, uid, "class-ended:"+s.ClassB).Scan(&n)
+		return n == 1
+	}
+	if !notified(s.Student) || notified(ex) {
+		t.Fatalf("active notified=%v, left notified=%v", notified(s.Student), notified(ex))
 	}
 }

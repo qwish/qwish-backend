@@ -54,6 +54,7 @@ func seedTwoInstitutes(t *testing.T, pool *pgxpool.Pool) twoInstitutes {
 		pool.Exec(ctx, `DELETE FROM enrollments WHERE institution_id = ANY($1)`, insts)
 		pool.Exec(ctx, `DELETE FROM groups WHERE institution_id = ANY($1)`, insts)
 		pool.Exec(ctx, `DELETE FROM users WHERE id = ANY($1)`, []string{s.TeacherB, s.Student})
+		pool.Exec(ctx, `DELETE FROM audit_log WHERE institution_id = ANY($1)`, insts)
 		pool.Exec(ctx, `DELETE FROM institutions WHERE id = ANY($1)`, insts)
 	})
 	return s

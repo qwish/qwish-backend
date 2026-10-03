@@ -81,6 +81,10 @@ func (h *StudentHandler) SetActive(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/users/me/enrollments/{enrollmentId}/leave
 func (h *StudentHandler) Leave(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.Leave(r.Context(), middleware.GetUserID(r), chi.URLParam(r, "enrollmentId")); err != nil {
+		if errors.Is(err, ErrLeaveSuspended) {
+			middleware.Error(w, 409, "LEAVE_SUSPENDED", "Your enrollment here is suspended. Contact the institute to lift it or end it.")
+			return
+		}
 		if errors.Is(err, ErrNotFound) {
 			middleware.NotFound(w, "enrollment")
 			return

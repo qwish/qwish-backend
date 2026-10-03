@@ -49,6 +49,10 @@ func (s *Service) SetActive(ctx context.Context, userID, instID string) error {
 	return err
 }
 
+// ErrLeaveSuspended: a suspended student can't leave and rejoin fresh by code;
+// the institute lifts the suspension or ends the enrollment.
+var ErrLeaveSuspended = errors.New("cannot leave while suspended")
+
 // Leave ends the student's own enrollment. Class rows at that institute are
 // removed (history is kept by plan 3's trigger); the active pointer is moved
 // by the sync_student_institute trigger.
@@ -60,8 +64,12 @@ func (s *Service) Leave(ctx context.Context, userID, enrollmentID string) error 
 	defer tx.Rollback(ctx)
 	var instID string
 	err = tx.QueryRow(ctx, `UPDATE enrollments SET status='left', ended_by='student', ended_at=now(), updated_at=now()
-		WHERE id=$1 AND user_id=$2 AND status IN ('active','suspended') RETURNING institution_id::text`, enrollmentID, userID).Scan(&instID)
+		WHERE id=$1 AND user_id=$2 AND status='active' RETURNING institution_id::text`, enrollmentID, userID).Scan(&instID)
 	if errors.Is(err, pgx.ErrNoRows) {
+		var suspended bool
+		if s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM enrollments WHERE id=$1 AND user_id=$2 AND status='suspended')`, enrollmentID, userID).Scan(&suspended); suspended {
+			return ErrLeaveSuspended
+		}
 		return ErrNotFound
 	}
 	if err != nil {

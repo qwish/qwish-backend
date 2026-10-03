@@ -47,3 +47,17 @@ func TestLeaveActiveRepointsToOther(t *testing.T) {
 		t.Fatalf("active=%s status=%s by=%s members=%d", active, status, by, members)
 	}
 }
+
+// Leaving can't be used to shed a suspension and rejoin fresh by code.
+func TestCannotLeaveWhileSuspended(t *testing.T) {
+	pool := openTestDB(t)
+	f := seedFixture(t, pool)
+	svc := NewService(pool)
+	ctx := context.Background()
+	if err := svc.SetStatus(ctx, f.InstitutionID, f.StudentEnrollmentID, "suspended"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Leave(ctx, f.StudentID, f.StudentEnrollmentID); err != ErrLeaveSuspended {
+		t.Fatalf("want ErrLeaveSuspended, got %v", err)
+	}
+}

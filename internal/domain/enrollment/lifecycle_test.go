@@ -50,31 +50,6 @@ func TestGraduatedStudentCanEnrollElsewhere(t *testing.T) {
 	}
 }
 
-// Suspension has to reach users.status, which is what actually blocks login.
-func TestSuspendMirrorsUserStatus(t *testing.T) {
-	pool := openTestDB(t)
-	f := seedFixture(t, pool)
-	svc := NewService(pool)
-	ctx := context.Background()
-
-	if err := svc.SetStatus(ctx, f.InstitutionID, f.StudentEnrollmentID, "suspended"); err != nil {
-		t.Fatalf("SetStatus: %v", err)
-	}
-	var userStatus string
-	pool.QueryRow(ctx, `SELECT status FROM users WHERE id=$1`, f.StudentID).Scan(&userStatus)
-	if userStatus != "suspended" {
-		t.Fatalf("users.status = %q, want suspended", userStatus)
-	}
-
-	if err := svc.SetStatus(ctx, f.InstitutionID, f.StudentEnrollmentID, "active"); err != nil {
-		t.Fatalf("reactivate: %v", err)
-	}
-	pool.QueryRow(ctx, `SELECT status FROM users WHERE id=$1`, f.StudentID).Scan(&userStatus)
-	if userStatus != "active" {
-		t.Fatalf("users.status = %q, want active after reactivation", userStatus)
-	}
-}
-
 func TestSetStatusIsInstitutionScoped(t *testing.T) {
 	pool := openTestDB(t)
 	f := seedFixture(t, pool)
@@ -111,5 +86,37 @@ func TestPromoteAdvancesMatchingEnrollmentsOnly(t *testing.T) {
 	pool.QueryRow(ctx, `SELECT grade FROM enrollments WHERE id=$1`, f.UnclaimedEnrollmentID).Scan(&grade)
 	if grade != "9" {
 		t.Fatalf("section B was promoted too: grade = %q, want 9", grade)
+	}
+}
+func TestSuspensionIsPerInstitute(t *testing.T) {
+	pool := openTestDB(t)
+	f := seedFixture(t, pool)
+	svc := NewService(pool)
+	ctx := context.Background()
+	g2, c2 := newClass(t, pool, f.OtherInstitutionID, true)
+	if _, err := svc.ConfirmJoin(ctx, f.StudentID, c2, g2); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetStatus(ctx, f.InstitutionID, f.StudentEnrollmentID, "suspended"); err != nil {
+		t.Fatal(err)
+	}
+	var userStatus string
+	pool.QueryRow(ctx, `SELECT status FROM users WHERE id=$1`, f.StudentID).Scan(&userStatus)
+	if userStatus != "active" {
+		t.Fatalf("suspension at one institute must not lock the account, got %q", userStatus)
+	}
+	// A suspended enrollment can't be the active institute: its content is
+	// paused while the other institute keeps working.
+	if err := svc.SetActive(ctx, f.StudentID, f.InstitutionID); err == nil {
+		t.Fatal("switching to a suspended institute must be refused")
+	}
+	var active string
+	pool.QueryRow(ctx, `SELECT institution_id::text FROM users WHERE id=$1`, f.StudentID).Scan(&active)
+	if active != f.OtherInstitutionID {
+		t.Fatalf("active institute = %s, want the non-suspended one", active)
+	}
+	list, err := svc.ListMine(ctx, f.StudentID)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("both enrollments stay listed: %+v %v", list, err)
 	}
 }

@@ -66,8 +66,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS enrollments_one_live_per_institute
   ON enrollments(user_id, institution_id)
   WHERE user_id IS NOT NULL AND status IN ('active','suspended');
 
--- users.institution_id is now the student's active institute: keep it if it is
--- still live, otherwise move to the most recently joined live one, else NULL.
+-- users.institution_id is now the student's active institute: keep it if that
+-- enrollment is still active, otherwise move to the most recently joined active
+-- one, else NULL. A suspended enrollment is never active, which is what pauses
+-- that institute's content without locking the account.
 CREATE OR REPLACE FUNCTION sync_student_institute() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE target uuid;
 BEGIN
@@ -77,9 +79,9 @@ BEGIN
  LOOP
   UPDATE users u SET institution_id = COALESCE(
      (SELECT e.institution_id FROM enrollments e
-       WHERE e.user_id=target AND e.institution_id=u.institution_id AND e.status IN ('active','suspended')),
+       WHERE e.user_id=target AND e.institution_id=u.institution_id AND e.status='active'),
      (SELECT e.institution_id FROM enrollments e
-       WHERE e.user_id=target AND e.status IN ('active','suspended')
+       WHERE e.user_id=target AND e.status='active'
        ORDER BY COALESCE(e.joined_at, e.created_at) DESC LIMIT 1)),
     updated_at=now()
   WHERE u.id=target AND u.role='student';

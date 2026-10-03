@@ -229,44 +229,26 @@ func (s *Service) UpdateRosterEntry(ctx context.Context, instID, enrollmentID st
 // student returns to institution-less, keeping account, points and history.
 var terminalStatuses = map[string]bool{"graduated": true, "transferred": true}
 
-// SetStatus moves an enrollment through its lifecycle.
-//
-// users.status is what actually blocks login, so live transitions mirror onto
-// it; terminal transitions instead clear users.institution_id.
+// SetStatus moves an enrollment through its lifecycle. Suspension is per
+// institute: it pauses that institute (it can't be the active one) and never
+// locks the account. Terminal statuses remove the student from live classes.
 func (s *Service) SetStatus(ctx context.Context, instID, enrollmentID, status string) error {
 	switch status {
 	case "active", "suspended", "graduated", "transferred":
 	default:
 		return fmt.Errorf("unknown status %q", status)
 	}
-
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-
 	var userID *string
-	var current *string
-	err = tx.QueryRow(ctx, `SELECT user_id FROM enrollments WHERE id=$1 AND institution_id=$2`, enrollmentID, instID).Scan(&userID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if userID != nil {
-		if err = tx.QueryRow(ctx, `SELECT institution_id::text FROM users WHERE id=$1 FOR UPDATE`, *userID).Scan(&current); err != nil {
-			return err
-		}
-		if current != nil && *current != instID {
-			return ErrEnrollmentExists
-		}
-	}
 	err = tx.QueryRow(ctx,
 		`UPDATE enrollments
 		    SET status=$1,
 		        ended_at = CASE WHEN $1 IN ('graduated','transferred') THEN now() ELSE NULL END,
+		        ended_by = CASE WHEN $1 IN ('graduated','transferred') THEN 'institution' ELSE NULL END,
 		        updated_at = now()
 		  WHERE id=$2 AND institution_id=$3
 		  RETURNING user_id`, status, enrollmentID, instID).Scan(&userID)
@@ -276,25 +258,12 @@ func (s *Service) SetStatus(ctx context.Context, instID, enrollmentID, status st
 	if err != nil {
 		return err
 	}
-
-	// Unclaimed roster rows have no user to mirror onto.
-	if userID != nil {
-		if terminalStatuses[status] {
-			if _, err = tx.Exec(ctx, `DELETE FROM group_students gs USING groups g WHERE gs.group_id=g.id AND gs.user_id=$1 AND g.institution_id=$2`, *userID, instID); err != nil {
-				return err
-			}
-			_, err = tx.Exec(ctx,
-				`UPDATE users SET institution_id=NULL, status='active', updated_at=now() WHERE id=$1`, *userID)
-		} else {
-			_, err = tx.Exec(ctx,
-				`UPDATE users SET status=$1, institution_id=$2, updated_at=now() WHERE id=$3`,
-				status, instID, *userID)
-		}
-		if err != nil {
+	if userID != nil && terminalStatuses[status] {
+		if _, err = tx.Exec(ctx, `DELETE FROM group_students gs USING groups g
+			WHERE gs.group_id=g.id AND gs.user_id=$1 AND g.institution_id=$2 AND g.archived_at IS NULL`, *userID, instID); err != nil {
 			return err
 		}
 	}
-
 	return tx.Commit(ctx)
 }
 

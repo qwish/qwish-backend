@@ -27,21 +27,6 @@ SELECT 'teacher_verification' AS item_type, u.id::text AS item_id, COALESCE(NULL
   FROM users u
  WHERE u.institution_id=$1 AND u.role='teacher' AND u.status='pending' AND u.deleted_at IS NULL
 UNION ALL
-SELECT 'edit_request', sr.id::text,
-       initcap(replace(sr.field,'_',' ')) || ' correction — ' || COALESCE(NULLIF(su.display_name,''), e.full_name),
-       COALESCE(sr.current_value,'not set') || ' → ' || sr.proposed_value, sr.created_at, sr.id::text, NULL
-  FROM student_edit_requests sr JOIN enrollments e ON e.id=sr.enrollment_id LEFT JOIN users su ON su.id=e.user_id
- WHERE e.institution_id=$1 AND sr.status='pending'
-UNION ALL
-SELECT 'unclaimed_records', COALESCE(e.grade,'') || '|' || COALESCE(e.section,''),
-       CASE WHEN e.grade IS NULL AND e.section IS NULL THEN 'No grade or section'
-            ELSE concat_ws(' · ', 'Grade ' || e.grade, 'Section ' || e.section) END,
-       COUNT(*) || ' roster records still unclaimed', MIN(e.created_at),
-       COALESCE(e.grade,'') || '|' || COALESCE(e.section,''), NULL
-  FROM enrollments e
- WHERE e.institution_id=$1 AND e.status='pending_claim'
- GROUP BY e.grade, e.section
-UNION ALL
 SELECT 'topic_request', tr.id::text, '“' || tr.topic || '”',
        'Topic request' || COALESCE(' · ' || tr.subject, ''), tr.created_at, tr.id::text, NULL
   FROM topic_requests tr
@@ -142,9 +127,9 @@ func (h *Handler) ActionCentre(w http.ResponseWriter, r *http.Request) {
 	queues := []queue{}
 	qrows, err := h.db.Query(r.Context(), `WITH i AS (`+actionItemsSQL+`)
 		SELECT t.type, COUNT(i.item_id), MIN(i.waiting_since)
-		  FROM unnest(ARRAY['teacher_verification','edit_request','unclaimed_records','topic_request']) t(type)
+		  FROM unnest(ARRAY['teacher_verification','topic_request']) t(type)
 		  LEFT JOIN i ON i.item_type=t.type
-		 GROUP BY t.type ORDER BY array_position(ARRAY['teacher_verification','edit_request','unclaimed_records','topic_request'], t.type)`,
+		 GROUP BY t.type ORDER BY array_position(ARRAY['teacher_verification','topic_request'], t.type)`,
 		instID)
 	if err == nil {
 		defer qrows.Close()

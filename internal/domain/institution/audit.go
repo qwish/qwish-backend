@@ -22,7 +22,6 @@ var auditActionGroups = map[string][]string{
 		"create_academic_year", "update_academic_year",
 		"create_curriculum_version", "update_curriculum_draft", "publish_curriculum_version",
 		"assign_class_curriculum", "end_class_curriculum", "promote_students", "revert_promotion",
-		"review_edit_request",
 	},
 	"access": {
 		"create_department", "update_department", "archive_department", "set_group_department",

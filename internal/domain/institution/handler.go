@@ -78,14 +78,6 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		topStudent["class_name"] = tsClass
 	}
 
-	// Work waiting on the institution: drives the overview strip and sidebar counts.
-	var pendingEdits, unclaimed int
-	h.db.QueryRow(r.Context(), `SELECT
-		(SELECT COUNT(*) FROM student_edit_requests sr JOIN enrollments e ON e.id=sr.enrollment_id WHERE e.institution_id=$1 AND sr.status='pending'),
-		(SELECT COUNT(*) FROM enrollments WHERE institution_id=$1 AND status='pending_claim')`,
-		instID,
-	).Scan(&pendingEdits, &unclaimed)
-
 	// Activity chart: quizzes completed per day over last 30 days
 	rows, _ := h.db.Query(r.Context(),
 		`SELECT DATE(qa.completed_at) as day, COUNT(*)
@@ -137,10 +129,6 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		"average_score_window_days": 30,
 		"activity_chart":            chart,
 		"top_quizzes":               topQuizzes,
-		"pending": map[string]interface{}{
-			"edit_requests":         pendingEdits,
-			"unclaimed_enrollments": unclaimed,
-		},
 	})
 }
 

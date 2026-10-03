@@ -22,7 +22,6 @@ import (
 	"github.com/qwish/backend/internal/domain/contact"
 	"github.com/qwish/backend/internal/domain/curriculum"
 	"github.com/qwish/backend/internal/domain/demo"
-	"github.com/qwish/backend/internal/domain/editrequest"
 	"github.com/qwish/backend/internal/domain/enrollment"
 	"github.com/qwish/backend/internal/domain/featureonboarding"
 	"github.com/qwish/backend/internal/domain/institution"
@@ -139,11 +138,9 @@ func main() {
 	enrollmentInstH := enrollment.NewInstitutionHandler(enrollmentSvc, pool)
 	enrollmentTeacherH := enrollment.NewTeacherHandler(enrollmentSvc)
 	domainH := enrollment.NewDomainHandler(enrollmentSvc)
-	editRequestH := editrequest.NewHandler(editrequest.NewService(pool))
 	userEmailH := useremail.NewHandler(useremail.NewService(pool, func(ctx context.Context, to, code string) error {
 		return notifSvc.SendLoginOTP(ctx, to, code, 10)
 	}))
-	editRequestH.SetNotifier(notifSvc, cfg.TeacherURL)
 	questionGenerator := &teacher.Generator{APIKey: cfg.AnthropicAPIKey, Model: cfg.AnthropicModel}
 	studentAdminH := admin.NewStudentAdminHandler(pool)
 	analyticsH := analytics.NewHandler(pool)
@@ -723,8 +720,6 @@ func main() {
 					r.Delete("/classes/{classId}/students/{userId}", enrollmentTeacherH.RemoveStudent)
 					// Corrections to institution-owned fields are proposals,
 					// not writes; an admin decides them.
-					r.Post("/enrollments/{enrollmentId}/edit-requests", editRequestH.Propose)
-					r.Get("/edit-requests", editRequestH.ListMine)
 					r.Get("/classes/{classId}", teacherH.GetClass)
 					r.Get("/reports/quiz-analytics", teacherH.QuizAnalyticsReport)
 					r.Get("/reports/student-performance", teacherH.StudentPerformanceReport)
@@ -791,9 +786,6 @@ func main() {
 					r.Post("/promotions", enrollmentInstH.CreatePromotion)
 					r.Get("/promotions", enrollmentInstH.ListPromotions)
 					r.Post("/promotions/{batchId}/revert", enrollmentInstH.RevertPromotion)
-					r.Get("/edit-requests", editRequestH.ListForReview)
-					r.Get("/edit-requests/counts", editRequestH.CountsForReview)
-					r.Patch("/edit-requests/{requestId}", editRequestH.Review)
 					r.Get("/students/{userId}", institutionH.GetStudent)
 					r.Patch("/students/{userId}/status", institutionH.UpdateStudentStatus)
 					r.Get("/teachers", institutionH.ListTeachers)

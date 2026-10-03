@@ -392,6 +392,7 @@ func (h *Handler) StudentAssignments(w http.ResponseWriter, r *http.Request) {
 	countErr := h.db.QueryRow(r.Context(), `SELECT COUNT(*)
 		FROM learning_assignment_recipients ar JOIN learning_assignments a ON a.id=ar.assignment_id
 		WHERE ar.student_id=$1 AND a.status IN ('published','closed') AND ($2='' OR a.group_id::text=$2)
+		AND EXISTS(SELECT 1 FROM enrollments m WHERE m.user_id=ar.student_id AND m.institution_id=a.institution_id AND m.status='active')
 		AND ($3='' OR ($3='completed' AND ar.status='submitted') OR ($3='overdue' AND ar.status<>'submitted' AND COALESCE(ar.due_at_override,a.due_at)<=now()) OR ($3='active' AND ar.status NOT IN ('submitted','excused','withdrawn') AND a.status='published'))`, middleware.GetUserID(r), classID, filter).Scan(&total)
 	if countErr != nil {
 		middleware.InternalError(w)
@@ -406,6 +407,7 @@ func (h *Handler) StudentAssignments(w http.ResponseWriter, r *http.Request) {
 		JOIN learning_assignments a ON a.id=ar.assignment_id JOIN quizzes q ON q.id=a.quiz_id
 		JOIN groups g ON g.id=a.group_id JOIN users u ON u.id=a.created_by JOIN institutions i ON i.id=a.institution_id
 		WHERE ar.student_id=$1 AND a.status IN ('published','closed') AND ($2='' OR a.group_id::text=$2)
+		AND EXISTS(SELECT 1 FROM enrollments m WHERE m.user_id=ar.student_id AND m.institution_id=a.institution_id AND m.status='active')
 		AND ($3='' OR ($3='completed' AND ar.status='submitted') OR ($3='overdue' AND ar.status<>'submitted' AND COALESCE(ar.due_at_override,a.due_at)<=now()) OR ($3='active' AND ar.status NOT IN ('submitted','excused','withdrawn') AND a.status='published'))
 		ORDER BY CASE WHEN ar.status='submitted' THEN 1 ELSE 0 END,COALESCE(ar.due_at_override,a.due_at) NULLS LAST,a.created_at DESC LIMIT $4 OFFSET $5`, middleware.GetUserID(r), classID, filter, limit, (page-1)*limit)
 	if err != nil {
@@ -455,6 +457,7 @@ func (h *Handler) StudentCurricula(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN group_teachers gt ON gt.group_id=g.id
 		LEFT JOIN users t ON t.id=gt.user_id AND t.status='active' AND t.deleted_at IS NULL
 		WHERE gs.user_id=$1
+		  AND EXISTS(SELECT 1 FROM enrollments m WHERE m.user_id=gs.user_id AND m.institution_id=g.institution_id AND m.status='active')
 		GROUP BY cc.id,g.id,g.name,ay.name,cu.name,cv.id,cv.label,cv.subject,cv.grade
 		ORDER BY g.name,cv.subject,cv.label`, middleware.GetUserID(r))
 	if err != nil {

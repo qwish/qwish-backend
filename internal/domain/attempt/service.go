@@ -132,7 +132,8 @@ func (s *Service) Start(ctx context.Context, userID, quizID, assignmentID string
 			JOIN learning_assignments a ON a.id=ar.assignment_id
 			WHERE ar.assignment_id=$1 AND ar.student_id=$2 AND a.quiz_id=$3
 			  AND a.status='published' AND (a.available_at IS NULL OR a.available_at<=now())
-			  AND ar.status IN ('assigned','started','overdue')`,
+			  AND ar.status IN ('assigned','started','overdue')
+			  AND EXISTS(SELECT 1 FROM enrollments m WHERE m.user_id=ar.student_id AND m.institution_id=a.institution_id AND m.status='active')`,
 			assignmentID, userID, quizID).Scan(&status, &existingAttempt, &attemptsStarted, &attemptLimit)
 		if err != nil {
 			return nil, fmt.Errorf("assignment not available")

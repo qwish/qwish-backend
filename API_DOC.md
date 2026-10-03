@@ -1932,29 +1932,24 @@ this section lists each route once, with its current contract.
   "activity_chart":  [{ "day": "2024-03-01", "count": 12 }],
   "top_quizzes": [
     { "id": "uuid", "title": "Biology Ch3", "type": "knowledge_check", "teacher_name": "M. Joshi", "completions": 89 }
-  ],
-  "pending": {
-    "edit_requests": 4,
-    "unclaimed_enrollments": 37
-  }
+  ]
 }
 ```
 - `average_score` averages completed attempts in the last 30 days (`average_score_window_days`).
 - `active_students` is distinct students with a completed attempt in the last 7 days.
 - `top_student` is ranked by lifetime points; its `average_score_30d` is `null` when they have no attempts in that window. It is an object with an empty `name` when the institution has no students.
 - `activity_chart` omits days with no completions — treat a missing day as a recorded zero.
-- `pending` drives the dashboard's "waiting on you" strip and sidebar counts.
 
 ---
 
 ## GET `/institution/students`
-Enrollment-backed roster: unclaimed roster rows appear with `id: null`.
+Enrollment-backed roster. Every row has a student account (unclaimed roster rows were retired in migration 085).
 
 ### Query Params
 | Param | Description |
 |-------|-------------|
 | `search` | Name or email |
-| `status` | `pending_claim`, `active`, `suspended`, `graduated`, `transferred`. Omitted = the first three |
+| `status` | `active`, `suspended`, `graduated`, `transferred`, `left`. Omitted = active and suspended |
 | `group_id` | Only students in this class |
 | `grade`, `section` | Exact match on the enrollment |
 | `min_score`, `max_score` | Bounds on `average_score` |
@@ -1967,24 +1962,22 @@ Enrollment-backed roster: unclaimed roster rows appear with `id: null`.
 [
   {
     "enrollment_id": "uuid",
-    "id": "uuid-or-null",
+    "id": "uuid",
     "display_name": "Aarya Kulkarni",
     "email": "aarya.k@school.edu",
-    "roll_number": "11A-014", "grade": "11", "section": "A",
+    "grade": "11", "section": "A",
     "status": "active",
     "total_points": 2480,
     "current_streak": 12,
     "last_active_at": "2026-09-26T03:44:00Z",
     "average_score": 81.2,
     "attempts_count": 46,
-    "claim_code": null,
     "groups": [{ "id": "uuid", "name": "Physics A" }]
   }
 ]
 ```
 `attempts_count` is the number of completed attempts behind `average_score`.
 `0` means **no attempts**, which is not the same as a 0% average.
-`claim_code` is set only while `status` is `pending_claim`.
 
 ---
 
@@ -2022,16 +2015,13 @@ A claimed, live (active or suspended) student. `404` otherwise.
   "status": "active",
   "enrollment_id": "uuid",
   "enrollment_status": "active",
-  "roll_number": "11A-014", "grade": "11", "section": "A",
-  "admission_date": "2025-06-12",
+  "grade": "11", "section": "A",
   "total_points": 2480,
   "current_streak": 12,
   "longest_streak": 21,
   "average_score": 81.2,
   "quizzes_taken": 46,
   "member_since": "2024-03-01T00:00:00Z",
-  "guardian_name": "Sanjay Kulkarni",
-  "guardian_phone": "+91 98••• ••412",
   "quiz_history": [
     {
       "id": "attempt-uuid", "quiz_id": "uuid", "quiz_title": "Kinematics Speed Round",
@@ -2050,7 +2040,6 @@ A claimed, live (active or suspended) student. `404` otherwise.
 ```
 - `average_score` and `quizzes_taken` count completed attempts on this institution's quizzes since the student joined.
 - `quiz_history` uses the same window. `time_taken_ms` is `null` when the attempt has no start time.
-- `guardian_phone` is masked: the country prefix, two leading and three trailing digits.
 - `points_ledger` is the student's 50 most recent platform-wide ledger entries. Points aren't per-institution.
 
 ---
@@ -2202,7 +2191,7 @@ Removes the teacher from the institution (does not delete their account).
   "students": [
     {
       "enrollment_id": "uuid", "id": "uuid", "display_name": "Aarya Kulkarni", "email": "…",
-      "status": "active", "roll_number": "11A-014",
+      "status": "active",
       "total_points": 2480, "current_streak": 12, "last_active_at": "…",
       "average_score": 81.2,
       "class_average_score": 83.0, "class_attempts": 12,
@@ -4154,13 +4143,9 @@ name; enrollment copies follow it.
 ### PATCH `/auth/referral-code`
 Staff only. Students get an error telling them to join with a class code.
 
-### PATCH `/users/me`
-Now also accepts the student-owned personal fields. Omitting a field leaves it
-untouched; sending `""` clears it.
-```
-date_of_birth, gender, phone, address,
-guardian_name, guardian_phone, guardian_email, highest_qualification
-```
+Personal fields (date of birth, gender, phone, address, guardian, highest
+qualification) were retired in migration 085; older clients that still send
+them are ignored.
 
 ### Profile entries (the rest of the CV)
 ```
@@ -4256,82 +4241,29 @@ student is warned 7 days before. Joining a class clears the warning.
 
 ### GET `/teacher/students` — shape change
 Now built from enrollments rather than `users`. Rows gain `enrollment_id`,
-`roll_number`, `grade` and `section`. **Graduated and transferred students no
+`grade`, `section` and `join_route`. **Graduated and transferred students no
 longer appear**, and `average_score` counts only attempts on or after
 `joined_at`, so a transferred-in student does not carry their previous school's
 scores into this institution's view.
 
 `GET /teacher/students/{userId}` and `GET /teacher/classes/{classId}` gain the
-same four fields. A class roster contains only claimed accounts, so
-`enrollment_id` is always present there.
+same fields.
 
-### POST `/teacher/enrollments/{enrollmentId}/edit-requests`
-Propose a correction to an institution-owned field. This **never** writes the
-enrollment; an admin decides.
-```json
-{ "field": "section", "proposed_value": "B", "note": "moved in January" }
-```
-`field` ∈ `roll_number`, `grade`, `section`, `admission_date`.
-
-### GET `/teacher/edit-requests`
-The teacher's own proposals and where they landed.
+Edit requests were retired in migration 085.
 
 ## Institution
 
-### POST `/institution/students`
-Create one roster entry. Returns the enrollment including its `claim_code`.
-Body: `full_name` (required), `email`, `roll_number`, `grade`, `section`,
-`admission_date`, `phone`, `guardian_name`, `guardian_phone`, `guardian_email`.
-
-Errors: `409 ROLL_NUMBER_TAKEN`.
-
-### POST `/institution/students/import?dry_run=true`
-`multipart/form-data` with a CSV in a field named `file`.
-
-Columns (order is read from the header, not assumed): `full_name` (required),
-`email`, `roll_number`, `grade`, `section`, `admission_date` (YYYY-MM-DD),
-`guardian_name`, `guardian_phone`, `guardian_email`, `phone`.
-
-With `dry_run=true` nothing is written and every row comes back with a verdict:
-```json
-{ "ok": false,
-  "verdicts": [
-    { "row": 2, "action": "create", "full_name": "Asha R", "roll_number": "9A-01",
-      "email": "asha@school.edu", "grade": "9", "section": "A" },
-    { "row": 3, "action": "update", "full_name": "Vikram S", "roll_number": "9A-02",
-      "changes": ["Section A → B", "Admission date added"] },
-    { "row": 4, "action": "error",  "full_name": "",
-      "reason": "full_name is required" },
-    { "row": 7, "action": "error", "full_name": "Manasi K", "email": "manasi@x.in",
-      "reason": "This email belongs to an active student at another institute. Use an admission transfer instead." } ] }
-```
-A row matches an existing live enrollment by `roll_number`, or by `email` when
-no roll number is given. `row` is the CSV line (header = line 1) even when
-earlier rows failed. `changes` describes what an update would change.
-
-Committing (no `dry_run`) runs in **one transaction**: an interrupted commit
-saves nothing, so re-running the same file is always safe — there is no
-partial state to resume. By default it returns `text/csv` —
-`full_name, roll_number, claim_code` — and if any row failed the commit is
-refused with `422 IMPORT_VALIDATION_FAILED` and the offending verdicts.
-
-| Query param | Effect |
-|---|---|
-| `skip_errors=true` | Commit the valid rows and skip the rest instead of refusing the file. The CSV response carries `X-Import-Skipped: <n>`. |
-| `format=json` | Return `{ created, updated, claim_codes: [{full_name, roll_number, claim_code}], skipped: [verdict] }` instead of CSV. |
+Roster create, update and CSV import were retired in migration 085. Students
+join through class codes and institute-email invites (see **Teacher → Class
+joining and invites**).
 
 ### GET `/institution/students`
-Now reads from `enrollments`, so unclaimed roster rows appear and graduated
-students drop off. Each row gains `enrollment_id`, `roll_number`, `grade`,
-`section`; **`id` is `null` until the row is claimed**. `average_score` counts
+Now reads from `enrollments`, so graduated students drop off. Each row gains
+`enrollment_id`, `grade` and `section`. `average_score` counts
 only attempts on or after `joined_at`, so a transferred-in student's previous
 school's results never land in this institution's numbers.
 
 Filters: `search`, `status`, `group_id`, `sort`, `page`, `limit`.
-
-### PATCH `/institution/enrollments/{enrollmentId}`
-Write the institution-owned fields. Same body as create.
-Errors: `409 ROLL_NUMBER_TAKEN`, `404`.
 
 ### PATCH `/institution/enrollments/{enrollmentId}/status`
 ```json
@@ -4355,22 +4287,6 @@ same state change, so they are one endpoint.
 Advances a cohort in one transaction. `from_section` empty means the whole
 grade; `to_section` empty leaves each student's section unchanged. Returns
 `{"promoted": 42}`.
-
-### Edit request review
-```
-GET   /institution/edit-requests?status=pending
-GET   /institution/edit-requests/counts          → {"pending": 4, "approved": 12, "rejected": 3}
-PATCH /institution/edit-requests/{requestId}    {"decision": "approved"}
-```
-Each request carries `student_user_id` (null while unclaimed), `roll_number`,
-and `warnings: string[]`. Warnings are computed for pending requests only:
-- a proposed roll number that another live enrollment already holds;
-- a grade or section change for a student who is in classes, since memberships don't move;
-- an admission date that isn't a valid date.
-
-Approving applies the field and closes the request in one transaction, and
-the audit entry records before/after. Deciding twice returns
-`409 EDIT_REQUEST_RESOLVED`.
 
 ### PATCH `/institution/enrollments/{enrollmentId}/status`
 Now audited as `set_enrollment_status`, with the `reason` recorded.
@@ -4433,13 +4349,11 @@ institution keeps its historical roster count.
 
 | Code | Status | Condition |
 |---|---|---|
-| `CLAIM_CODE_INVALID` | 400 | No matching `pending_claim` enrollment |
-| `CLAIM_CODE_USED` | 409 | Enrollment already claimed |
-| `ENROLLMENT_EXISTS` | 409 | Student already holds a live enrollment |
-| `ROLL_NUMBER_TAKEN` | 409 | Collides with a live enrollment |
-| `IMPORT_VALIDATION_FAILED` | 422 | Commit refused; body carries per-row detail |
+| `JOIN_CODE_INVALID` | 400 | No class with that code |
+| `JOIN_CLOSED` | 403 | Class is invite-only and the student has no invite or institute email |
+| `INSTITUTE_LIMIT` | 409 | Student already belongs to 2 institutes |
+| `LEAVE_SUSPENDED` | 409 | Leaving a suspended enrollment |
 | `NOT_IN_YOUR_CLASS` | 403 | Teacher acting outside their class scope |
-| `EDIT_REQUEST_RESOLVED` | 409 | Reviewing an already-decided request |
 | `RATE_LIMITED` | 429 | Too many requests; `Retry-After` gives seconds to wait |
 | `PUBLISH_BLOCKED` | 422 | Curriculum publish refused; `message` lists every issue, `;`-separated |
 | `CHANGE_NOTE_REQUIRED` | 422 | The curriculum requires `change_note` on every save |
@@ -4620,10 +4534,10 @@ unconnected email returns nothing. That is deliberate: this endpoint must not
 reveal whether an account exists elsewhere on Qwish.
 
 #### GET `/institution/students/find?q=`
-`q` is at least 2 characters and matches name, email or roll number.
+`q` is at least 2 characters and matches name or email.
 ```json
-[{ "user_id": "uuid-or-null", "enrollment_id": "uuid-or-null", "name": "Mira Thakur",
-   "email": "mira@x.in", "roll_number": null, "state": "request_approved" }]
+[{ "user_id": "uuid", "enrollment_id": "uuid", "name": "Mira Thakur",
+   "email": "mira@x.in", "state": "active" }]
 ```
 `state` is the enrollment status.
 
@@ -4643,9 +4557,8 @@ reveal whether an account exists elsewhere on Qwish.
 }
 ```
 - `tone` is `ok`, `wait`, `none` or `fail`.
-- `diagnosis.code` is one of: `on_roster`, `suspended`, `unclaimed`, `ended`.
-- `actions` names what the admin can do: `open_profile`, `reactivate`, `copy_claim_code`.
-- `claim_code` is included for an unclaimed roster record.
+- `diagnosis.code` is one of: `on_roster`, `suspended`, `ended`.
+- `actions` names what the admin can do: `open_profile`, `reactivate`.
 - `404` when nothing connects the person to the institution.
 
 ### Action centre
@@ -4655,15 +4568,13 @@ Everything waiting on the institution in one queue, oldest first.
 
 The item types are:
 - `teacher_verification`;
-- `edit_request`;
-- `unclaimed_records`: grouped by grade and section;
 - `topic_request`: open for more than 5 days.
 
 ```json
 {
   "items": [{
-    "type": "unclaimed_records", "id": "11|B", "title": "Grade 11 · Section B",
-    "subtitle": "12 roster records still unclaimed", "waiting_since": "…", "link_id": "11|B",
+    "type": "teacher_verification", "id": "uuid", "title": "Priya Nair",
+    "subtitle": "Joined 02 Oct · priya@school.edu", "waiting_since": "…", "link_id": "uuid",
     "owner_id": null, "owner_name": null, "assignable": true
   }],
   "queues": [{ "type": "teacher_verification", "count": 2, "oldest": "…" }],
@@ -4676,7 +4587,7 @@ The item types are:
 
 #### PUT `/institution/action-centre/owner`
 ```json
-{ "item_type": "edit_request", "item_id": "uuid", "owner_id": "uuid" }
+{ "item_type": "teacher_verification", "item_id": "uuid", "owner_id": "uuid" }
 ```
 - The owner must be an admin or teacher at the institution. `owner_id: null` clears the owner.
 - The item must be one of the institution's open, assignable items, otherwise `404`.
@@ -4792,7 +4703,7 @@ Forms/polls: Directors and Principals may publish `institution_wide`; HODs may t
 | GET | `/teacher/portfolio-reviews?category=&limit=` | teacher | Submissions awaiting review for students in scope, oldest first |
 | POST | `/teacher/portfolio-reviews/{revisionId}/decision` | teacher | `{decision: reviewed\|changes_requested, comment}` — comment required for `changes_requested`. `409 STALE_REVISION` once the revision is no longer the one awaiting review; identical retry → `200`. Notifies the student (kind `portfolio_review`) |
 
-Profile: `{student {full_name, email, phone, date_of_birth, gender, address, guardian_*, highest_qualification, domain, interests, …},
+Profile: `{student {full_name, email, domain, interests, …},
 enrollment, classes, departments, education[], skills[], portfolio[], portfolio_summary}`.
 
 `portfolio[]` holds, per entry, the latest revision submitted **within the caller's institution** — never a live draft:

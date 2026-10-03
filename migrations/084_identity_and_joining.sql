@@ -89,6 +89,27 @@ BEGIN
  RETURN NULL;
 END $$;
 
+-- The old model mirrored an institute suspension onto users.status, which
+-- locked the whole account. Suspension is now per institute: lift those
+-- mirrors, but keep any super-admin ban (suspend_user with no later reactivate).
+UPDATE users u SET status='active', updated_at=now()
+ WHERE u.role='student' AND u.status='suspended'
+   AND EXISTS (SELECT 1 FROM enrollments e WHERE e.user_id=u.id AND e.status='suspended')
+   AND NOT EXISTS (
+     SELECT 1 FROM audit_log a WHERE a.target_id=u.id AND a.action_type='suspend_user'
+       AND NOT EXISTS (SELECT 1 FROM audit_log b WHERE b.target_id=u.id
+                        AND b.action_type='reactivate_user' AND b."timestamp" > a."timestamp"));
+
+-- Re-point every student's active institute under the new rule (active only).
+UPDATE users u SET institution_id = COALESCE(
+     (SELECT e.institution_id FROM enrollments e
+       WHERE e.user_id=u.id AND e.institution_id=u.institution_id AND e.status='active'),
+     (SELECT e.institution_id FROM enrollments e
+       WHERE e.user_id=u.id AND e.status='active'
+       ORDER BY COALESCE(e.joined_at, e.created_at) DESC LIMIT 1)),
+   updated_at=now()
+ WHERE u.role='student';
+
 -- Resolve open admission requests before retiring admissions: every class is
 -- joinable right now (joining_enabled defaults true), so open requests at a
 -- verified institute are approved; the rest are declined. Students are told.

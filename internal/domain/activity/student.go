@@ -260,7 +260,6 @@ func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 		submitted_at=COALESCE(x.submitted_at, now()), updated_at=now(),
 		respondent=(SELECT jsonb_build_object(
 			'name', COALESCE(NULLIF(u.display_name,''),u.full_name,''),
-			'roll_number', (SELECT e.roll_number FROM enrollments e WHERE e.user_id=u.id AND e.institution_id=$4 AND e.ended_at IS NULL LIMIT 1),
 			'classes', COALESCE((SELECT jsonb_agg(g.name ORDER BY g.name) FROM group_students gs JOIN groups g ON g.id=gs.group_id
 				WHERE gs.user_id=u.id AND g.institution_id=$4 AND g.archived_at IS NULL), '[]'::jsonb))
 			FROM users u WHERE u.id=x.student_id)

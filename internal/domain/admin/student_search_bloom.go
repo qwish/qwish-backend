@@ -113,10 +113,7 @@ func (s *studentSearchBloom) refresh(ctx context.Context, db *pgxpool.Pool) (boo
 	}
 
 	rows, err := db.Query(ctx, `
-		SELECT u.display_name, u.email, COALESCE(e.roll_number, '')
-		  FROM users u
-		  LEFT JOIN enrollments e ON e.user_id=u.id AND e.status IN ('active','suspended')
-		 WHERE u.role='student'`)
+		SELECT u.display_name, u.email FROM users u WHERE u.role='student'`)
 	if err != nil {
 		return false, fmt.Errorf("load values: %w", err)
 	}
@@ -124,13 +121,12 @@ func (s *studentSearchBloom) refresh(ctx context.Context, db *pgxpool.Pool) (boo
 
 	grams := make([]string, 0, 1024)
 	for rows.Next() {
-		var name, email, roll string
-		if err := rows.Scan(&name, &email, &roll); err != nil {
+		var name, email string
+		if err := rows.Scan(&name, &email); err != nil {
 			return false, fmt.Errorf("scan values: %w", err)
 		}
 		grams = append(grams, normalizedTrigrams(name)...)
 		grams = append(grams, normalizedTrigrams(email)...)
-		grams = append(grams, normalizedTrigrams(roll)...)
 	}
 	if err := rows.Err(); err != nil {
 		return false, fmt.Errorf("iterate values: %w", err)

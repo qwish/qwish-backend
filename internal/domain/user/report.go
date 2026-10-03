@@ -115,7 +115,7 @@ func (s *Service) GetLearningReport(ctx context.Context, userID string) (*Learni
  ), boundaries AS (
  SELECT e.id,e.institution_id,e.status,e.ended_at,COALESCE(e.joined_at,e.created_at) AS start,
  COALESCE((SELECT prior_grade FROM promotions p WHERE p.enrollment_id=e.id ORDER BY created_at LIMIT 1),e.grade,'Not recorded') AS grade
- FROM enrollments e WHERE e.user_id=$1 AND e.status<>'pending_claim'
+ FROM enrollments e WHERE e.user_id=$1
  UNION ALL
  SELECT e.id,e.institution_id,e.status,e.ended_at,p.created_at,p.to_grade FROM enrollments e JOIN promotions p ON p.enrollment_id=e.id
  ), stages AS (

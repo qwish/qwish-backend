@@ -171,7 +171,6 @@ func (h *Handler) Students(w http.ResponseWriter, r *http.Request, gs Grants) {
 	limit, offset := page(r)
 	inst := middleware.GetInstitutionID(r)
 	rows, err := h.db.Query(r.Context(), `SELECT u.id, COALESCE(NULLIF(u.display_name,''),u.full_name,''),
-		(SELECT e.roll_number FROM enrollments e WHERE e.user_id=u.id AND e.institution_id=$1 AND e.ended_at IS NULL LIMIT 1),
 		COALESCE((SELECT array_agg(g.name ORDER BY g.name) FROM group_students gs JOIN groups g ON g.id=gs.group_id
 			WHERE gs.user_id=u.id AND g.institution_id=$1 AND g.archived_at IS NULL AND ($2 OR g.department_id::text = ANY($3))),'{}'),
 		count(*) OVER ()
@@ -187,16 +186,15 @@ func (h *Handler) Students(w http.ResponseWriter, r *http.Request, gs Grants) {
 	}
 	defer rows.Close()
 	type student struct {
-		ID         string   `json:"id"`
-		Name       string   `json:"name"`
-		RollNumber *string  `json:"roll_number"`
-		Classes    []string `json:"classes"`
+		ID      string   `json:"id"`
+		Name    string   `json:"name"`
+		Classes []string `json:"classes"`
 	}
 	out := []student{}
 	total := 0
 	for rows.Next() {
 		var s student
-		if rows.Scan(&s.ID, &s.Name, &s.RollNumber, &s.Classes, &total) != nil {
+		if rows.Scan(&s.ID, &s.Name, &s.Classes, &total) != nil {
 			middleware.InternalError(w)
 			return
 		}

@@ -15,8 +15,6 @@ import (
 )
 
 var (
-	ErrClaimCodeInvalid = errors.New("claim code invalid")
-	ErrClaimCodeUsed    = errors.New("claim code already used")
 	ErrEnrollmentExists = errors.New("student already holds a live enrollment")
 	ErrClassCodeInvalid = errors.New("class invite code invalid")
 	ErrNotFound         = errors.New("enrollment not found")
@@ -200,7 +198,7 @@ func (s *Service) Promote(ctx context.Context, instID string, f PromoteFilter) (
 		  WHERE institution_id=$3
 		    AND grade=$4
 		    AND ($5='' OR section=$5)
-		    AND status IN ('pending_claim','active','suspended')`,
+		    AND status IN ('active','suspended')`,
 		f.ToGrade, f.ToSection, instID, f.FromGrade, f.FromSection)
 	if err != nil {
 		return 0, err

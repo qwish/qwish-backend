@@ -55,8 +55,8 @@ func setup(t *testing.T) (*env, *pgxpool.Pool) {
 			VALUES ($1||$2,'college',$1||$2||'@example.test','S'||$1||$2,'T'||$1||$2,'verified') RETURNING id`, x.label, tag).Scan(x.dest))
 	}
 	newUser := func(role, label, in string, dest *string) {
-		must(pool.QueryRow(ctx, `INSERT INTO users (supabase_uid,full_name,display_name,email,role,institution_id,phone,guardian_name)
-			VALUES (gen_random_uuid(),$1,$1,$2,$3,$4,'+91 90000 00000','Parent of '||$1) RETURNING id`,
+		must(pool.QueryRow(ctx, `INSERT INTO users (supabase_uid,full_name,display_name,email,role,institution_id)
+			VALUES (gen_random_uuid(),$1,$1,$2,$3,$4) RETURNING id`,
 			label, label+"-"+tag+"@example.test", role, in).Scan(dest))
 		e.roles[*dest], e.insts[*dest] = role, in
 	}
@@ -74,7 +74,7 @@ func setup(t *testing.T) (*env, *pgxpool.Pool) {
 	must(err)
 	_, err = pool.Exec(ctx, `INSERT INTO group_students (group_id,user_id) VALUES ($1,$2),($3,$4)`, mine, e.student, other, otherStudent)
 	must(err)
-	_, err = pool.Exec(ctx, `INSERT INTO enrollments (institution_id,user_id,full_name,status,roll_number,joined_at) VALUES ($1,$2,'asha','active','CS-042',now())`, e.inst, e.student)
+	_, err = pool.Exec(ctx, `INSERT INTO enrollments (institution_id,user_id,full_name,status,joined_at) VALUES ($1,$2,'asha','active',now())`, e.inst, e.student)
 	must(err)
 	_, err = pool.Exec(ctx, `INSERT INTO user_skills (user_id,skill_name) VALUES ($1,'Go'),($1,'SQL')`, e.student)
 	must(err)
@@ -184,8 +184,8 @@ func TestStaffProfileAndReviewLoop(t *testing.T) {
 	if len(p.Portfolio) != 0 {
 		t.Fatal("draft visible to teacher")
 	}
-	// Full details: personal, enrollment, classes, skills, education.
-	if p.Student.Phone == nil || p.Student.GuardianName == nil || p.Enrollment == nil || *p.Enrollment.RollNumber != "CS-042" ||
+	// Learning details only: no personal fields or roll number (spec D17).
+	if p.Student.Phone != nil || p.Student.GuardianName != nil || p.Enrollment == nil || p.Enrollment.RollNumber != nil ||
 		strings.Join(p.Classes, ",") != "CSE-A" || strings.Join(p.Skills, ",") != "Go,SQL" || len(p.Education) != 1 {
 		t.Fatalf("profile incomplete: %+v", p)
 	}

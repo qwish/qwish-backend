@@ -45,7 +45,7 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 	var topStudentID *string
 	// Six independent aggregates folded into one round-trip.
 	h.db.QueryRow(r.Context(), `SELECT
-		(SELECT COUNT(*) FROM enrollments e LEFT JOIN users u ON u.id=e.user_id WHERE e.institution_id=$1 AND e.status IN ('pending_claim','active','suspended') AND (e.user_id IS NULL OR (u.role='student' AND u.deleted_at IS NULL))),
+		(SELECT COUNT(*) FROM enrollments e JOIN users u ON u.id=e.user_id WHERE e.institution_id=$1 AND e.status IN ('active','suspended') AND u.role='student' AND u.deleted_at IS NULL),
 		(SELECT COUNT(DISTINCT qa.user_id) FROM quiz_attempts qa JOIN users u ON u.id=qa.user_id
 		 WHERE `+qdb.LiveMemberSQL("u.id", "$1")+` AND u.role='student' AND u.deleted_at IS NULL AND qa.completed_at >= CURRENT_DATE - 7),
 		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher' AND status='active'),
@@ -173,12 +173,12 @@ func studentListWhere(instID string, q url.Values) (string, []interface{}) {
 	groupID := q.Get("group_id")
 	status := q.Get("status")
 
-	// Students are listed through their live enrollment: unclaimed roster rows
-	// appear (user_id IS NULL). Explicit status filters can include ended rows.
+	// Students are listed through their enrollment. Explicit status filters can
+	// include ended rows.
 	args := []interface{}{instID}
-	where := `e.institution_id=$1 AND (e.user_id IS NULL OR (u.role='student' AND u.deleted_at IS NULL))`
+	where := `e.institution_id=$1 AND u.role='student' AND u.deleted_at IS NULL`
 	if status == "" {
-		where += ` AND e.status IN ('pending_claim','active','suspended')`
+		where += ` AND e.status IN ('active','suspended')`
 	}
 	n := 2
 	if search != "" {
@@ -277,15 +277,14 @@ func (h *Handler) listStudents(w http.ResponseWriter, r *http.Request, instID st
 	// student's previous school's attempts out of this institution's numbers.
 	rows, err := h.db.Query(r.Context(),
 		`SELECT e.id, e.user_id, COALESCE(NULLIF(u.full_name,''), NULLIF(u.display_name,''), e.full_name), COALESCE(u.email, e.email, ''),
-		        e.roll_number, e.grade, e.section, e.status,
+		        e.grade, e.section, e.status,
 		        COALESCE(u.total_points,0), COALESCE(u.current_streak,0), u.last_active_at,
 		        `+avgScoreExpr+` AS avg_score,
 		        `+attemptsExpr+` AS attempts_count,
-		        CASE WHEN e.status='pending_claim' THEN e.claim_code END,
 		        COALESCE((SELECT json_agg(json_build_object('id', g.id, 'name', g.name))
 		                    FROM group_students gs JOIN groups g ON g.id = gs.group_id
 		                   WHERE gs.user_id = e.user_id AND g.institution_id=e.institution_id AND g.archived_at IS NULL), '[]'::json) AS groups
-		   FROM enrollments e LEFT JOIN users u ON u.id = e.user_id
+		   FROM enrollments e JOIN users u ON u.id = e.user_id
 		  WHERE `+where+` ORDER BY `+sortCol+`, e.id`+fmt.Sprintf(` LIMIT $%d OFFSET $%d`, n, n+1),
 		args...)
 	if err != nil {
@@ -303,7 +302,6 @@ func (h *Handler) listStudents(w http.ResponseWriter, r *http.Request, instID st
 		ID            *string    `json:"id"` // null until the roster row is claimed
 		DisplayName   string     `json:"display_name"`
 		Email         string     `json:"email"`
-		RollNumber    *string    `json:"roll_number,omitempty"`
 		Grade         *string    `json:"grade,omitempty"`
 		Section       *string    `json:"section,omitempty"`
 		Status        string     `json:"status"`
@@ -312,18 +310,15 @@ func (h *Handler) listStudents(w http.ResponseWriter, r *http.Request, instID st
 		LastActiveAt  *time.Time `json:"last_active_at,omitempty"`
 		AverageScore  float64    `json:"average_score"`
 		// Completed attempts behind average_score; 0 means "no attempts", not 0%.
-		AttemptsCount int `json:"attempts_count"`
-		// Only a pending_claim row has a live code. Claimed rows carry NULL,
-		// which is what stops the roster screen offering a code to copy.
-		ClaimCode *string    `json:"claim_code"`
-		Groups    []groupRef `json:"groups"`
+		AttemptsCount int        `json:"attempts_count"`
+		Groups        []groupRef `json:"groups"`
 	}
 	var students []studentRow
 	for rows.Next() {
 		var s studentRow
-		if err := rows.Scan(&s.EnrollmentID, &s.ID, &s.DisplayName, &s.Email, &s.RollNumber, &s.Grade,
+		if err := rows.Scan(&s.EnrollmentID, &s.ID, &s.DisplayName, &s.Email, &s.Grade,
 			&s.Section, &s.Status, &s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.AverageScore,
-			&s.AttemptsCount, &s.ClaimCode, &s.Groups); err != nil {
+			&s.AttemptsCount, &s.Groups); err != nil {
 			middleware.InternalError(w)
 			return
 		}
@@ -1084,7 +1079,6 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 		DisplayName   string     `json:"display_name"`
 		Email         string     `json:"email"`
 		Status        string     `json:"status"`
-		RollNumber    *string    `json:"roll_number"`
 		TotalPoints   int64      `json:"total_points"`
 		CurrentStreak int        `json:"current_streak"`
 		LastActiveAt  *time.Time `json:"last_active_at"`
@@ -1098,7 +1092,7 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 	students := []studentRow{}
 	srows, err := h.db.Query(r.Context(),
 		`SELECT e.id, u.id, COALESCE(u.display_name, ''), COALESCE(u.email, ''),
-		        COALESCE(e.status, 'active'), e.roll_number,
+		        COALESCE(e.status, 'active'),
 		        COALESCE(u.total_points,0), COALESCE(u.current_streak,0), u.last_active_at,
 		        COALESCE((SELECT AVG(qa.score_pct) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
 		                   WHERE qa.user_id=u.id AND qa.status='completed'
@@ -1119,7 +1113,7 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	for srows.Next() {
 		var s studentRow
-		srows.Scan(&s.EnrollmentID, &s.ID, &s.DisplayName, &s.Email, &s.Status, &s.RollNumber,
+		srows.Scan(&s.EnrollmentID, &s.ID, &s.DisplayName, &s.Email, &s.Status,
 			&s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.AverageScore,
 			&s.ClassAverageScore, &s.ClassAttempts, &s.JoinedAt)
 		students = append(students, s)
@@ -1849,21 +1843,18 @@ func (h *Handler) QuizAnalyticsReport(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) StreakHealthReport(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
 	groupID := r.URL.Query().Get("group_id")
-	var active, atRisk, broken, unclaimed int
+	var active, atRisk, broken int
 	h.db.QueryRow(r.Context(),
 		`SELECT
 		   COUNT(*) FILTER (WHERE current_streak >= 7),
 		   COUNT(*) FILTER (WHERE current_streak BETWEEN 1 AND 6),
-		   COUNT(*) FILTER (WHERE current_streak = 0),
-		   (SELECT COUNT(*) FROM enrollments WHERE institution_id=$1 AND status='pending_claim' AND $2='')
+		   COUNT(*) FILTER (WHERE current_streak = 0)
 		 FROM users u
 		 WHERE `+qdb.LiveMemberSQL("u.id", "$1")+` AND u.role='student' AND u.status='active' AND u.deleted_at IS NULL
 		   AND ($2='' OR EXISTS (SELECT 1 FROM group_students gs WHERE gs.user_id=u.id AND gs.group_id::text=$2))`,
-		instID, groupID).Scan(&active, &atRisk, &broken, &unclaimed)
-	// Unclaimed roster records have no account and so no streak; they're
-	// reported beside the bands, not inside "broken".
+		instID, groupID).Scan(&active, &atRisk, &broken)
 	middleware.JSON(w, http.StatusOK, map[string]int{
-		"active": active, "at_risk": atRisk, "broken": broken, "unclaimed": unclaimed,
+		"active": active, "at_risk": atRisk, "broken": broken,
 	})
 }
 

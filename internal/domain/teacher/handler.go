@@ -263,7 +263,7 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	// Attempts are counted only from joined_at forward, so a student who
 	// transferred in does not bring their previous school's scores with them.
 	rows, err := h.db.Query(r.Context(),
-		`SELECT u.id, e.id, u.display_name, u.email, e.roll_number, e.grade, e.section,
+		`SELECT u.id, e.id, u.display_name, u.email, e.grade, e.section,
 		        u.total_points, u.current_streak, u.last_active_at, u.status, e.join_route,
 		        COALESCE((SELECT AVG(qa.score_pct) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
 		                   WHERE qa.user_id=u.id AND qa.status='completed'
@@ -284,7 +284,6 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 		EnrollmentID  string     `json:"enrollment_id"`
 		DisplayName   string     `json:"display_name"`
 		Email         string     `json:"email"`
-		RollNumber    *string    `json:"roll_number,omitempty"`
 		Grade         *string    `json:"grade,omitempty"`
 		Section       *string    `json:"section,omitempty"`
 		TotalPoints   int64      `json:"total_points"`
@@ -297,7 +296,7 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	students := []studentRow{}
 	for rows.Next() {
 		var s studentRow
-		rows.Scan(&s.ID, &s.EnrollmentID, &s.DisplayName, &s.Email, &s.RollNumber, &s.Grade, &s.Section,
+		rows.Scan(&s.ID, &s.EnrollmentID, &s.DisplayName, &s.Email, &s.Grade, &s.Section,
 			&s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.Status, &s.JoinRoute, &s.AverageScore)
 		students = append(students, s)
 	}
@@ -387,24 +386,20 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 		classes = append(classes, c)
 	}
 
-	// The enrollment carries the institution-owned academic fields and the id a
-	// teacher needs to propose a correction to them.
 	var enrollmentID string
-	var rollNumber, grade, section, admissionDate *string
+	var grade, section *string
 	h.db.QueryRow(r.Context(), `
-		SELECT id, roll_number, grade, section, to_char(admission_date,'YYYY-MM-DD') FROM enrollments
+		SELECT id, grade, section FROM enrollments
 		 WHERE user_id=$1 AND institution_id=$2 AND status IN ('active','suspended')`,
-		studentID, instID).Scan(&enrollmentID, &rollNumber, &grade, &section, &admissionDate)
+		studentID, instID).Scan(&enrollmentID, &grade, &section)
 
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"id":             studentID,
 		"enrollment_id":  enrollmentID,
 		"display_name":   displayName,
 		"email":          email,
-		"roll_number":    rollNumber,
 		"grade":          grade,
 		"section":        section,
-		"admission_date": admissionDate,
 		"status":         status,
 		"total_points":   points,
 		"current_streak": streak,
@@ -577,7 +572,7 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 	).Scan(&name, &description, &inviteCode, &createdAt, &joiningEnabled, &studentCount, &avgScore)
 
 	sRows, _ := h.db.Query(r.Context(), `
-		SELECT u.id, e.id, u.display_name, u.email, e.roll_number, e.grade, e.section,
+		SELECT u.id, e.id, u.display_name, u.email, e.grade, e.section,
 		       u.total_points, u.current_streak, u.last_active_at, u.status, e.join_route,
 		       COALESCE((SELECT AVG(qa.score_pct) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
 		                   WHERE qa.user_id=u.id AND qa.status='completed'
@@ -598,7 +593,6 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 		EnrollmentID  string     `json:"enrollment_id"`
 		DisplayName   string     `json:"display_name"`
 		Email         string     `json:"email"`
-		RollNumber    *string    `json:"roll_number,omitempty"`
 		Grade         *string    `json:"grade,omitempty"`
 		Section       *string    `json:"section,omitempty"`
 		TotalPoints   int64      `json:"total_points"`
@@ -611,7 +605,7 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 	students := []studentRow{}
 	for sRows.Next() {
 		var s studentRow
-		sRows.Scan(&s.ID, &s.EnrollmentID, &s.DisplayName, &s.Email, &s.RollNumber, &s.Grade, &s.Section,
+		sRows.Scan(&s.ID, &s.EnrollmentID, &s.DisplayName, &s.Email, &s.Grade, &s.Section,
 			&s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.Status, &s.JoinRoute, &s.AverageScore)
 		students = append(students, s)
 	}

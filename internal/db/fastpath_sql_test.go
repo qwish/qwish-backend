@@ -177,12 +177,6 @@ var fastPathStatements = map[string]string{
 		  LEFT JOIN admin_accounts a
 		         ON a.supabase_uid = p.uid AND a.deleted_at IS NULL`,
 
-	"enrollment.matchRoster": `
-		SELECT id, COALESCE(roll_number,''), COALESCE(email,'')
-		  FROM enrollments
-		 WHERE institution_id=$1 AND ended_at IS NULL
-		   AND (roll_number = ANY($2::text[]) OR email = ANY($3::text[]))`,
-
 	"admin.countBands/difficulty": `
 		SELECT e.ord, c.count
 		  FROM unnest($2::float8[], $3::float8[]) WITH ORDINALITY AS e(lo, hi, ord)

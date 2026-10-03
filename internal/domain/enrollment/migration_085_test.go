@@ -11,7 +11,7 @@ func columnExists(t *testing.T, table, col string) bool {
 	t.Helper()
 	pool := openTestDB(t)
 	var ok bool
-	pool.QueryRow(context.Background(), `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name=$1 AND column_name=$2)`, table, col).Scan(&ok)
+	pool.QueryRow(context.Background(), `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name=$2)`, table, col).Scan(&ok)
 	return ok
 }
 

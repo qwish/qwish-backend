@@ -89,7 +89,7 @@ func (s *Service) PromoteBatch(ctx context.Context, instID, adminID string, req 
 		err := tx.QueryRow(ctx,
 			`SELECT user_id, grade, section FROM enrollments
 			  WHERE id=$1 AND institution_id=$2
-			    AND status IN ('pending_claim','active','suspended')`,
+			    AND status IN ('active','suspended')`,
 			enrollmentID, instID,
 		).Scan(&userID, &priorGrade, &priorSection)
 		if errors.Is(err, pgx.ErrNoRows) {

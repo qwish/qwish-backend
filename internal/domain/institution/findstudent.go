@@ -32,14 +32,14 @@ func (h *Handler) FindStudents(w http.ResponseWriter, r *http.Request) {
 		WITH people AS (
 			SELECT e.user_id, e.id AS enrollment_id,
 			       COALESCE(NULLIF(u.display_name,''), u.full_name, e.full_name) AS name,
-			       COALESCE(u.email, e.email, '') AS email, e.roll_number, e.status AS state, e.updated_at AS touched
+			       COALESCE(u.email, e.email, '') AS email, e.status AS state, e.updated_at AS touched
 			  FROM enrollments e LEFT JOIN users u ON u.id=e.user_id
 			 WHERE e.institution_id=$1
 		)
 		SELECT DISTINCT ON (COALESCE(user_id::text, enrollment_id::text))
-		       user_id, enrollment_id, name, email, roll_number, state
+		       user_id, enrollment_id, name, email, state
 		  FROM people
-		 WHERE name ILIKE $2 OR email ILIKE $2 OR roll_number ILIKE $2
+		 WHERE name ILIKE $2 OR email ILIKE $2
 		 ORDER BY COALESCE(user_id::text, enrollment_id::text), touched DESC
 		 LIMIT 20`, instID, like)
 	if err != nil {
@@ -52,13 +52,12 @@ func (h *Handler) FindStudents(w http.ResponseWriter, r *http.Request) {
 		EnrollmentID *string `json:"enrollment_id"`
 		Name         string  `json:"name"`
 		Email        string  `json:"email"`
-		RollNumber   *string `json:"roll_number"`
 		State        string  `json:"state"`
 	}
 	out := []match{}
 	for rows.Next() {
 		var m match
-		rows.Scan(&m.UserID, &m.EnrollmentID, &m.Name, &m.Email, &m.RollNumber, &m.State)
+		rows.Scan(&m.UserID, &m.EnrollmentID, &m.Name, &m.Email, &m.State)
 		out = append(out, m)
 	}
 	middleware.JSON(w, http.StatusOK, out)
@@ -104,17 +103,16 @@ func (h *Handler) ExplainStudent(w http.ResponseWriter, r *http.Request) {
 
 	// The enrollment here: the named one, else the person's latest.
 	var enr struct {
-		ID, Name, Status        string
-		Email, Roll, Grade, Sec *string
-		ClaimCode               *string
-		Created                 time.Time
-		JoinedAt, EndedAt       *time.Time
+		ID, Name, Status  string
+		Email, Grade, Sec *string
+		Created           time.Time
+		JoinedAt, EndedAt *time.Time
 	}
-	err := h.db.QueryRow(ctx, `SELECT id, full_name, status, email, roll_number, grade, section, claim_code, created_at, joined_at, ended_at
+	err := h.db.QueryRow(ctx, `SELECT id, full_name, status, email, grade, section, created_at, joined_at, ended_at
 		FROM enrollments WHERE institution_id=$1 AND (id::text=$2 OR ($2='' AND user_id::text=$3))
-		ORDER BY (status IN ('active','suspended','pending_claim')) DESC, updated_at DESC LIMIT 1`,
-		instID, enrollmentID, userID).Scan(&enr.ID, &enr.Name, &enr.Status, &enr.Email, &enr.Roll, &enr.Grade, &enr.Sec,
-		&enr.ClaimCode, &enr.Created, &enr.JoinedAt, &enr.EndedAt)
+		ORDER BY (status IN ('active','suspended')) DESC, updated_at DESC LIMIT 1`,
+		instID, enrollmentID, userID).Scan(&enr.ID, &enr.Name, &enr.Status, &enr.Email, &enr.Grade, &enr.Sec,
+		&enr.Created, &enr.JoinedAt, &enr.EndedAt)
 	hasEnrollment := err == nil
 
 	if !hasEnrollment {
@@ -153,13 +151,13 @@ func (h *Handler) ExplainStudent(w http.ResponseWriter, r *http.Request) {
 		chain = append(chain, step)
 	} else {
 		chain = append(chain, chainStep{Key: "account", Label: "Account", State: "None linked", Tone: "none",
-			Detail: "The roster record hasn't been claimed yet"})
+			Detail: "No account is linked to this enrollment"})
 	}
 	if hasEnrollment {
-		tones := map[string]string{"active": "ok", "suspended": "fail", "pending_claim": "wait", "graduated": "none", "transferred": "none"}
-		labels := map[string]string{"active": "Active", "suspended": "Suspended", "pending_claim": "Unclaimed roster record",
-			"graduated": "Graduated", "transferred": "Transferred out"}
-		detail := strings.TrimSpace(strings.Join(nonEmpty(deref(enr.Roll), gradeSection(enr.Grade, enr.Sec)), " · "))
+		tones := map[string]string{"active": "ok", "suspended": "fail", "graduated": "none", "transferred": "none", "left": "none"}
+		labels := map[string]string{"active": "Active", "suspended": "Suspended",
+			"graduated": "Graduated", "transferred": "Transferred out", "left": "Left"}
+		detail := gradeSection(enr.Grade, enr.Sec)
 		chain = append(chain, chainStep{Key: "enrollment", Label: "Institute enrollment", State: labels[enr.Status],
 			Tone: tones[enr.Status], Detail: detail})
 	} else {
@@ -189,10 +187,8 @@ func (h *Handler) ExplainStudent(w http.ResponseWriter, r *http.Request) {
 		d = diagnosis{"on_roster", "On your roster", "Active enrollment" + joinNames(" in ", classes) + ".", []string{"open_profile"}}
 	case hasEnrollment && enr.Status == "suspended":
 		d = diagnosis{"suspended", "Suspended", "They keep their account and history. Classes are paused until you reactivate them.", []string{"reactivate", "open_profile"}}
-	case hasEnrollment && enr.Status == "pending_claim":
-		d = diagnosis{"unclaimed", "Roster record not yet claimed", "The student hasn't entered their claim code in NumPie. Share the code again.", []string{"copy_claim_code"}}
-	case hasEnrollment && (enr.Status == "graduated" || enr.Status == "transferred"):
-		d = diagnosis{"ended", "Enrollment ended", "They " + map[string]string{"graduated": "graduated", "transferred": "transferred out"}[enr.Status] + ". Joining a class again starts a new enrollment.", []string{}}
+	case hasEnrollment && (enr.Status == "graduated" || enr.Status == "transferred" || enr.Status == "left"):
+		d = diagnosis{"ended", "Enrollment ended", "They " + map[string]string{"graduated": "graduated", "transferred": "transferred out", "left": "left"}[enr.Status] + ". Joining a class again starts a new enrollment.", []string{}}
 	}
 
 	// What happened, oldest first.
@@ -231,9 +227,6 @@ func (h *Handler) ExplainStudent(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasAccount {
 		resp["account_since"] = acc.Since
-	}
-	if hasEnrollment && enr.Status == "pending_claim" {
-		resp["claim_code"] = enr.ClaimCode
 	}
 	middleware.JSON(w, http.StatusOK, resp)
 }

@@ -690,7 +690,7 @@ func (h *Handler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="responses.csv"`)
 	w.Header().Set("Cache-Control", "no-store")
 	cw := csv.NewWriter(w)
-	header := []string{"Name", "Roll number", "Classes", "Submitted at"}
+	header := []string{"Name", "Classes", "Submitted at"}
 	for _, q := range qs {
 		header = append(header, csvCell(q.Label))
 	}
@@ -704,7 +704,6 @@ func (h *Handler) ExportCSV(w http.ResponseWriter, r *http.Request) {
 func exportRow(qs []Question, resp responseRow) []string {
 	var who struct {
 		Name    string   `json:"name"`
-		Roll    string   `json:"roll_number"`
 		Classes []string `json:"classes"`
 	}
 	_ = json.Unmarshal(resp.Respondent, &who)
@@ -714,7 +713,7 @@ func exportRow(qs []Question, resp responseRow) []string {
 	if resp.SubmittedAt != nil {
 		submitted = resp.SubmittedAt.UTC().Format(time.RFC3339)
 	}
-	row := []string{csvCell(who.Name), csvCell(who.Roll), csvCell(strings.Join(who.Classes, "; ")), submitted}
+	row := []string{csvCell(who.Name), csvCell(strings.Join(who.Classes, "; ")), submitted}
 	for _, q := range qs {
 		row = append(row, csvCell(answerText(q, answers[q.ID])))
 	}

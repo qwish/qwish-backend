@@ -128,12 +128,12 @@ func (h *StudentAdminHandler) Search(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.db.Query(r.Context(), `
 		SELECT u.id, u.display_name, u.email, u.status, u.deleted_at IS NOT NULL,
-		       e.id, e.roll_number, i.name
+		       e.id, i.name
 		  FROM users u
 		  LEFT JOIN enrollments e ON e.user_id = u.id AND e.institution_id = u.institution_id AND e.status IN ('active','suspended')
 		  LEFT JOIN institutions i ON i.id = e.institution_id
 		 WHERE u.role='student'
-		   AND (u.email ILIKE $1 OR u.display_name ILIKE $1 OR e.roll_number ILIKE $1)
+		   AND (u.email ILIKE $1 OR u.display_name ILIKE $1)
 		 ORDER BY u.display_name LIMIT 50`, "%"+q+"%")
 	if err != nil {
 		middleware.InternalError(w)
@@ -148,14 +148,13 @@ func (h *StudentAdminHandler) Search(w http.ResponseWriter, r *http.Request) {
 		Status          string  `json:"status"`
 		Deleted         bool    `json:"deleted"`
 		EnrollmentID    *string `json:"enrollment_id,omitempty"`
-		RollNumber      *string `json:"roll_number,omitempty"`
 		InstitutionName *string `json:"institution_name,omitempty"`
 	}
 	out := []hit{}
 	for rows.Next() {
 		var x hit
 		rows.Scan(&x.ID, &x.DisplayName, &x.Email, &x.Status, &x.Deleted,
-			&x.EnrollmentID, &x.RollNumber, &x.InstitutionName)
+			&x.EnrollmentID, &x.InstitutionName)
 		out = append(out, x)
 	}
 	middleware.JSON(w, http.StatusOK, out)

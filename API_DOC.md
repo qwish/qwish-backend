@@ -981,11 +981,11 @@ topics. Returns `404 NO_QUIZ_AVAILABLE` when no matching unplayed assessment rem
 ## GET `/users/me/report-card`
 **Auth required:** Yes
 
-Generates a dated Qwish learning report for the authenticated user. Includes institution-recorded education stages and promotions, separately labelled self-reported education, first-attempt accuracy and evidence counts, current assignment progress, 30-day trends, domain strengths, and aggregate peer comparisons.
+Generates a dated Qwish learning report for the authenticated user. Includes institution-recorded education stages (from class membership), separately labelled self-reported education, first-attempt accuracy and evidence counts, current assignment progress, 30-day trends, domain strengths, and aggregate peer comparisons.
 
 Peer standing uses raw accuracy (not the composite `score_pct` or points) on the same quiz IDs. It excludes the learner, counts strictly lower accuracy, and averages across qualifying quizzes. Requires at least 3 quizzes with 5 other active students each; ties are not lower. Question sampling and revisions may differ, so this is descriptive context, not a calibrated national percentile. Trends require 3 scored first attempts in each 30-day window. Strength labels require 3 assessments and 20 questions; 80%+ is an observed strength and below 60% a review priority.
 
-Stages associate institution assessments with recorded enrollment/promotion periods. Missing history is explicitly labelled, and self-reported education is not given inferred marks. The report is not a signed credential or academic transcript. All sections use a consistent database snapshot; responses are `private, no-store`.
+Stages associate institution assessments with recorded class membership periods. Missing history is explicitly labelled, and self-reported education is not given inferred marks. The report is not a signed credential or academic transcript. All sections use a consistent database snapshot; responses are `private, no-store`.
 
 ### Response `200`
 `Content-Type: application/pdf` with PDF binary data.
@@ -2172,7 +2172,7 @@ Removes the teacher from the institution (does not delete their account).
 ## POST `/institution/groups`
 ### Request Body
 ```json
-{ "name": "Class 10A", "description": "Optional" }
+{ "name": "Class 10A", "description": "Optional", "grade": "10", "section": "A" }
 ```
 
 ### Response `201`
@@ -2209,7 +2209,7 @@ Removes the teacher from the institution (does not delete their account).
 ## PATCH `/institution/groups/{groupId}`
 ### Request Body
 ```json
-{ "name": "Class 10B", "description": "Updated description" }
+{ "name": "Class 10B", "description": "Updated description", "grade": "10", "section": "B" }
 ```
 
 ### Response `200`
@@ -2220,11 +2220,11 @@ Removes the teacher from the institution (does not delete their account).
 ---
 
 ## DELETE `/institution/groups/{groupId}`
-Archives the group.
+Ends the class (archives it). See "Classes: end, reopen, past classes".
 
 ### Response `200`
 ```json
-{ "message": "group archived" }
+{ "message": "class ended" }
 ```
 
 ---
@@ -4280,6 +4280,21 @@ same state change, so they are one endpoint.
 `PATCH /institution/students/{userId}/status` still exists with its original
 `{action: suspend|reactivate}` body and now routes through the same service.
 
+### PATCH `/institution/enrollments/{enrollmentId}/status`
+```json
+{ "status": "graduated", "reason": "" }
+```
+`status` ∈ `active`, `suspended`, `graduated`, `transferred`. All four are the
+same state change, so they are one endpoint.
+
+- `active` / `suspended` mirror onto `users.status`, which is what blocks login.
+- `graduated` / `transferred` set `ended_at` and clear `users.institution_id`.
+  The student keeps their account, points, streak and CV; the institution keeps
+  its own attempt and report data but loses roster access.
+
+`PATCH /institution/students/{userId}/status` still exists with its original
+`{action: suspend|reactivate}` body and now routes through the same service.
+
 ### POST `/institution/enrollments/promote`
 ```json
 { "from_grade": "9", "from_section": "A", "to_grade": "10", "to_section": "A" }
@@ -4709,3 +4724,51 @@ enrollment, classes, departments, education[], skills[], portfolio[], portfolio_
 `portfolio[]` holds, per entry, the latest revision submitted **within the caller's institution** — never a live draft:
 `{entry_id, revision_id, revision, content, submitted_at, pinned, review_state: submitted|reviewed|changes_requested, review,
 awaiting_review, student_editing}`. Restricted fields (`details.supervisor`) are removed from staff views.
+
+---
+
+## Classes: end, reopen, past classes (learning layer 3)
+
+Promotion is gone. `POST /institution/enrollments/promote` and `/institution/promotions*` were removed. A class now ends (it is archived), and its students join the next class with its class code. Existing promotion batches were converted into class membership history.
+
+### Class fields
+Groups carry `grade`, `section` (nullable, for reports only, never shown to students) and `kind` (`"class"` or `"remedial"`). These fields appear in:
+- `GET /teacher/classes`
+- `GET /teacher/classes/{classId}`
+- `GET /institution/groups`
+- `GET /institution/groups/{groupId}`
+
+The detail endpoints also return `archived_at`. A student who joins a class with a grade takes that grade and section onto their enrollment. Remedial groups never set grade.
+
+- `POST /institution/groups`: `{ "name", "description?", "grade?", "section?" }`.
+- `PATCH /institution/groups/{groupId}`: partial; any of `name`, `description`, `grade`, `section`. An empty `grade`/`section` clears it. `404` outside your institute.
+
+### Ending and reopening
+| Route | Who | Response |
+|---|---|---|
+| `DELETE /institution/groups/{groupId}` | institute admin | `200 {"message":"class ended"}` |
+| `POST /institution/groups/{groupId}/reopen` | institute admin | `200 {"message":"class reopened"}` |
+| `POST /teacher/classes/{classId}/end` | assigned teacher | `200 {"message":"class ended"}` |
+| `POST /teacher/classes/{classId}/reopen` | assigned teacher | `200 {"message":"class reopened"}` |
+
+- Ending notifies the class's students that the class ended and prompts them to join their next class.
+- Reopen works for 90 days after ending. After that it returns `409 CLASS_REOPEN_EXPIRED`. Reopening a live class is a no-op `200`.
+- An unknown class, or one outside your scope, returns `404 NOT_FOUND`.
+- `GET /teacher/classes?include_ended=1` includes ended classes. They are excluded by default.
+
+### Student side
+- `GET /users/me/enrollment` and `GET /users/me/enrollments`: when the student has no live class at that institute and their last class ended, `class_name` is null and `ended_class_name` holds the ended class's name.
+- `GET /users/me/past-classes` (student) returns classes the student left or that ended, newest first:
+```json
+[{ "group_id": "uuid", "class_name": "9-A", "institution_name": "Greenfield School",
+   "from": "2025-06-01T00:00:00Z", "to": "2026-04-01T00:00:00Z",
+   "assessments": 40, "questions": 100, "correct": 72 }]
+```
+- `GET /users/me/past-classes/{groupId}/concepts` (student) returns concept accuracy inside that class's window:
+```json
+[{ "concept_id": "uuid", "title": "Fractions", "correct": 2, "errors": 6 }]
+```
+  If the student was never in that class, this returns an empty list.
+
+### Membership history
+Removing a student from a group (or ending their enrollment) records a `group_student_history` row. The learning report builds its institution stages from current memberships plus this history.

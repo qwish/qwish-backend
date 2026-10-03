@@ -54,12 +54,24 @@ func (h *Handler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		DisplayName *string `json:"display_name"`
+		FullName    *string `json:"full_name"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
 	userID := middleware.GetUserID(r)
+	if req.FullName != nil {
+		name := strings.TrimSpace(*req.FullName)
+		if name == "" || len([]rune(name)) > 120 {
+			middleware.BadRequest(w, "full_name must be 1 to 120 characters")
+			return
+		}
+		if err := h.svc.UpdateFullName(r.Context(), userID, name); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+	}
 	if req.DisplayName != nil {
 		if err := h.svc.UpdateDisplayName(r.Context(), userID, *req.DisplayName); err != nil {
 			middleware.InternalError(w)

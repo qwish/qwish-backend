@@ -443,6 +443,16 @@ func (s *Service) GetAttemptsAfter(ctx context.Context, userID string, at time.T
 	return out, total, rows.Err()
 }
 
+// UpdateFullName sets the student's one name. Enrollment copies follow so no
+// institute surface can show a stale name.
+func (s *Service) UpdateFullName(ctx context.Context, userID, name string) error {
+	if _, err := s.db.Exec(ctx, `UPDATE users SET full_name=$1, updated_at=now() WHERE id=$2`, name, userID); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(ctx, `UPDATE enrollments SET full_name=$1, updated_at=now() WHERE user_id=$2`, name, userID)
+	return err
+}
+
 func (s *Service) UpdateDisplayName(ctx context.Context, userID, name string) error {
 	_, err := s.db.Exec(ctx,
 		`UPDATE users SET display_name = $1, updated_at = now() WHERE id = $2`, name, userID)

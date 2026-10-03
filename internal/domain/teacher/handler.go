@@ -264,7 +264,7 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 	// transferred in does not bring their previous school's scores with them.
 	rows, err := h.db.Query(r.Context(),
 		`SELECT u.id, e.id, u.display_name, u.email, e.roll_number, e.grade, e.section,
-		        u.total_points, u.current_streak, u.last_active_at, u.status,
+		        u.total_points, u.current_streak, u.last_active_at, u.status, e.join_route,
 		        COALESCE((SELECT AVG(score_pct) FROM quiz_attempts
 		                   WHERE user_id=u.id AND status='completed'
 		                     AND completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)),0) as avg_score
@@ -290,13 +290,14 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 		CurrentStreak int        `json:"current_streak"`
 		LastActiveAt  *time.Time `json:"last_active_at,omitempty"`
 		Status        string     `json:"status"`
+		JoinRoute     *string    `json:"join_route,omitempty"`
 		AverageScore  float64    `json:"average_score"`
 	}
 	students := []studentRow{}
 	for rows.Next() {
 		var s studentRow
 		rows.Scan(&s.ID, &s.EnrollmentID, &s.DisplayName, &s.Email, &s.RollNumber, &s.Grade, &s.Section,
-			&s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.Status, &s.AverageScore)
+			&s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.Status, &s.JoinRoute, &s.AverageScore)
 		students = append(students, s)
 	}
 	middleware.JSONWithMeta(w, http.StatusOK, students, &middleware.Meta{Page: page, Limit: limit, Total: total})
@@ -574,7 +575,7 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 
 	sRows, _ := h.db.Query(r.Context(), `
 		SELECT u.id, e.id, u.display_name, u.email, e.roll_number, e.grade, e.section,
-		       u.total_points, u.current_streak, u.last_active_at, u.status,
+		       u.total_points, u.current_streak, u.last_active_at, u.status, e.join_route,
 		       COALESCE((SELECT AVG(score_pct) FROM quiz_attempts
 		                  WHERE user_id=u.id AND status='completed'
 		                    AND completed_at >= COALESCE(e.joined_at, '-infinity'::timestamptz)),0) AS avg_score
@@ -600,13 +601,14 @@ func (h *Handler) GetClass(w http.ResponseWriter, r *http.Request) {
 		CurrentStreak int        `json:"current_streak"`
 		LastActiveAt  *time.Time `json:"last_active_at,omitempty"`
 		Status        string     `json:"status"`
+		JoinRoute     *string    `json:"join_route,omitempty"`
 		AverageScore  float64    `json:"average_score"`
 	}
 	students := []studentRow{}
 	for sRows.Next() {
 		var s studentRow
 		sRows.Scan(&s.ID, &s.EnrollmentID, &s.DisplayName, &s.Email, &s.RollNumber, &s.Grade, &s.Section,
-			&s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.Status, &s.AverageScore)
+			&s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.Status, &s.JoinRoute, &s.AverageScore)
 		students = append(students, s)
 	}
 

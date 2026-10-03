@@ -576,7 +576,8 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	args := []interface{}{}
 	// Only end-user roles are managed here; platform staff (moderator,
 	// support_agent, super_admin) are administered on the Admin Accounts page.
-	from := ` FROM users u LEFT JOIN enrollments e ON e.user_id=u.id AND e.status IN ('active','suspended')
+	// One row per account: a student's enrollment shown is the active institute's.
+	from := ` FROM users u LEFT JOIN enrollments e ON e.user_id=u.id AND e.institution_id=u.institution_id AND e.status IN ('active','suspended')
 	 LEFT JOIN institutions i ON i.id=CASE WHEN u.role='student' THEN e.institution_id ELSE u.institution_id END `
 	where := `u.deleted_at IS NULL AND u.role IN ('student','teacher','parent','institution_admin')`
 	n := 1
@@ -596,7 +597,7 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 		n++
 	}
 	if v := q.Get("institution_id"); v != "" {
-		where += fmt.Sprintf(` AND (CASE WHEN u.role='student' THEN e.institution_id ELSE u.institution_id END)=$%d`, n)
+		where += fmt.Sprintf(` AND (CASE WHEN u.role='student' THEN EXISTS (SELECT 1 FROM enrollments m WHERE m.user_id=u.id AND m.institution_id=$%d AND m.status IN ('active','suspended')) ELSE u.institution_id=$%d END)`, n, n)
 		args = append(args, v)
 		n++
 	}

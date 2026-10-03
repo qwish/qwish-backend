@@ -130,7 +130,7 @@ func (h *StudentAdminHandler) Search(w http.ResponseWriter, r *http.Request) {
 		SELECT u.id, u.display_name, u.email, u.status, u.deleted_at IS NOT NULL,
 		       e.id, e.roll_number, i.name
 		  FROM users u
-		  LEFT JOIN enrollments e ON e.user_id = u.id AND e.status IN ('active','suspended')
+		  LEFT JOIN enrollments e ON e.user_id = u.id AND e.institution_id = u.institution_id AND e.status IN ('active','suspended')
 		  LEFT JOIN institutions i ON i.id = e.institution_id
 		 WHERE u.role='student'
 		   AND (u.email ILIKE $1 OR u.display_name ILIKE $1 OR e.roll_number ILIKE $1)

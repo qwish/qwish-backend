@@ -77,7 +77,7 @@ func (s *Service) Leave(ctx context.Context, userID, enrollmentID string) error 
 		return err
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM group_students gs USING groups g
-		WHERE gs.group_id=g.id AND gs.user_id=$1 AND g.institution_id=$2 AND g.archived_at IS NULL`, userID, instID); err != nil {
+		WHERE gs.group_id=g.id AND gs.user_id=$1 AND g.institution_id=$2`, userID, instID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

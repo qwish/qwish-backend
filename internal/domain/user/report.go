@@ -105,8 +105,9 @@ func (s *Service) GetLearningReport(ctx context.Context, userID string) (*Learni
 	}
 
 	// Grade stages come from main classes with a grade: live, ended (archived
-	// but still listed) and left (history). An enrollment with none is one
-	// "Not recorded" stage.
+	// but still listed) and left (history), clipped to the enrollment. Time no
+	// graded class covers is its own stage: the enrollment's current grade after
+	// the last class (or with none at all), "Not recorded" before or between.
 	// ponytail: two simultaneous graded main classes double-count attempts; pick a primary class if that ever happens.
 	rows, err = tx.Query(ctx, reportAttempts+`, memberships AS (
  SELECT g.institution_id, g.grade, gs.joined_at AS start, g.archived_at AS finish
@@ -116,13 +117,27 @@ func (s *Service) GetLearningReport(ctx context.Context, userID string) (*Learni
  SELECT g.institution_id, h.grade, h.joined_at, h.left_at
  FROM group_student_history h JOIN groups g ON g.id=h.group_id
  WHERE h.user_id=$1 AND g.kind='class' AND h.grade IS NOT NULL
+ ), enr AS (
+ SELECT id, institution_id, status, COALESCE(NULLIF(grade,''),'Not recorded') AS grade, COALESCE(joined_at, created_at) AS es, ended_at AS ee
+ FROM enrollments WHERE user_id=$1
+ ), clipped AS (
+ -- GREATEST/LEAST skip NULLs, so an open end stays open only if both are.
+ SELECT e.id, m.grade, GREATEST(m.start, e.es) AS start, LEAST(m.finish, e.ee) AS finish
+ FROM enr e JOIN memberships m ON m.institution_id=e.institution_id
+  AND m.start < COALESCE(e.ee,'infinity') AND COALESCE(m.finish,'infinity') > e.es
+ ), gaps AS (
+ SELECT c.id, 'Not recorded' AS grade,
+        CASE WHEN ROW_NUMBER() OVER w = 1 THEN e.es ELSE LAG(c.finish) OVER w END AS start, c.start AS finish
+ FROM clipped c JOIN enr e ON e.id=c.id WINDOW w AS (PARTITION BY c.id ORDER BY c.start)
+ UNION ALL
+ SELECT c.id, e.grade, MAX(c.finish), e.ee FROM clipped c JOIN enr e ON e.id=c.id
+ GROUP BY c.id, e.grade, e.ee HAVING bool_and(c.finish IS NOT NULL)
+ UNION ALL
+ SELECT e.id, e.grade, e.es, e.ee FROM enr e WHERE NOT EXISTS (SELECT 1 FROM clipped c WHERE c.id=e.id)
  ), stages AS (
- SELECT e.id, e.institution_id, e.status, COALESCE(m.grade,'Not recorded') AS grade,
-        GREATEST(COALESCE(m.start, e.joined_at, e.created_at), COALESCE(e.joined_at, e.created_at)) AS start,
-        CASE WHEN m.finish IS NULL THEN e.ended_at WHEN e.ended_at IS NULL THEN m.finish ELSE LEAST(m.finish, e.ended_at) END AS finish
- FROM enrollments e LEFT JOIN memberships m ON m.institution_id=e.institution_id
-  AND m.start < COALESCE(e.ended_at,'infinity') AND COALESCE(m.finish,'infinity') > COALESCE(e.joined_at, e.created_at)
- WHERE e.user_id=$1
+ SELECT e.id, e.institution_id, e.status, p.grade, p.start, p.finish
+ FROM (SELECT * FROM clipped UNION ALL SELECT * FROM gaps WHERE start IS NOT NULL AND (finish IS NULL OR start < finish)) p
+ JOIN enr e ON e.id=p.id
  ) SELECT i.name,s.grade,s.status,s.start,s.finish,COUNT(a.quiz_id),COALESCE(SUM(a.total_questions),0),COALESCE(SUM(a.total_correct),0)
  FROM stages s JOIN institutions i ON i.id=s.institution_id LEFT JOIN first_attempts a
  ON a.user_id=$1 AND a.institution_id=s.institution_id AND a.completed_at>=s.start AND (s.finish IS NULL OR a.completed_at<s.finish)

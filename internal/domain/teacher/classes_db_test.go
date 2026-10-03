@@ -69,3 +69,32 @@ func TestListClassesCanIncludeEnded(t *testing.T) {
 		t.Fatalf("include_ended must return the ended class with its fields: %s", b)
 	}
 }
+
+// A teacher removed from the institute (no institution, assignment rows left
+// behind) or acting under another institute can't end or reopen the class.
+func TestReopenScopedToTeachersInstitute(t *testing.T) {
+	pool := openTestDB(t)
+	s := seedTwoInstitutes(t, pool)
+	h := NewHandler(pool)
+	ctx := context.Background()
+	pool.Exec(ctx, `UPDATE groups SET archived_at=now() WHERE id=$1`, s.ClassB)
+	for _, inst := range []string{"", s.InstA} {
+		w := httptest.NewRecorder()
+		h.ReopenClass(w, classRequest(s.TeacherB, inst, s.ClassB))
+		if w.Code != 404 {
+			t.Fatalf("reopen under institute %q: want 404, got %d", inst, w.Code)
+		}
+	}
+	pool.Exec(ctx, `UPDATE groups SET archived_at=NULL WHERE id=$1`, s.ClassB)
+	w := httptest.NewRecorder()
+	h.EndClass(w, classRequest(s.TeacherB, "", s.ClassB))
+	if w.Code != 404 {
+		t.Fatalf("end with no institute: want 404, got %d", w.Code)
+	}
+	pool.Exec(ctx, `UPDATE groups SET archived_at=now()-interval '91 days' WHERE id=$1`, s.ClassB)
+	w = httptest.NewRecorder()
+	h.ReopenClass(w, classRequest(s.TeacherB, s.InstB, s.ClassB))
+	if w.Code != 409 {
+		t.Fatalf("reopen after 90 days: want 409, got %d", w.Code)
+	}
+}

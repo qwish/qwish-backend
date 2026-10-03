@@ -2,32 +2,41 @@ package db
 
 import (
 	"context"
+	"errors"
 	"net/http"
-	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ReopenWindow is how long an ended class can be reopened. It matches the
-// auto-end window: after it, members' enrollments may already have ended.
-const ReopenWindow = 90 * 24 * time.Hour
-
-// ReopenClass un-archives a class within ReopenWindow. scope is an extra
-// predicate on groups with $2 bound to scopeArg (institute or teacher check).
+// ReopenClass un-archives a class within 90 days of ending. That matches the
+// auto-end window: after it, members' enrollments may already have ended. scope is an extra
+// predicate on groups with $2.. bound to scopeArgs (institute or teacher check).
 // It returns an HTTP status and an error code ("" on success).
-func ReopenClass(ctx context.Context, pool *pgxpool.Pool, groupID, scope, scopeArg string) (int, string) {
-	var archivedAt *time.Time
-	if err := pool.QueryRow(ctx, `SELECT archived_at FROM groups WHERE id=$1 AND `+scope, groupID, scopeArg).Scan(&archivedAt); err != nil {
+func ReopenClass(ctx context.Context, pool *pgxpool.Pool, groupID, scope string, scopeArgs ...any) (int, string) {
+	if _, err := uuid.Parse(groupID); err != nil {
 		return http.StatusNotFound, "NOT_FOUND"
 	}
-	if archivedAt == nil {
+	args := append([]any{groupID}, scopeArgs...)
+	tag, err := pool.Exec(ctx, `UPDATE groups SET archived_at=NULL WHERE id=$1 AND `+scope+`
+		AND archived_at > now() - interval '90 days'`, args...)
+	if err != nil {
+		return http.StatusInternalServerError, "INTERNAL"
+	}
+	if tag.RowsAffected() == 1 {
 		return http.StatusOK, ""
 	}
-	if time.Since(*archivedAt) > ReopenWindow {
-		return http.StatusConflict, "CLASS_REOPEN_EXPIRED"
-	}
-	if _, err := pool.Exec(ctx, `UPDATE groups SET archived_at=NULL WHERE id=$1`, groupID); err != nil {
+	// Nothing reopened: missing, already live, or past the window.
+	var archived bool
+	err = pool.QueryRow(ctx, `SELECT archived_at IS NOT NULL FROM groups WHERE id=$1 AND `+scope, args...).Scan(&archived)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return http.StatusNotFound, "NOT_FOUND"
+	case err != nil:
 		return http.StatusInternalServerError, "INTERNAL"
+	case archived:
+		return http.StatusConflict, "CLASS_REOPEN_EXPIRED"
 	}
 	return http.StatusOK, ""
 }

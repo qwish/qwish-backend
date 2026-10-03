@@ -2,6 +2,7 @@ package enrollment
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -58,28 +59,100 @@ func tableExists(t *testing.T, name string) bool {
 	return ok
 }
 
-func TestRevertedPromotionNotConverted(t *testing.T) {
-	if !tableExists(t, "promotion_batches") {
-		t.Skip("086 already applied")
-	}
+// The 086 conversion runs once against real promotion tables; temp tables of
+// the same name (pg_temp shadows public) let it run on every test run.
+func TestPromotionConversion(t *testing.T) {
 	pool := openTestDB(t)
 	f := seedFixture(t, pool)
 	ctx := context.Background()
-	var kept, reverted string
-	pool.QueryRow(ctx, `INSERT INTO promotion_batches (institution_id, performed_by, source_group_id, to_grade, created_at) VALUES ($1,$2,$3,'10',now()-interval '30 days') RETURNING id`, f.InstitutionID, f.TeacherID, f.GroupID).Scan(&kept)
-	pool.QueryRow(ctx, `INSERT INTO promotion_batches (institution_id, performed_by, source_group_id, to_grade, reverted_at) VALUES ($1,$2,$3,'10',now()) RETURNING id`, f.InstitutionID, f.TeacherID, f.GroupID).Scan(&reverted)
-	pool.Exec(ctx, `INSERT INTO promotion_batch_students (batch_id, enrollment_id, outcome, prior_group_id, prior_grade, prior_section) VALUES ($1,$3,'promoted',$4,'9','A'),($2,$3,'promoted',$4,'9','A')`, kept, reverted, f.StudentEnrollmentID, f.GroupID)
-	t.Cleanup(func() {
-		pool.Exec(ctx, `DELETE FROM promotion_batches WHERE id IN ($1,$2)`, kept, reverted)
-		pool.Exec(ctx, `DELETE FROM group_student_history WHERE user_id=$1`, f.StudentID)
-	})
-	if _, err := pool.Exec(ctx, `SELECT convert_promotions_to_history()`); err != nil {
+	c9, _ := newClass(t, pool, f.InstitutionID, false)
+	c10, _ := newClass(t, pool, f.InstitutionID, false)
+	c11, _ := newClass(t, pool, f.InstitutionID, false)
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-	var n int
-	pool.QueryRow(ctx, `SELECT count(*) FROM group_student_history WHERE user_id=$1 AND grade='9'`, f.StudentID).Scan(&n)
-	if n != 1 {
-		t.Fatalf("want 1 converted row (reverted batch skipped), got %d", n)
+	defer conn.Release()
+	_, err = conn.Exec(ctx, `
+ UPDATE enrollments SET joined_at=now()-interval '1 year' WHERE id='`+f.StudentEnrollmentID+`';
+ CREATE TEMP TABLE promotion_batches(id uuid PRIMARY KEY DEFAULT gen_random_uuid(), target_group_id uuid, to_grade text, to_section text, reverted_at timestamptz, created_at timestamptz);
+ CREATE TEMP TABLE promotion_batch_students(batch_id uuid, enrollment_id uuid, outcome text, prior_group_id uuid, prior_grade text, prior_section text, revert_outcome text);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := func(target any, grade, ago string, reverted bool, prior, revertOutcome any) {
+		t.Helper()
+		var id string
+		if err := conn.QueryRow(ctx, `INSERT INTO promotion_batches (target_group_id, to_grade, created_at, reverted_at)
+			VALUES ($1::uuid, $2, now()-$3::interval, CASE WHEN $4 THEN now() END) RETURNING id`, target, grade, ago, reverted).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Exec(ctx, `INSERT INTO promotion_batch_students VALUES ($1,$2,'promoted',$3::uuid,'x',NULL,$4)`,
+			id, f.StudentEnrollmentID, prior, revertOutcome); err != nil {
+			t.Fatal(err)
+		}
+	}
+	batch(c10, "10", "200 days", false, c9, nil)       // 9 -> 10
+	batch(c11, "11", "100 days", true, c10, "skipped") // reverted, but this student stayed promoted
+	batch(c9, "9", "50 days", true, c11, "reverted")   // undone: no history
+	batch(nil, "12", "20 days", false, f.GroupID, nil) // no target class: never left
+	if _, err := conn.Exec(ctx, `SELECT convert_promotions_to_history()`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := conn.Query(ctx, `SELECT group_id::text||' '||extract(day FROM now()-joined_at)||'d-'||extract(day FROM now()-left_at)||'d'
+		FROM group_student_history WHERE user_id=$1 ORDER BY joined_at`, f.StudentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for rows.Next() {
+		var r string
+		rows.Scan(&r)
+		got = append(got, r)
+	}
+	rows.Close()
+	// c9 from enrolment to the first promotion, c10 from there to the second.
+	want := []string{c9 + " 365d-200d", c10 + " 200d-100d"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("history:\n got %v\nwant %v", got, want)
+	}
+	var grade string
+	pool.QueryRow(ctx, `SELECT COALESCE(grade,'') FROM groups WHERE id=$1`, c10).Scan(&grade)
+	if grade != "10" {
+		t.Fatalf("promotion target class grade = %q, want 10", grade)
+	}
+}
+
+// Leaving an ended class must not stretch the stay past the class's end.
+func TestRemovalFromEndedClassEndsAtClassEnd(t *testing.T) {
+	pool := openTestDB(t)
+	f := seedFixture(t, pool)
+	ctx := context.Background()
+	pool.Exec(ctx, `UPDATE groups SET archived_at=now()-interval '30 days' WHERE id=$1`, f.GroupID)
+	pool.Exec(ctx, `DELETE FROM group_students WHERE group_id=$1 AND user_id=$2`, f.GroupID, f.StudentID)
+	var exact bool
+	pool.QueryRow(ctx, `SELECT h.left_at=g.archived_at FROM group_student_history h JOIN groups g ON g.id=h.group_id
+		WHERE h.user_id=$1`, f.StudentID).Scan(&exact)
+	if !exact {
+		t.Fatal("history left_at must be the class end date")
+	}
+}
+
+// Leaving the institute drops ended classes too, so a reopen can't bring the
+// student back; history keeps the past class.
+func TestLeaveDropsEndedClassMembership(t *testing.T) {
+	pool := openTestDB(t)
+	f := seedFixture(t, pool)
+	ctx := context.Background()
+	pool.Exec(ctx, `UPDATE groups SET archived_at=now() WHERE id=$1`, f.GroupID)
+	if err := NewService(pool).Leave(ctx, f.StudentID, f.StudentEnrollmentID); err != nil {
+		t.Fatal(err)
+	}
+	var live, hist int
+	pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM group_students WHERE user_id=$1),
+		(SELECT count(*) FROM group_student_history WHERE user_id=$1)`, f.StudentID).Scan(&live, &hist)
+	if live != 0 || hist != 1 {
+		t.Fatalf("memberships=%d history=%d", live, hist)
 	}
 }
 

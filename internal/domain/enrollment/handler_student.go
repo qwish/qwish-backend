@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
@@ -108,7 +109,12 @@ func (h *StudentHandler) PastClasses(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/v1/users/me/past-classes/{groupId}/concepts — weakest first.
 func (h *StudentHandler) PastClassConcepts(w http.ResponseWriter, r *http.Request) {
-	out, err := h.svc.PastClassConcepts(r.Context(), middleware.GetUserID(r), chi.URLParam(r, "groupId"))
+	groupID := chi.URLParam(r, "groupId")
+	if _, err := uuid.Parse(groupID); err != nil {
+		middleware.NotFound(w, "class")
+		return
+	}
+	out, err := h.svc.PastClassConcepts(r.Context(), middleware.GetUserID(r), groupID)
 	if err != nil {
 		log.Printf("PastClassConcepts: %v", err)
 		middleware.InternalError(w)

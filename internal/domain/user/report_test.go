@@ -57,6 +57,11 @@ func TestLearningReportEvidence(t *testing.T) {
  INSERT INTO learning_assignments VALUES('homework','published',now()-interval '1 day',NULL);
  INSERT INTO learning_assignment_recipients VALUES('homework','me','started',NULL);
  UPDATE quiz_attempts SET score_pct=99;
+ INSERT INTO users VALUES('gap','Gap Learner',now(),0,0,NULL,'student','inactive'),('plain','Plain Learner',now(),0,0,NULL,'student','inactive');
+ INSERT INTO enrollments VALUES('eg','gap','school','active',NULL,now()-interval '100 days',now()-interval '100 days','Grade 8'),
+  ('ep','plain','school','active',NULL,now()-interval '30 days',now()-interval '30 days','Grade 7');
+ INSERT INTO group_student_history VALUES('g9','gap',now()-interval '60 days',now()-interval '40 days','Grade 9');
+ INSERT INTO quiz_attempts VALUES('gap1','gap','q1',now()-interval '80 days',5,10,50,'completed'),('gap2','gap','q2',now()-interval '5 days',5,10,50,'completed');
  `)
 	if err != nil {
 		t.Fatal(err)
@@ -82,6 +87,23 @@ func TestLearningReportEvidence(t *testing.T) {
 		} else if d.PeerStanding != nil {
 			t.Fatal("small cohort exposed")
 		}
+	}
+	// Time outside graded classes is a stage of its own, not dropped.
+	gap, err := NewService(pool).GetLearningReport(ctx, "gap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gap.Stages) != 3 || gap.Stages[0].Grade != "Not recorded" || gap.Stages[0].Assessments != 1 ||
+		gap.Stages[1].Grade != "Grade 9" || gap.Stages[1].Assessments != 0 ||
+		gap.Stages[2].Grade != "Grade 8" || gap.Stages[2].End != nil || gap.Stages[2].Assessments != 1 {
+		t.Fatalf("gap stages: %+v", gap.Stages)
+	}
+	plain, err := NewService(pool).GetLearningReport(ctx, "plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plain.Stages) != 1 || plain.Stages[0].Grade != "Grade 7" {
+		t.Fatalf("never-graded student keeps the enrollment grade: %+v", plain.Stages)
 	}
 	empty, err := NewService(pool).GetLearningReport(ctx, "empty")
 	if err != nil {

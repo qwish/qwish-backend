@@ -2139,7 +2139,7 @@ Body `{ "action": "suspend" | "reactivate" | "verify", "reason": "..." }`.
 ---
 
 ## DELETE `/institution/teachers/{userId}`
-Removes the teacher from the institution (does not delete their account).
+Removes the teacher from the institution (does not delete their account) and unassigns them from its classes.
 
 ### Response `200`
 ```json
@@ -4722,7 +4722,7 @@ Groups carry `grade`, `section` (nullable, for reports only, never shown to stud
 The detail endpoints also return `archived_at`. A student who joins a class with a grade takes that grade and section onto their enrollment. Remedial groups never set grade.
 
 - `POST /institution/groups`: `{ "name", "description?", "grade?", "section?" }`.
-- `PATCH /institution/groups/{groupId}`: partial; any of `name`, `description`, `grade`, `section`. An empty `grade`/`section` clears it. `404` outside your institute.
+- `PATCH /institution/groups/{groupId}`: partial; any of `name`, `description`, `grade`, `section`. An empty `grade`/`section` clears it. `grade`/`section` over 40 characters return `400`. `404` outside your institute.
 
 ### Ending and reopening
 | Route | Who | Response |
@@ -4749,7 +4749,9 @@ The detail endpoints also return `archived_at`. A student who joins a class with
 ```json
 [{ "concept_id": "uuid", "title": "Fractions", "correct": 2, "errors": 6 }]
 ```
-  If the student was never in that class, this returns an empty list.
+  If the student was never in that class, this returns an empty list. A `groupId` that isn't a uuid returns `404`.
 
 ### Membership history
-Removing a student from a group (or ending their enrollment) records a `group_student_history` row. The learning report builds its institution stages from current memberships plus this history.
+Removing a student from a group (or ending their enrollment) records a `group_student_history` row. Leaving or ending an enrollment also removes the student from that institute's ended classes, so a reopen doesn't bring them back. A removal from an ended class records the class's end date as the leave date. Only students with an active or suspended enrollment are notified when a class ends.
+
+The learning report builds its institution stages from graded main classes (current memberships plus this history). Time no graded class covers is its own stage: the enrollment's grade after the last class (or for the whole enrollment if there is none), `"Not recorded"` before or between classes.

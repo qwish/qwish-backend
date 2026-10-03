@@ -183,7 +183,7 @@ func (s *Service) SetStatus(ctx context.Context, instID, enrollmentID, status st
 	}
 	if userID != nil && terminalStatuses[status] {
 		if _, err = tx.Exec(ctx, `DELETE FROM group_students gs USING groups g
-			WHERE gs.group_id=g.id AND gs.user_id=$1 AND g.institution_id=$2 AND g.archived_at IS NULL`, *userID, instID); err != nil {
+			WHERE gs.group_id=g.id AND gs.user_id=$1 AND g.institution_id=$2`, *userID, instID); err != nil {
 			return err
 		}
 	}

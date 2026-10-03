@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -845,6 +846,8 @@ func (h *Handler) RemoveTeacher(w http.ResponseWriter, r *http.Request) {
 	}
 	// Disassociate from institution but keep account
 	h.db.Exec(r.Context(), `UPDATE users SET institution_id=NULL, updated_at=now() WHERE id=$1`, teacherID)
+	// Class assignments go too, or the teacher keeps acting on these classes.
+	h.db.Exec(r.Context(), `DELETE FROM group_teachers gt USING groups g WHERE gt.group_id=g.id AND gt.user_id=$1 AND g.institution_id=$2`, teacherID, instID)
 	// Quizzes remain, full_name replaced in display
 	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), "remove_teacher", "user", teacherID, "")
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "teacher removed from institution"})
@@ -1036,6 +1039,10 @@ func (h *Handler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 		middleware.BadRequest(w, "name is required")
+		return
+	}
+	if labelTooLong(req.Grade, req.Section) {
+		middleware.BadRequest(w, "grade and section must be 40 characters or fewer")
 		return
 	}
 	inviteCode := generateCode(8)
@@ -1252,6 +1259,10 @@ func (h *Handler) UpdateGroup(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "name cannot be empty")
 		return
 	}
+	if labelTooLong(req.Grade, req.Section) {
+		middleware.BadRequest(w, "grade and section must be 40 characters or fewer")
+		return
+	}
 	groupID, instID := chi.URLParam(r, "groupId"), middleware.GetInstitutionID(r)
 	tag, err := h.db.Exec(r.Context(), `UPDATE groups SET
 		name=COALESCE($1,name), description=COALESCE($2,description),
@@ -1306,12 +1317,24 @@ var reopenMessages = map[string]string{
 	"INTERNAL":             "Something went wrong.",
 }
 
+// labelTooLong mirrors the 40-character CHECK on groups.grade/section.
+func labelTooLong(vals ...*string) bool {
+	for _, v := range vals {
+		if v != nil && utf8.RuneCountInString(strings.TrimSpace(*v)) > 40 {
+			return true
+		}
+	}
+	return false
+}
+
 // NotifyClassEnded tells each member their class has ended. Best-effort.
 func NotifyClassEnded(ctx context.Context, pool *pgxpool.Pool, notif *notification.Service, groupID string) {
 	if notif == nil {
 		return
 	}
-	rows, err := pool.Query(ctx, `SELECT gs.user_id::text, g.name FROM group_students gs JOIN groups g ON g.id=gs.group_id WHERE gs.group_id=$1`, groupID)
+	rows, err := pool.Query(ctx, `SELECT gs.user_id::text, g.name FROM group_students gs JOIN groups g ON g.id=gs.group_id
+		WHERE gs.group_id=$1 AND EXISTS(SELECT 1 FROM enrollments e WHERE e.user_id=gs.user_id
+		  AND e.institution_id=g.institution_id AND e.status IN ('active','suspended'))`, groupID)
 	if err != nil {
 		return
 	}

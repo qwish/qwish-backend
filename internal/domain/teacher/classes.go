@@ -13,7 +13,7 @@ import (
 func (h *Handler) EndClass(w http.ResponseWriter, r *http.Request) {
 	classID := chi.URLParam(r, "classId")
 	tag, err := h.db.Exec(r.Context(), `UPDATE groups g SET archived_at=now()
-		WHERE g.id=$1 AND g.archived_at IS NULL AND g.institution_id=$3
+		WHERE g.id=$1 AND g.archived_at IS NULL AND g.institution_id=NULLIF($3,'')::uuid
 		  AND EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id=g.id AND gt.user_id=$2)`,
 		classID, middleware.GetUserID(r), middleware.GetInstitutionID(r))
 	if err != nil {
@@ -33,7 +33,8 @@ func (h *Handler) EndClass(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/teacher/classes/{classId}/reopen — within 90 days of ending.
 func (h *Handler) ReopenClass(w http.ResponseWriter, r *http.Request) {
 	status, code := qdb.ReopenClass(r.Context(), h.db, chi.URLParam(r, "classId"),
-		"EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id=groups.id AND gt.user_id=$2)", middleware.GetUserID(r))
+		"institution_id=NULLIF($3,'')::uuid AND EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id=groups.id AND gt.user_id=$2)",
+		middleware.GetUserID(r), middleware.GetInstitutionID(r))
 	if status != http.StatusOK {
 		msg := "This class can't be reopened."
 		if code == "CLASS_REOPEN_EXPIRED" {

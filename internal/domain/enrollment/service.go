@@ -75,6 +75,8 @@ type Enrollment struct {
 	// the institution's actual name and assigned class instead of local guesses.
 	InstitutionName *string `json:"institution_name,omitempty"`
 	ClassName       *string `json:"class_name,omitempty"`
+	// Active marks the institute the student's app is currently showing.
+	Active bool `json:"active"`
 }
 
 const selectCols = `id, institution_id, user_id, full_name, email, roll_number,
@@ -111,12 +113,13 @@ func GenerateClaimCode() (string, error) {
 	return enc[:10], nil
 }
 
-// ActiveByUser returns the student's live enrollment, or nil when they have
-// none. A student with no institution is a normal user, not an error case.
+// ActiveByUser returns the live enrollment at the student's active institute,
+// or nil when they have none. A student with no institution is a normal user, not an error case.
 func (s *Service) ActiveByUser(ctx context.Context, userID string) (*Enrollment, error) {
 	e, err := scanEnrollment(s.db.QueryRow(ctx,
 		`SELECT `+selectCols+` FROM enrollments
-		 WHERE user_id=$1 AND status IN ('active','suspended')`, userID))
+		 WHERE user_id=$1 AND status IN ('active','suspended')
+		   AND institution_id=(SELECT institution_id FROM users WHERE id=$1)`, userID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -126,6 +129,7 @@ func (s *Service) ActiveByUser(ctx context.Context, userID string) (*Enrollment,
 	if err := s.addProfileContext(ctx, &e); err != nil {
 		return nil, err
 	}
+	e.Active = true
 	return &e, nil
 }
 

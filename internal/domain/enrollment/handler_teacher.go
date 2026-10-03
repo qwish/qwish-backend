@@ -24,6 +24,9 @@ func writeScopeError(w http.ResponseWriter, err error) bool {
 	case errors.Is(err, ErrNotFound):
 		middleware.NotFound(w, "student")
 		return true
+	case errors.Is(err, ErrNotInSourceClass):
+		middleware.BadRequest(w, "A practice group only takes students from the class it was made from.")
+		return true
 	case err != nil:
 		log.Printf("teacher class membership: %v", err)
 		middleware.InternalError(w)

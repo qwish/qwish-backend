@@ -192,6 +192,8 @@ func (s *Service) SetStatus(ctx context.Context, instID, enrollmentID, status st
 
 var ErrNotYourClass = errors.New("teacher is not assigned to this class")
 
+var ErrNotInSourceClass = errors.New("student is not in the practice group's source class")
+
 // TeacherOwnsClass is the scope check for every teacher write: a teacher may
 // act only on classes they are assigned to via group_teachers.
 func (s *Service) TeacherOwnsClass(ctx context.Context, teacherID, groupID string) (bool, error) {
@@ -222,6 +224,17 @@ func (s *Service) AddStudentToClass(ctx context.Context, teacherID, groupID, stu
 	}
 	if n == 0 {
 		return ErrNotFound
+	}
+
+	// A practice group draws only from the class it was made from.
+	var outsider bool
+	if err := s.db.QueryRow(ctx,
+		`SELECT g.kind='remedial' AND NOT EXISTS (SELECT 1 FROM group_students gs WHERE gs.group_id=g.source_group_id AND gs.user_id=$2)
+		   FROM groups g WHERE g.id=$1`, groupID, studentID).Scan(&outsider); err != nil {
+		return err
+	}
+	if outsider {
+		return ErrNotInSourceClass
 	}
 
 	_, err = s.db.Exec(ctx,

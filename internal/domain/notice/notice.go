@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -61,9 +62,13 @@ type Audiences struct {
 }
 
 type Service struct {
-	db   *pgxpool.Pool
-	emit func(ctx context.Context, userID, title, body, reference string)
+	db       *pgxpool.Pool
+	emit     func(ctx context.Context, userID, title, body, reference string)
+	inflight sync.WaitGroup // deliveries still running after Send returned
 }
+
+// wait blocks until every started delivery has finished.
+func (s *Service) wait() { s.inflight.Wait() }
 
 func NewService(pool *pgxpool.Pool, emit func(ctx context.Context, userID, title, body, reference string)) *Service {
 	return &Service{db: pool, emit: emit}
@@ -244,10 +249,17 @@ func (s *Service) Send(ctx context.Context, a Actor, d Draft) (Notice, error) {
 	if err = tx.Commit(ctx); err != nil {
 		return Notice{}, err
 	}
-	// ponytail: inline fan-out; move to a goroutine with context.WithoutCancel if a notice ever targets thousands.
-	for _, id := range recipients {
-		s.emit(ctx, id, n.Title, n.Body, "notice:"+n.ID)
-	}
+	// The notice is committed; deliver it even after the request ends, so a
+	// timeout can't leave it half-sent (and a retry can't double-send).
+	// ponytail: one goroutine per notice, lost on process restart; move to a job queue if that matters.
+	bg := context.WithoutCancel(ctx)
+	s.inflight.Add(1)
+	go func() {
+		defer s.inflight.Done()
+		for _, id := range recipients {
+			s.emit(bg, id, n.Title, n.Body, "notice:"+n.ID)
+		}
+	}()
 	return n, nil
 }
 

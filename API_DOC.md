@@ -4803,6 +4803,8 @@ POST is rate-limited to 30 per user per hour. `limit` defaults to 20 (max 100); 
 ```
 The list shows the sender's own notices; institution admins and institution-wide leaders see every notice at the institute.
 
+**Delivery:** `POST` returns once the notice is stored; notifications go out in the background and finish even if the request times out.
+
 **Recipients:** students with an `active` enrollment (suspended or left get nothing) who are in a live targeted class, or in a live class of a targeted department, or everyone at the institute for `institution_wide`. Each student gets one notification per notice even when they're in several targeted classes.
 
 **Notification kind `notice`:** `{ "kind": "notice", "title", "body", "icon": "campaign", "color": "indigo", "reference": "notice:<notice id>" }`. It has no destination; apps show the full text in place.
@@ -4823,4 +4825,4 @@ A practice group is a `groups` row with `kind: "remedial"`, made by a teacher fr
 { "concept_id": "uuid", "concept_title": "Fractions", "created_at": "2026-10-03T09:00:00Z",
   "students": [{ "student_id": "uuid", "name": "Asha", "before": { "correct": 1, "errors": 4 }, "after": { "correct": 3, "errors": 1 } }] }
 ```
-`404` unless the caller teaches the group. Membership edits and ending use the normal class routes (`POST/DELETE /teacher/classes/{classId}/students`, `POST /teacher/classes/{classId}/end`). Practice groups appear in `GET /teacher/classes` with `kind: "remedial"`.
+`404` unless the caller teaches the group. Membership edits and ending use the normal class routes (`POST/DELETE /teacher/classes/{classId}/students`, `POST /teacher/classes/{classId}/end`). Adding a student who isn't in the source class returns `400`. Practice groups appear in `GET /teacher/classes` with `kind: "remedial"`.

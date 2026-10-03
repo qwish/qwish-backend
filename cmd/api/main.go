@@ -769,6 +769,8 @@ func main() {
 				r.Route("/leadership", func(r chi.Router) {
 					r.Use(mw.RequireRole("teacher", "institution_admin"))
 					leadershipH.Routes(r)
+					r.Post("/remedial-groups", teacherH.CreateRemedialGroup)
+					r.Get("/remedial-groups/{groupId}/progress", teacherH.RemedialProgress)
 					r.Get("/notices/audiences", noticeH.Audiences)
 					r.With(mw.RateLimitByUser(30, time.Hour)).Post("/notices", noticeH.Send)
 					r.Get("/notices", noticeH.List)

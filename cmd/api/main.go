@@ -29,6 +29,7 @@ import (
 	"github.com/qwish/backend/internal/domain/leadership"
 	"github.com/qwish/backend/internal/domain/learning"
 	"github.com/qwish/backend/internal/domain/metrics"
+	"github.com/qwish/backend/internal/domain/notice"
 	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/domain/offline"
 	"github.com/qwish/backend/internal/domain/onboarding"
@@ -135,6 +136,10 @@ func main() {
 	surveyH := survey.NewHandler(pool)
 	activityH := activity.NewHandler(pool, notifSvc)
 	leadershipH := leadership.NewHandler(pool)
+	noticeH := notice.NewHandler(notice.NewService(pool, func(ctx context.Context, userID, title, body, ref string) {
+		notifSvc.Emit(ctx, userID, "notice", title, body,
+			notification.WithIcon("campaign"), notification.WithColor("indigo"), notification.WithReference(ref))
+	}))
 	portfolioH := portfolio.NewHandler(pool, notifSvc)
 
 	enrollmentStudentH := enrollment.NewStudentHandler(enrollmentSvc)
@@ -764,6 +769,9 @@ func main() {
 				r.Route("/leadership", func(r chi.Router) {
 					r.Use(mw.RequireRole("teacher", "institution_admin"))
 					leadershipH.Routes(r)
+					r.Get("/notices/audiences", noticeH.Audiences)
+					r.With(mw.RateLimitByUser(30, time.Hour)).Post("/notices", noticeH.Send)
+					r.Get("/notices", noticeH.List)
 				})
 
 				// ---- Institution Admin routes ----
@@ -773,6 +781,9 @@ func main() {
 					activityH.OrganiserRoutes(r)
 					// Departments and leadership role assignments.
 					leadershipH.AdminRoutes(r)
+					r.Get("/notices/audiences", noticeH.Audiences)
+					r.With(mw.RateLimitByUser(30, time.Hour)).Post("/notices", noticeH.Send)
+					r.Get("/notices", noticeH.List)
 					portfolioH.InstitutionRoutes(r)
 					r.Get("/overview", institutionH.Overview)
 					r.Get("/learning-summary", learningH.InstitutionSummary)

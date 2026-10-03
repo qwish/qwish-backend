@@ -850,7 +850,12 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 	s.recordAdaptiveLearning(ctx, userID, quizID, scorePct)
 
 	// Update streak and get bonus
-	streakBonus, _ := s.streakSvc.RecordCompletion(ctx, userID, cfg)
+	// Best-effort, but never silent: this failing on every call once went
+	// unnoticed for two months while no streak moved.
+	streakBonus, err := s.streakSvc.RecordCompletion(ctx, userID, cfg)
+	if err != nil {
+		log.Printf("streak: record completion for %s: %v", userID, err)
+	}
 	if streakBonus > 0 {
 		// Credit and ledger in one statement rather than two round trips.
 		s.db.Exec(ctx,

@@ -8,6 +8,13 @@ import (
 	"github.com/qwish/backend/internal/domain/scoring"
 )
 
+// ist is the platform day for learners without an institute. A FixedZone, as
+// in metrics, so it holds in a container with no tzdata (India has no DST).
+var ist = time.FixedZone("IST", 5*3600+1800)
+
+// clock is time.Now, swappable so tests can place a completion at a given hour.
+var clock = time.Now
+
 type Service struct {
 	db *pgxpool.Pool
 }
@@ -92,53 +99,42 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 	}
 	defer tx.Rollback(ctx)
 
-	// Ensure the streak row exists and read it locked, together with the
-	// institution timezone, in one round trip. The old code did a timezone
-	// SELECT, a streak SELECT, and — on the common first-completion path — an
-	// INSERT plus a second SELECT: four exchanges for data that one statement
-	// returns. The upsert is unconditional and idempotent, so the "row missing"
-	// branch disappears entirely.
+	// Ensure the streak row exists, then read it locked together with the
+	// institution timezone. The lock must be taken from streaks itself:
+	// Postgres refuses FOR UPDATE on the nullable side of an outer join, and a
+	// single statement that tried (users LEFT JOIN streaks ... FOR NO KEY
+	// UPDATE OF s) failed on every call, so no completion moved any streak.
 	var timezone string
 	var current, longest int
 	var lastDate *string
 	var m7, m15, m30 bool
 
-	err = tx.QueryRow(ctx,
-		`WITH ins AS (
-		   INSERT INTO streaks (user_id) VALUES ($1) ON CONFLICT DO NOTHING
-		 )
-		 SELECT COALESCE(i.timezone, 'UTC'),
+	if _, err = tx.Exec(ctx, `INSERT INTO streaks (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, userID); err != nil {
+		return 0, err
+	}
+	if err = tx.QueryRow(ctx,
+		`SELECT COALESCE(i.timezone, ''),
 		        s.current_streak, s.longest_streak, s.last_completed_date::text,
-		        s.milestone_7_claimed,
-		        s.milestone_15_claimed, s.milestone_30_claimed
-		   FROM users u
+		        s.milestone_7_claimed, s.milestone_15_claimed, s.milestone_30_claimed
+		   FROM streaks s
+		   JOIN users u ON u.id = s.user_id
 		   LEFT JOIN institutions i ON i.id = u.institution_id
-		   LEFT JOIN streaks s ON s.user_id = u.id
-		  WHERE u.id = $1
+		  WHERE s.user_id = $1
 		    FOR NO KEY UPDATE OF s`, userID,
-	).Scan(&timezone, &current, &longest, &lastDate, &m7, &m15, &m30)
-	if err != nil {
-		// The upsert above runs in the same snapshot as the SELECT, so a row
-		// created by this very statement is not yet visible to it. Re-read.
-		if err = tx.QueryRow(ctx,
-			`SELECT COALESCE((SELECT i.timezone FROM users u
-			                    JOIN institutions i ON i.id = u.institution_id
-			                   WHERE u.id=$1), 'UTC'),
-			        current_streak, longest_streak, last_completed_date::text,
-			        milestone_7_claimed,
-			        milestone_15_claimed, milestone_30_claimed
-			   FROM streaks WHERE user_id=$1 FOR NO KEY UPDATE`, userID,
-		).Scan(&timezone, &current, &longest, &lastDate, &m7, &m15, &m30); err != nil {
-			timezone = "UTC"
-			current, longest, lastDate, m7, m15, m30 = 0, 0, nil, false, false, false
-		}
+	).Scan(&timezone, &current, &longest, &lastDate, &m7, &m15, &m30); err != nil {
+		return 0, err
 	}
 
-	loc, err := time.LoadLocation(timezone)
-	if err != nil {
-		loc = time.UTC
+	// No institute (independent learners, or between institutes) means the
+	// platform day, IST — never UTC, which cut the day at 05:30 IST and folded
+	// a late-night quiz into the day before.
+	loc := ist
+	if timezone != "" {
+		if l, err := time.LoadLocation(timezone); err == nil {
+			loc = l
+		}
 	}
-	today := localDay(time.Now(), loc)
+	today := localDay(clock(), loc)
 	todayDate := today.Format("2006-01-02")
 
 	next, broke, done := nextStreak(current, lastDate, today)

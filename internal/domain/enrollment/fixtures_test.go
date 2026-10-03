@@ -17,7 +17,7 @@ import (
 //	LonerTeacherID      — assigned to no group
 //	StudentID           — a claimed, active student in GroupID
 //	SoloStudentID       — a student with no enrollment at all
-//	UnclaimedEnrollmentID / ClaimCode — a pending_claim roster row
+//	UnclaimedEnrollmentID — a pending_claim roster row (only before migration 085)
 type fixture struct {
 	InstitutionID         string
 	OtherInstitutionID    string
@@ -27,7 +27,6 @@ type fixture struct {
 	SoloStudentID         string
 	StudentEnrollmentID   string
 	UnclaimedEnrollmentID string
-	ClaimCode             string
 	GroupID               string
 }
 
@@ -82,16 +81,18 @@ func seedFixture(t *testing.T, pool *pgxpool.Pool) fixture {
 	must("group_students", err)
 
 	must("claimed enrollment", pool.QueryRow(ctx, `
-		INSERT INTO enrollments (institution_id, user_id, full_name, roll_number, grade, section, status, joined_at)
-		VALUES ($1, $2, 'group-student', 'R-'||$3, '9', 'A', 'active', now())
-		RETURNING id`, f.InstitutionID, f.StudentID, tag).Scan(&f.StudentEnrollmentID))
+		INSERT INTO enrollments (institution_id, user_id, full_name, grade, section, status, joined_at)
+		VALUES ($1, $2, 'group-student', '9', 'A', 'active', now())
+		RETURNING id`, f.InstitutionID, f.StudentID).Scan(&f.StudentEnrollmentID))
 
-	f.ClaimCode = "CLAIM" + tag
-	must("unclaimed enrollment", pool.QueryRow(ctx, `
-		INSERT INTO enrollments (institution_id, full_name, email, roll_number, grade, section, claim_code, status)
-		VALUES ($1, 'Unclaimed Student', $2, 'U-'||$3, '9', 'B', $4, 'pending_claim')
-		RETURNING id`,
-		f.InstitutionID, "unclaimed-"+tag+"@example.test", tag, f.ClaimCode).Scan(&f.UnclaimedEnrollmentID))
+	// Unclaimed roster rows exist only before migration 085 retires them.
+	if columnExists(t, "enrollments", "claim_code") {
+		must("unclaimed enrollment", pool.QueryRow(ctx, `
+			INSERT INTO enrollments (institution_id, full_name, email, grade, section, status)
+			VALUES ($1, 'Unclaimed Student', $2, '9', 'B', 'pending_claim')
+			RETURNING id`,
+			f.InstitutionID, "unclaimed-"+tag+"@example.test").Scan(&f.UnclaimedEnrollmentID))
+	}
 
 	t.Cleanup(func() {
 		ctx := context.Background()
@@ -101,8 +102,6 @@ func seedFixture(t *testing.T, pool *pgxpool.Pool) fixture {
 		pool.Exec(ctx, `DELETE FROM admission_policies WHERE institution_id = ANY($1)`, insts)
 		pool.Exec(ctx, `DELETE FROM audit_log WHERE institution_id = ANY($1)`, insts)
 		pool.Exec(ctx, `DELETE FROM group_students WHERE group_id IN (SELECT id FROM groups WHERE institution_id = ANY($1))`, insts)
-		pool.Exec(ctx, `DELETE FROM student_edit_requests WHERE enrollment_id IN
-			(SELECT id FROM enrollments WHERE institution_id = ANY($1))`, insts)
 		pool.Exec(ctx, `DELETE FROM enrollments WHERE institution_id = ANY($1)`, insts)
 		pool.Exec(ctx, `DELETE FROM user_profile_entries WHERE user_id = ANY($1)`, users)
 		pool.Exec(ctx, `DELETE FROM group_students WHERE group_id = $1`, f.GroupID)

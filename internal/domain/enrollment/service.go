@@ -88,7 +88,15 @@ func scanEnrollment(row pgx.Row) (Enrollment, error) {
 	return e, err
 }
 
-type Service struct{ db *pgxpool.Pool }
+type Service struct {
+	db       *pgxpool.Pool
+	sendMail func(ctx context.Context, to, subject, html string) error
+}
+
+// SetMailer wires outbound email; nil leaves invites unsent (tests).
+func (s *Service) SetMailer(fn func(ctx context.Context, to, subject, html string) error) {
+	s.sendMail = fn
+}
 
 func NewService(db *pgxpool.Pool) *Service { return &Service{db: db} }
 

@@ -110,6 +110,9 @@ func main() {
 	topicH.SetNotifier(notifSvc, cfg.TeacherURL)
 	uploadH := upload.NewHandler(r2Client)
 	enrollmentSvc := enrollment.NewService(pool)
+	enrollmentSvc.SetMailer(func(ctx context.Context, to, subject, body string) error {
+		return notifSvc.SendEmail(ctx, to, subject, body, "student_invite")
+	})
 	institutionH := institution.NewHandler(pool, notifSvc, enrollmentSvc, cfg.AppURL, cfg.TeacherURL)
 	teacherH := teacher.NewHandler(pool)
 	curriculumH := curriculum.NewHandler(curriculum.NewService(pool))
@@ -564,6 +567,8 @@ func main() {
 				r.With(mw.RequireRole("student")).Post("/students/join/preview", enrollmentStudentH.PreviewJoin)
 				r.With(mw.RequireRole("student")).Post("/students/join/confirm", enrollmentStudentH.ConfirmJoin)
 				r.With(mw.RequireRole("student")).Post("/students/join-class", enrollmentStudentH.JoinClass)
+				r.With(mw.RequireRole("student")).Get("/students/invites", enrollmentStudentH.MyInvites)
+				r.With(mw.RequireRole("student")).Post("/students/invites/{inviteId}/accept", enrollmentStudentH.AcceptInvite)
 				r.Get("/users/me/enrollment", enrollmentStudentH.Mine)
 				r.Get("/users/me/emails", userEmailH.List)
 				r.With(mw.RateLimitByUser(10, time.Hour)).Post("/users/me/emails", userEmailH.Add)
@@ -690,6 +695,9 @@ func main() {
 					// Roster writes, bounded to classes the teacher is assigned
 					// to. Identity fields stay institution-owned.
 					r.Post("/classes/{classId}/students", enrollmentTeacherH.AddStudent)
+					r.Post("/classes/{classId}/invites", enrollmentTeacherH.CreateInvites)
+					r.Get("/classes/{classId}/invites", enrollmentTeacherH.ListInvites)
+					r.Delete("/invites/{inviteId}", enrollmentTeacherH.RevokeInvite)
 					r.Delete("/classes/{classId}/students/{userId}", enrollmentTeacherH.RemoveStudent)
 					// Corrections to institution-owned fields are proposals,
 					// not writes; an admin decides them.
@@ -780,6 +788,9 @@ func main() {
 					r.Get("/groups", institutionH.ListGroups)
 					r.Post("/groups", institutionH.CreateGroup)
 					r.Get("/groups/{groupId}", institutionH.GetGroup)
+					r.Post("/groups/{groupId}/invites", enrollmentInstH.CreateInvites)
+					r.Get("/groups/{groupId}/invites", enrollmentInstH.ListInvites)
+					r.Delete("/invites/{inviteId}", enrollmentInstH.RevokeInvite)
 					r.Patch("/groups/{groupId}", institutionH.UpdateGroup)
 					r.Delete("/groups/{groupId}", institutionH.ArchiveGroup)
 					r.Post("/groups/{groupId}/students", institutionH.AddStudentToGroup)

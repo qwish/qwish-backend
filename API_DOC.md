@@ -589,9 +589,29 @@ Returns a public profile (no email or sensitive data).
   "current_streak":   5,
   "longest_streak":   12,
   "quizzes_completed": 34,
-  "badges":           ["first_quiz", "perfect_score"]
+  "badges":           ["first_quiz", "perfect_score"],
+  "badge_count":      2,
+  "qwish_score":      640,
+  "percentile":       67,
+  "accuracy":         75.8,
+  "questions_answered": 330,
+  "active_days_30":   9,
+  "member_since":     "2026-01-15T00:00:00Z",
+  "strengths": [
+    { "label": "Computer Science", "accuracy": 85.0, "questions": 120 }
+  ]
 }
 ```
+
+| Field | Notes |
+|---|---|
+| `qwish_score` | 100–900, from the leaderboard score. 100 for a learner with no attempts; treat `quizzes_completed: 0` as unrated. |
+| `percentile` | 1–100: where the score sits among active students (same scale as recruiter search). |
+| `accuracy` | Correct ÷ answered across completed attempts, one decimal. `null` until a question is answered. |
+| `questions_answered` | Questions in completed attempts. |
+| `active_days_30` | Distinct days (UTC) with a completed attempt in the last 30 days. |
+| `strengths` | Up to 4 subjects, strongest first. Only subjects with at least 10 answered questions. |
+| `badge_count` | Number of earned badges; `badges` still lists them. |
 
 ---
 

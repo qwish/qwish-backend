@@ -3,6 +3,7 @@ package user
 import (
 	"context"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -61,7 +62,26 @@ type PublicProfile struct {
 	LongestStreak    int      `json:"longest_streak"`
 	QuizzesCompleted int      `json:"quizzes_completed"`
 	Badges           []string `json:"badges"`
+
+	QwishScore        float64    `json:"qwish_score"` // 100–900
+	Percentile        int        `json:"percentile"`  // 1–100 among active students
+	Accuracy          *float64   `json:"accuracy"`    // nil until a question is answered
+	QuestionsAnswered int        `json:"questions_answered"`
+	ActiveDays30      int        `json:"active_days_30"`
+	MemberSince       *time.Time `json:"member_since,omitempty"`
+	Strengths         []Strength `json:"strengths"` // strongest first, enough answers only
+	BadgeCount        int        `json:"badge_count"`
 }
+
+// Strength is one subject the learner has answered enough questions in to
+// judge, with their accuracy there.
+type Strength struct {
+	Label     string  `json:"label"`
+	Accuracy  float64 `json:"accuracy"`
+	Questions int     `json:"questions"`
+}
+
+const publicStrengths = 4
 
 type Stats struct {
 	TotalPoints   int64   `json:"total_points"`
@@ -165,6 +185,42 @@ func (s *Service) GetPublicProfile(ctx context.Context, viewerID, targetID strin
 	}
 	if p.Badges == nil {
 		p.Badges = []string{}
+	}
+	p.BadgeCount = len(p.Badges)
+
+	// Standing: score, and the share of active students it beats.
+	// ponytail: counts every active student per view; cache the distribution if profile views get hot.
+	s.db.QueryRow(ctx, `
+		SELECT me.score,
+		       CASE WHEN n.total <= 1 THEN 1 ELSE CEIL(n.below::float8 / (n.total - 1) * 99 + 1)::int END
+		  FROM (SELECT COALESCE(ls.qwish_score,100)::float8 score FROM users u
+		          LEFT JOIN leaderboard_scores ls ON ls.user_id=u.id WHERE u.id=$1) me,
+		       LATERAL (SELECT count(*) total,
+		                       count(*) FILTER (WHERE COALESCE(ls.qwish_score,100) < me.score) below
+		                  FROM users u LEFT JOIN leaderboard_scores ls ON ls.user_id=u.id
+		                 WHERE u.role='student' AND u.status='active' AND u.deleted_at IS NULL) n`,
+		targetID).Scan(&p.QwishScore, &p.Percentile)
+
+	var correct int
+	s.db.QueryRow(ctx, `
+		SELECT COALESCE(SUM(total_correct),0), COALESCE(SUM(total_questions),0),
+		       COUNT(DISTINCT (completed_at AT TIME ZONE 'UTC')::date) FILTER (WHERE completed_at >= now() - interval '30 days'),
+		       (SELECT member_since FROM users WHERE id=$1)
+		  FROM quiz_attempts WHERE user_id=$1 AND status='completed'`, targetID).
+		Scan(&correct, &p.QuestionsAnswered, &p.ActiveDays30, &p.MemberSince)
+	if p.QuestionsAnswered > 0 {
+		acc := round1(float64(correct) / float64(p.QuestionsAnswered) * 100)
+		p.Accuracy = &acc
+	}
+
+	p.Strengths = []Strength{}
+	if domains, err := s.domainPerformance(ctx, targetID); err == nil {
+		sort.SliceStable(domains, func(i, j int) bool { return domains[i].AvgScore > domains[j].AvgScore })
+		for _, d := range domains {
+			if !d.LowSample && len(p.Strengths) < publicStrengths {
+				p.Strengths = append(p.Strengths, Strength{Label: d.Label, Accuracy: d.AvgScore, Questions: d.Questions})
+			}
+		}
 	}
 	return p, nil
 }

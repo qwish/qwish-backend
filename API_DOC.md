@@ -4756,3 +4756,71 @@ The detail endpoints also return `archived_at`. A student who joins a class with
 Removing a student from a group (or ending their enrollment) records a `group_student_history` row. Leaving or ending an enrollment also removes the student from that institute's ended classes, so a reopen doesn't bring them back. A removal from an ended class records the class's end date as the leave date. Only students with an active or suspended enrollment are notified when a class ends.
 
 The learning report builds its institution stages from graded main classes (current memberships plus this history). Time no graded class covers is its own stage: the enrollment's grade after the last class (or for the whole enrollment if there is none), `"Not recorded"` before or between classes.
+
+## Notices and practice groups (learning layer 4)
+
+### Notices
+A notice is a short announcement sent straight to students' notifications (in-app and push). Notices go out immediately; there is no scheduling.
+
+| Route | Who | Response |
+|---|---|---|
+| `GET /teacher/notices/audiences` | teacher (incl. leadership roles) | `200 Audiences` |
+| `POST /teacher/notices` | teacher | `201 Notice` |
+| `GET /teacher/notices?page=&limit=` | teacher | `200 [Notice]` |
+| `GET /institution/notices/audiences` | institution admin | `200 Audiences` |
+| `POST /institution/notices` | institution admin | `201 Notice` |
+| `GET /institution/notices?page=&limit=` | institution admin | `200 [Notice]` |
+
+POST is rate-limited to 30 per user per hour. `limit` defaults to 20 (max 100); `page` starts at 1.
+
+**Who can reach what**
+
+| Sender | Can target |
+|---|---|
+| Teacher | Classes they teach, plus the departments of those classes |
+| HOD (any role with `activities.publish` scoped to a department) | Any class in that department, plus that department |
+| Institution admin, or a role with institution-wide `activities.publish` (Director, Principal) | Anything, including the whole institute |
+
+`GET .../audiences` returns exactly what the sender may pick:
+```json
+{ "classes": [{ "id": "uuid", "name": "9-A" }], "departments": [{ "id": "uuid", "name": "Science" }], "institution_wide": false }
+```
+
+**Draft** (POST body):
+```json
+{ "title": "Test on Friday", "body": "Chapter 3", "category": "test",
+  "group_ids": ["uuid"], "department_ids": [], "institution_wide": false }
+```
+- `title` 1–120 characters, `body` 1–2000, `category` one of `event` | `test` | `general`.
+- At least one class or department unless `institution_wide`; at most 50 classes plus departments.
+- `400` for an invalid draft (message says which field). `403 NOTICE_AUDIENCE` if any chosen class or department is outside the sender's reach, or `institution_wide` without that reach; nothing is sent.
+
+**Notice** (response):
+```json
+{ "id": "uuid", "title": "Test on Friday", "body": "Chapter 3", "category": "test",
+  "created_by_name": "Ms Rao", "institution_wide": false, "group_ids": ["uuid"], "department_ids": [],
+  "recipient_count": 32, "created_at": "2026-10-03T09:00:00Z" }
+```
+The list shows the sender's own notices; institution admins and institution-wide leaders see every notice at the institute.
+
+**Recipients:** students with an `active` enrollment (suspended or left get nothing) who are in a live targeted class, or in a live class of a targeted department, or everyone at the institute for `institution_wide`. Each student gets one notification per notice even when they're in several targeted classes.
+
+**Notification kind `notice`:** `{ "kind": "notice", "title", "body", "icon": "campaign", "color": "indigo", "reference": "notice:<notice id>" }`. It has no destination; apps show the full text in place.
+
+### Practice (remedial) groups
+A practice group is a `groups` row with `kind: "remedial"`, made by a teacher from one of their classes for one concept. It has no grade, joining is off, it never keeps an enrollment alive and it has no leaderboard. Students see only its name; no student-facing payload says "remedial".
+
+`POST /teacher/remedial-groups`
+```json
+{ "source_class_id": "uuid", "concept_id": "uuid", "name": "Fractions practice", "student_ids": ["uuid"] }
+```
+→ `201 { "id", "name", "invite_code", "member_count" }`. The teacher becomes its teacher.
+- `400`: `name` not 1–80 characters, not 1–200 students, malformed ids, a student not in the source class, or a concept with no evidence at the institute.
+- `403 NOT_YOUR_CLASS`: the teacher doesn't teach the (live) source class.
+
+`GET /teacher/remedial-groups/{groupId}/progress` → before/after evidence on the group's concept, split at the group's creation:
+```json
+{ "concept_id": "uuid", "concept_title": "Fractions", "created_at": "2026-10-03T09:00:00Z",
+  "students": [{ "student_id": "uuid", "name": "Asha", "before": { "correct": 1, "errors": 4 }, "after": { "correct": 3, "errors": 1 } }] }
+```
+`404` unless the caller teaches the group. Membership edits and ending use the normal class routes (`POST/DELETE /teacher/classes/{classId}/students`, `POST /teacher/classes/{classId}/end`). Practice groups appear in `GET /teacher/classes` with `kind: "remedial"`.

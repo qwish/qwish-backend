@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	qdb "github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -129,10 +130,10 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 			err = h.db.QueryRow(r.Context(), leaderboardScoreCTE+`
 			SELECT CASE WHEN EXISTS(
 				SELECT 1 FROM scored me JOIN users mu ON mu.id=me.id
-				 WHERE me.id=$2 AND me.institution_id=$1 AND ($3='' OR LOWER(mu.domain)=LOWER($3))
+				 WHERE me.id=$2 AND `+qdb.LiveMemberSQL("me.id", "$1")+` AND ($3='' OR LOWER(mu.domain)=LOWER($3))
 			) THEN (
 				SELECT COUNT(*)+1 FROM scored s JOIN users u ON u.id=s.id
-				 WHERE s.institution_id=$1
+				 WHERE `+qdb.LiveMemberSQL("s.id", "$1")+`
 				   AND s.completed_quizzes >= 5
 				   AND ($3='' OR LOWER(u.domain)=LOWER($3))
 				   AND s.qwish_score>(SELECT qwish_score FROM scored WHERE id=$2)
@@ -209,7 +210,7 @@ func (h *Handler) loadPage(ctx context.Context, scope, instID, domain string, li
 		if err := h.db.QueryRow(ctx, `
 			`+leaderboardScoreCTE+`SELECT COUNT(*) FROM scored s
 			 JOIN users u ON u.id=s.id
-			 WHERE s.institution_id=$1
+			 WHERE `+qdb.LiveMemberSQL("s.id", "$1")+`
 			   AND s.completed_quizzes >= 5
 			   AND ($2='' OR LOWER(u.domain)=LOWER($2))`, instID, domain).Scan(&total); err != nil {
 			return nil, 0, err
@@ -219,7 +220,7 @@ func (h *Handler) loadPage(ctx context.Context, scope, instID, domain string, li
 			SELECT s.id, s.display_name, s.institution_name, s.qwish_score, s.total_points, s.current_streak,
 			       RANK() OVER (ORDER BY s.qwish_score DESC) AS rank
 			  FROM scored s JOIN users u ON u.id=s.id
-			 WHERE s.institution_id=$1
+			 WHERE `+qdb.LiveMemberSQL("s.id", "$1")+`
 			   AND s.completed_quizzes >= 5
 			   AND ($2='' OR LOWER(u.domain)=LOWER($2))
 			 ORDER BY s.qwish_score DESC, s.id LIMIT $3 OFFSET $4`, instID, domain, limit, offset)

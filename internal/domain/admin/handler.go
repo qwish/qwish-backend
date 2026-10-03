@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 
+	qdb "github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/httpx"
 	"strconv"
 	"strings"
@@ -422,7 +423,7 @@ func (h *Handler) GetInstitution(w http.ResponseWriter, r *http.Request) {
 		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher' AND deleted_at IS NULL),
 		(SELECT COUNT(*) FROM quizzes WHERE institution_id=$1 AND deleted_at IS NULL),
 		(SELECT COUNT(*) FROM quizzes WHERE institution_id=$1 AND deleted_at IS NULL AND status='published'),
-		(SELECT AVG(current_streak) FROM users WHERE institution_id=$1 AND role='student' AND status='active'),
+		(SELECT AVG(x.current_streak) FROM users x WHERE `+qdb.LiveMemberSQL("x.id", "$1")+` AND x.role='student' AND x.status='active'),
 		(SELECT COUNT(*) FROM enrollments e JOIN users u ON u.id=e.user_id WHERE e.institution_id=$1 AND e.status IN ('active','suspended') AND u.role='student' AND u.deleted_at IS NULL),
 		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher')`, instID,
 	).Scan(&studentCount, &teacherCount, &quizCount, &activeQuizzes, &avgStreak, &sJoined, &tJoined)

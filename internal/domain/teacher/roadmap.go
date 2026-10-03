@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	qdb "github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
@@ -37,7 +38,7 @@ func (h *Handler) SupportReviews(w http.ResponseWriter, r *http.Request) {
 		          JOIN group_teachers gt ON gt.group_id=g.id AND gt.user_id=$1
 		         WHERE gs.user_id=s.student_id AND g.archived_at IS NULL ORDER BY g.name LIMIT 1)
 		  FROM teacher_student_support s
-		  JOIN users u ON u.id=s.student_id AND u.deleted_at IS NULL AND u.institution_id=$2
+		  JOIN users u ON u.id=s.student_id AND u.deleted_at IS NULL AND `+qdb.LiveMemberSQL("u.id", "$2")+`
 		 WHERE s.teacher_id=$1 AND s.status<>'resolved' AND s.review_on IS NOT NULL
 		   AND s.review_on <= current_date + $3::int
 		 ORDER BY s.review_on, 2`, middleware.GetUserID(r), middleware.GetInstitutionID(r), days)

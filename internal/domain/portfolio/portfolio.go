@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	qdb "github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
@@ -51,7 +52,7 @@ func (h *Handler) InstitutionRoutes(r chi.Router) {
 // teacherScopeSQL: student $1 is visible to teacher $3 in institution $2 —
 // the same rule as the teacher student list (unassigned teachers see the
 // whole institution; assigned teachers see students sharing a class).
-const teacherScopeSQL = `EXISTS(SELECT 1 FROM users s WHERE s.id=$1 AND s.institution_id=$2 AND s.role='student' AND s.deleted_at IS NULL
+var teacherScopeSQL = `EXISTS(SELECT 1 FROM users s WHERE s.id=$1 AND ` + qdb.LiveMemberSQL("s.id", "$2") + ` AND s.role='student' AND s.deleted_at IS NULL
 	AND (NOT EXISTS(SELECT 1 FROM group_teachers WHERE user_id=$3)
 	  OR EXISTS(SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id WHERE gs.user_id=s.id AND gt.user_id=$3)))`
 
@@ -319,7 +320,7 @@ func (h *Handler) Queue(w http.ResponseWriter, r *http.Request) {
 		COALESCE(e.subtype, e.kind), COALESCE(v.content->>'title',''), v.submitted_at, v.revision>1
 		FROM user_profile_entries e
 		JOIN user_profile_entry_revisions v ON v.entry_id=e.id AND v.revision=e.current_revision AND v.institution_id=$1
-		JOIN users u ON u.id=e.user_id AND u.institution_id=$1 AND u.role='student' AND u.deleted_at IS NULL
+		JOIN users u ON u.id=e.user_id AND `+qdb.LiveMemberSQL("u.id", "$1")+` AND u.role='student' AND u.deleted_at IS NULL
 		WHERE e.status='submitted'
 		  AND (NOT EXISTS(SELECT 1 FROM group_teachers WHERE user_id=$2)
 		    OR EXISTS(SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id WHERE gs.user_id=u.id AND gt.user_id=$2))

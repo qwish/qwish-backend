@@ -67,6 +67,9 @@ func TestGetReturnsOnlyEligibleStudents(t *testing.T) {
 		INSERT INTO users (supabase_uid, full_name, display_name, email, role, institution_id, total_points, domain)
 		VALUES (gen_random_uuid(), 'Eligible Student', 'Eligible Student', $1, 'student', $2, 100, $3)
 		RETURNING id`, "leaderboard-student-"+tag+"@example.test", institutionID, "fixture-"+tag), &studentID)
+	if _, err := pool.Exec(ctx, `INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at) VALUES ($1,$2,'Eligible Student','active',now())`, institutionID, studentID); err != nil {
+		t.Fatalf("seed enrollment: %v", err)
+	}
 	mustScan("teacher", pool.QueryRow(ctx, `
 		INSERT INTO users (supabase_uid, full_name, display_name, email, role, institution_id, total_points, domain)
 		VALUES (gen_random_uuid(), 'High-scoring Teacher', 'High-scoring Teacher', $1, 'teacher', $2, 9999, $3)
@@ -90,6 +93,7 @@ func TestGetReturnsOnlyEligibleStudents(t *testing.T) {
 	t.Cleanup(func() {
 		pool.Exec(ctx, `DELETE FROM quiz_attempts WHERE quiz_id = ANY($1::uuid[])`, quizIDs)
 		pool.Exec(ctx, `DELETE FROM quizzes WHERE id = ANY($1::uuid[])`, quizIDs)
+		pool.Exec(ctx, `DELETE FROM enrollments WHERE institution_id=$1`, institutionID)
 		pool.Exec(ctx, `DELETE FROM users WHERE id = ANY($1::uuid[])`, []string{studentID, teacherID})
 		pool.Exec(ctx, `DELETE FROM institutions WHERE id=$1`, institutionID)
 	})

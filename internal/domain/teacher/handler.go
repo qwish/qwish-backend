@@ -9,13 +9,14 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	qdb "github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
 )
 
 func (h *Handler) canSeeStudent(r *http.Request, teacherID, institutionID, studentID string) bool {
 	var allowed bool
-	err := h.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=$1 AND u.institution_id=$2 AND u.role='student' AND u.deleted_at IS NULL AND (NOT EXISTS(SELECT 1 FROM group_teachers WHERE user_id=$3) OR EXISTS(SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id WHERE gs.user_id=u.id AND gt.user_id=$3)))`, studentID, institutionID, teacherID).Scan(&allowed)
+	err := h.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=$1 AND `+qdb.LiveMemberSQL("u.id", "$2")+` AND u.role='student' AND u.deleted_at IS NULL AND (NOT EXISTS(SELECT 1 FROM group_teachers WHERE user_id=$3) OR EXISTS(SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id WHERE gs.user_id=u.id AND gt.user_id=$3)))`, studentID, institutionID, teacherID).Scan(&allowed)
 	return err == nil && allowed
 }
 
@@ -312,7 +313,7 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 	if h.hasGroupAssignments(r, teacherID) {
 		h.db.QueryRow(r.Context(), `
 			SELECT 1 FROM users u
-			WHERE u.id=$1 AND u.institution_id=$2 AND u.role='student' AND u.deleted_at IS NULL
+			WHERE u.id=$1 AND `+qdb.LiveMemberSQL("u.id", "$2")+` AND u.role='student' AND u.deleted_at IS NULL
 			  AND EXISTS (
 			    SELECT 1 FROM group_students gs
 			    JOIN group_teachers gt ON gt.group_id = gs.group_id
@@ -320,7 +321,7 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 			  )`, studentID, instID, teacherID).Scan(&visible)
 	} else {
 		h.db.QueryRow(r.Context(),
-			`SELECT 1 FROM users WHERE id=$1 AND institution_id=$2 AND role='student' AND deleted_at IS NULL`,
+			`SELECT 1 FROM users u WHERE u.id=$1 AND `+qdb.LiveMemberSQL("u.id", "$2")+` AND u.role='student' AND u.deleted_at IS NULL`,
 			studentID, instID).Scan(&visible)
 	}
 	if visible == 0 {
@@ -715,7 +716,7 @@ func (h *Handler) StudentPerformanceReport(w http.ResponseWriter, r *http.Reques
 	classID := q.Get("class_id")
 
 	args := []interface{}{instID, teacherID}
-	where := `u.institution_id=$1 AND u.role='student' AND u.deleted_at IS NULL`
+	where := qdb.LiveMemberSQL("u.id", "$1") + ` AND u.role='student' AND u.deleted_at IS NULL`
 	n := 3
 
 	if classID != "" {

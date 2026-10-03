@@ -14,8 +14,8 @@ func TestGraduatedStudentLeavesTheTeacherRoster(t *testing.T) {
 
 	var enrollmentID string
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at)
-		VALUES ($1, $2, 'group-student', 'active', now())
+		UPDATE enrollments SET joined_at=now()
+		 WHERE institution_id=$1 AND user_id=$2 AND status='active'
 		RETURNING id`, f.InstitutionID, f.StudentID).Scan(&enrollmentID); err != nil {
 		t.Fatalf("seed enrollment: %v", err)
 	}
@@ -60,8 +60,8 @@ func TestTeacherAverageExcludesAttemptsBeforeJoining(t *testing.T) {
 
 	var enrollmentID string
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at)
-		VALUES ($1, $2, 'group-student', 'active', now() - interval '5 days')
+		UPDATE enrollments SET joined_at=now() - interval '5 days'
+		 WHERE institution_id=$1 AND user_id=$2 AND status='active'
 		RETURNING id`, f.InstitutionID, f.StudentID).Scan(&enrollmentID); err != nil {
 		t.Fatalf("seed enrollment: %v", err)
 	}

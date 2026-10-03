@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	qdb "github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/middleware"
 )
@@ -73,8 +74,8 @@ const eligibleSQL = `(a.institution_id=$3 AND (a.institution_wide OR EXISTS(
 	WHERE ag.activity_id=a.id AND gs.user_id=$2)))`
 
 // audienceCountSQL counts students currently in activity $1's audience; $2 is the institution.
-const audienceCountSQL = `SELECT count(*) FROM users u, activities a
-	WHERE a.id=$1 AND u.institution_id=$2 AND u.role='student' AND u.deleted_at IS NULL
+var audienceCountSQL = `SELECT count(*) FROM users u, activities a
+	WHERE a.id=$1 AND ` + qdb.LiveMemberSQL("u.id", "$2") + ` AND u.role='student' AND u.deleted_at IS NULL
 	AND (a.institution_wide OR EXISTS(SELECT 1 FROM activity_audience_groups ag
 		JOIN groups g ON g.id=ag.group_id AND g.archived_at IS NULL
 		JOIN group_students gs ON gs.group_id=ag.group_id

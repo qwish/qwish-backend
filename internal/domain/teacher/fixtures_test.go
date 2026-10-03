@@ -60,13 +60,18 @@ func seedTeacherFixture(t *testing.T, pool *pgxpool.Pool) teacherFixture {
 	newUser("teacher", "loner-teacher", &f.LonerTeacherID)
 	newUser("student", "group-student", &f.StudentID)
 	newUser("student", "other-student", &f.OtherStudentID)
+	// Membership is a live enrollment, not users.institution_id.
+	_, err := pool.Exec(ctx, `INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at)
+		SELECT $1, id, full_name, 'active', now() - interval '30 days' FROM users WHERE id = ANY($2)`,
+		f.InstitutionID, []string{f.StudentID, f.OtherStudentID})
+	must("enrollments", err)
 
 	must("group", pool.QueryRow(ctx, `
 		INSERT INTO groups (institution_id, name, invite_code)
 		VALUES ($1, 'Fixture Class', 'INV'||$2)
 		RETURNING id`, f.InstitutionID, tag).Scan(&f.GroupID))
 
-	_, err := pool.Exec(ctx,
+	_, err = pool.Exec(ctx,
 		`INSERT INTO group_teachers (group_id, user_id) VALUES ($1, $2)`, f.GroupID, f.TeacherID)
 	must("group_teachers", err)
 	_, err = pool.Exec(ctx,
@@ -89,6 +94,7 @@ func seedTeacherFixture(t *testing.T, pool *pgxpool.Pool) teacherFixture {
 		pool.Exec(ctx, `DELETE FROM quiz_attempts WHERE quiz_id = ANY($1)`, quizzes)
 		pool.Exec(ctx, `DELETE FROM quizzes WHERE id = ANY($1)`, quizzes)
 		pool.Exec(ctx, `DELETE FROM groups WHERE id = $1`, f.GroupID)
+		pool.Exec(ctx, `DELETE FROM enrollments WHERE institution_id = $1`, f.InstitutionID)
 		pool.Exec(ctx, `DELETE FROM users WHERE id = ANY($1)`, users)
 		pool.Exec(ctx, `DELETE FROM institutions WHERE id = $1`, f.InstitutionID)
 	})

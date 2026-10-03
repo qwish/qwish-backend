@@ -68,6 +68,10 @@ func build(t *testing.T) *world {
 		must(pool.QueryRow(ctx, `INSERT INTO users (supabase_uid,full_name,display_name,email,role,institution_id)
 			VALUES (gen_random_uuid(),$1,$1,$2,$3,$4) RETURNING id`, label, label+"-"+tag+"@example.test", role, in).Scan(dest))
 		w.roles[*dest], w.insts[*dest] = role, in
+		if role == "student" {
+			_, err := pool.Exec(ctx, `INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at) VALUES ($1,$2,$3,'active',now())`, in, *dest, label)
+			must(err)
+		}
 	}
 	user("institution_admin", "admin", w.inst, &w.admin)
 	user("teacher", "hod", w.inst, &w.hod)
@@ -98,6 +102,7 @@ func build(t *testing.T) *world {
 			pool.Exec(ctx, `DELETE FROM audit_log WHERE institution_id=$1`, in)
 			pool.Exec(ctx, `DELETE FROM groups WHERE institution_id=$1`, in)
 			pool.Exec(ctx, `DELETE FROM departments WHERE institution_id=$1`, in)
+			pool.Exec(ctx, `DELETE FROM enrollments WHERE institution_id=$1`, in)
 			pool.Exec(ctx, `DELETE FROM users WHERE institution_id=$1`, in)
 			pool.Exec(ctx, `DELETE FROM institutions WHERE id=$1`, in)
 		}

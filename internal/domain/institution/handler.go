@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	qdb "github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/domain/auth"
 	"github.com/qwish/backend/internal/domain/enrollment"
 	"github.com/qwish/backend/internal/domain/notification"
@@ -46,14 +47,14 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 	h.db.QueryRow(r.Context(), `SELECT
 		(SELECT COUNT(*) FROM enrollments e LEFT JOIN users u ON u.id=e.user_id WHERE e.institution_id=$1 AND e.status IN ('pending_claim','active','suspended') AND (e.user_id IS NULL OR (u.role='student' AND u.deleted_at IS NULL))),
 		(SELECT COUNT(DISTINCT qa.user_id) FROM quiz_attempts qa JOIN users u ON u.id=qa.user_id
-		 WHERE u.institution_id=$1 AND u.role='student' AND u.deleted_at IS NULL AND qa.completed_at >= CURRENT_DATE - 7),
+		 WHERE `+qdb.LiveMemberSQL("u.id", "$1")+` AND u.role='student' AND u.deleted_at IS NULL AND qa.completed_at >= CURRENT_DATE - 7),
 		(SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher' AND status='active'),
 		(SELECT COUNT(*) FROM quizzes WHERE institution_id=$1 AND status='published'),
 		(SELECT COALESCE(AVG(qa.score_pct),0) FROM quiz_attempts qa JOIN users u ON u.id=qa.user_id
-		 WHERE u.institution_id=$1 AND u.role='student' AND u.deleted_at IS NULL AND qa.status='completed' AND qa.completed_at >= CURRENT_DATE - 30),
-		COALESCE((SELECT display_name FROM users WHERE institution_id=$1 AND role='student' AND status='active' ORDER BY total_points DESC LIMIT 1), ''),
-		COALESCE((SELECT total_points FROM users WHERE institution_id=$1 AND role='student' AND status='active' ORDER BY total_points DESC LIMIT 1), 0),
-		(SELECT id::text FROM users WHERE institution_id=$1 AND role='student' AND status='active' ORDER BY total_points DESC LIMIT 1)`,
+		 WHERE `+qdb.LiveMemberSQL("u.id", "$1")+` AND u.role='student' AND u.deleted_at IS NULL AND qa.status='completed' AND qa.completed_at >= CURRENT_DATE - 30),
+		COALESCE((SELECT x.display_name FROM users x WHERE `+qdb.LiveMemberSQL("x.id", "$1")+` AND x.role='student' AND x.status='active' ORDER BY x.total_points DESC LIMIT 1), ''),
+		COALESCE((SELECT x.total_points FROM users x WHERE `+qdb.LiveMemberSQL("x.id", "$1")+` AND x.role='student' AND x.status='active' ORDER BY x.total_points DESC LIMIT 1), 0),
+		(SELECT x.id::text FROM users x WHERE `+qdb.LiveMemberSQL("x.id", "$1")+` AND x.role='student' AND x.status='active' ORDER BY x.total_points DESC LIMIT 1)`,
 		instID,
 	).Scan(&totalStudents, &activeStudents, &totalTeachers, &totalQuizzes, &avgScore, &topStudentName, &topStudentPoints, &topStudentID)
 
@@ -89,7 +90,7 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 	rows, _ := h.db.Query(r.Context(),
 		`SELECT DATE(qa.completed_at) as day, COUNT(*)
 		 FROM quiz_attempts qa JOIN users u ON u.id=qa.user_id
-		 WHERE u.institution_id=$1 AND u.role='student' AND u.deleted_at IS NULL AND qa.completed_at >= CURRENT_DATE - 30 AND qa.status='completed'
+		 WHERE `+qdb.LiveMemberSQL("u.id", "$1")+` AND u.role='student' AND u.deleted_at IS NULL AND qa.completed_at >= CURRENT_DATE - 30 AND qa.status='completed'
 		 GROUP BY day ORDER BY day`, instID)
 	defer rows.Close()
 	type dayCount struct {
@@ -1431,7 +1432,7 @@ func (h *Handler) SetupChecklist(w http.ResponseWriter, r *http.Request) {
 		 EXISTS(SELECT 1 FROM audit_log WHERE target_id=$1 AND action_type='update_point_rules'),
 		 EXISTS(SELECT 1 FROM webauthn_user_credentials WHERE user_id=$2),
 		 (SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='teacher' AND status='active'),
-		 (SELECT COUNT(*) FROM users WHERE institution_id=$1 AND role='student' AND status='active')`,
+		 (SELECT COUNT(*) FROM users x WHERE `+qdb.LiveMemberSQL("x.id", "$1")+` AND x.role='student' AND x.status='active')`,
 		instID, adminID,
 	).Scan(&profileConfirmed, &rulesReviewed, &hasPasskey, &teachers, &students); err != nil {
 		middleware.InternalError(w)
@@ -1643,7 +1644,7 @@ func (h *Handler) StudentPerformanceReport(w http.ResponseWriter, r *http.Reques
 		limit = 50
 	}
 
-	where := `u.institution_id=$1 AND u.role='student' AND u.status='active' AND u.deleted_at IS NULL`
+	where := qdb.LiveMemberSQL("u.id", "$1") + ` AND u.role='student' AND u.status='active' AND u.deleted_at IS NULL`
 	args := []interface{}{instID}
 	if groupID := q.Get("group_id"); groupID != "" {
 		args = append(args, groupID)
@@ -1878,7 +1879,7 @@ func (h *Handler) StreakHealthReport(w http.ResponseWriter, r *http.Request) {
 		   COUNT(*) FILTER (WHERE current_streak = 0),
 		   (SELECT COUNT(*) FROM enrollments WHERE institution_id=$1 AND status='pending_claim' AND $2='')
 		 FROM users u
-		 WHERE u.institution_id=$1 AND u.role='student' AND u.status='active' AND u.deleted_at IS NULL
+		 WHERE `+qdb.LiveMemberSQL("u.id", "$1")+` AND u.role='student' AND u.status='active' AND u.deleted_at IS NULL
 		   AND ($2='' OR EXISTS (SELECT 1 FROM group_students gs WHERE gs.user_id=u.id AND gs.group_id::text=$2))`,
 		instID, groupID).Scan(&active, &atRisk, &broken, &unclaimed)
 	// Unclaimed roster records have no account and so no streak; they're
@@ -1923,7 +1924,7 @@ func (h *Handler) PointsSummaryReport(w http.ResponseWriter, r *http.Request) {
 		`SELECT DATE(pl.created_at) AS day, COALESCE(SUM(pl.amount),0) AS points_distributed
 		 FROM points_ledger pl
 		 JOIN users u ON u.id=pl.user_id
-		 WHERE u.institution_id=$1 AND pl.amount > 0 AND `+fromClause+toClause+groupClause+`
+		 WHERE `+qdb.LiveMemberSQL("u.id", "$1")+` AND pl.amount > 0 AND `+fromClause+toClause+groupClause+`
 		 GROUP BY day ORDER BY day`, args...)
 	defer rows.Close()
 	type day struct {
@@ -1950,7 +1951,7 @@ func (h *Handler) PointsSummaryReport(w http.ResponseWriter, r *http.Request) {
 		            AND expires_at > now()
 		        ),0) AS expiring_soon
 		 FROM users u
-		 WHERE u.institution_id=$1 AND u.role='student' AND u.deleted_at IS NULL`+inGroup(2)+`
+		 WHERE `+qdb.LiveMemberSQL("u.id", "$1")+` AND u.role='student' AND u.deleted_at IS NULL`+inGroup(2)+`
 		 ORDER BY u.total_points DESC`, instID, groupID)
 	defer srows.Close()
 	type stu struct {

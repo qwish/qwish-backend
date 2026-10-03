@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 
+	qdb "github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/domain/leadership"
 	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/jsonx"
@@ -481,7 +482,7 @@ func (h *Handler) notify(activityID, inst, kind, event string, onlyNonResponders
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		rows, err := h.db.Query(ctx, `SELECT u.id FROM users u, activities a
-			WHERE a.id=$1 AND u.institution_id=$2 AND u.role='student' AND u.deleted_at IS NULL
+			WHERE a.id=$1 AND `+qdb.LiveMemberSQL("u.id", "$2")+` AND u.role='student' AND u.deleted_at IS NULL
 			AND (a.institution_wide OR EXISTS(SELECT 1 FROM activity_audience_groups ag
 				JOIN groups g ON g.id=ag.group_id AND g.archived_at IS NULL
 				JOIN group_students gs ON gs.group_id=ag.group_id WHERE ag.activity_id=a.id AND gs.user_id=u.id))

@@ -92,7 +92,7 @@ func (s *Scheduler) announcementRecipients(ctx context.Context, announcementID, 
 	rows, err := s.db.Query(ctx, `SELECT u.id,u.email FROM users u LEFT JOIN institutions i ON i.id=u.institution_id
 		WHERE u.status='active' AND u.deleted_at IS NULL AND (
 		 $2='all' OR ($2='students' AND u.role='student') OR ($2='teachers' AND u.role='teacher') OR
-		 ($2='institution' AND EXISTS(SELECT 1 FROM announcement_institutions ai WHERE ai.announcement_id=$1 AND ai.institution_id=u.institution_id)) OR
+		 ($2='institution' AND EXISTS(SELECT 1 FROM announcement_institutions ai WHERE ai.announcement_id=$1 AND (ai.institution_id=u.institution_id OR EXISTS(SELECT 1 FROM enrollments m WHERE m.user_id=u.id AND m.institution_id=ai.institution_id AND m.status IN ('active','suspended'))))) OR
 		 ($2='country' AND lower(COALESCE(i.onboarding_country,'')) IN ('india','in')))`, announcementID, audience)
 	if err != nil {
 		return nil, err

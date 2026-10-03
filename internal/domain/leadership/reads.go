@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	qdb "github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -175,7 +176,7 @@ func (h *Handler) Students(w http.ResponseWriter, r *http.Request, gs Grants) {
 			WHERE gs.user_id=u.id AND g.institution_id=$1 AND g.archived_at IS NULL AND ($2 OR g.department_id::text = ANY($3))),'{}'),
 		count(*) OVER ()
 		FROM users u
-		WHERE u.institution_id=$1 AND u.role='student' AND u.deleted_at IS NULL
+		WHERE `+qdb.LiveMemberSQL("u.id", "$1")+` AND u.role='student' AND u.deleted_at IS NULL
 		  AND ($2 OR EXISTS(SELECT 1 FROM group_students gs JOIN groups g ON g.id=gs.group_id
 			WHERE gs.user_id=u.id AND g.archived_at IS NULL AND g.department_id::text = ANY($3)))
 		  AND ($4='' OR u.full_name ILIKE '%'||$4||'%' OR u.display_name ILIKE '%'||$4||'%')

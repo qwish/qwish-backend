@@ -55,6 +55,10 @@ func seed(t *testing.T, pool *pgxpool.Pool) fixture {
 	user := func(role, label string, dest *string) {
 		must(pool.QueryRow(ctx, `INSERT INTO users (supabase_uid,full_name,display_name,email,role,institution_id)
 			VALUES (gen_random_uuid(),$1,$1,$2,$3,$4) RETURNING id`, label, label+"-"+tag+"@example.test", role, f.Inst).Scan(dest))
+		if role == "student" {
+			_, err := pool.Exec(ctx, `INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at) VALUES ($1,$2,$3,'active',now())`, f.Inst, *dest, label)
+			must(err)
+		}
 	}
 	user("teacher", "teacher", &f.Teacher)
 	user("teacher", "loner", &f.Loner)
@@ -74,6 +78,7 @@ func seed(t *testing.T, pool *pgxpool.Pool) fixture {
 	t.Cleanup(func() {
 		pool.Exec(ctx, `DELETE FROM activities WHERE institution_id=$1`, f.Inst)
 		pool.Exec(ctx, `DELETE FROM groups WHERE institution_id=$1`, f.Inst)
+		pool.Exec(ctx, `DELETE FROM enrollments WHERE institution_id=$1`, f.Inst)
 		pool.Exec(ctx, `DELETE FROM users WHERE institution_id=$1`, f.Inst)
 		pool.Exec(ctx, `DELETE FROM institutions WHERE id=$1`, f.Inst)
 	})

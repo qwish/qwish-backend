@@ -40,8 +40,8 @@ func seedTwoInstitutes(t *testing.T, pool *pgxpool.Pool) twoInstitutes {
 	must(pool.QueryRow(ctx, `INSERT INTO groups (institution_id, name, invite_code) VALUES ($1,'B class','B'||$2) RETURNING id`, s.InstB, tag).Scan(&s.ClassB))
 	_, err := pool.Exec(ctx, `INSERT INTO group_teachers (group_id, user_id) VALUES ($1,$2)`, s.ClassB, s.TeacherB)
 	must(err)
-	_, err = pool.Exec(ctx, `INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at)
-		VALUES ($1,$3,'two','active',now()-interval '2 days'), ($2,$3,'two','active',now()-interval '1 day')`, s.InstA, s.InstB, s.Student)
+	_, err = pool.Exec(ctx, `INSERT INTO enrollments (institution_id, user_id, full_name, status, joined_at, join_route)
+		VALUES ($1,$3,'two','active',now()-interval '2 days','code'), ($2,$3,'two','active',now()-interval '1 day','code')`, s.InstA, s.InstB, s.Student)
 	must(err)
 	_, err = pool.Exec(ctx, `INSERT INTO group_students (group_id, user_id) VALUES ($1,$2)`, s.ClassB, s.Student)
 	must(err)
@@ -85,5 +85,8 @@ func TestTeacherSeesStudentWhoseActiveInstituteIsOther(t *testing.T) {
 	h.ListStudents(w, teacherRequest(httptest.NewRequest("GET", "/", nil), s.TeacherB, s.InstB))
 	if w.Code != 200 || !strings.Contains(w.Body.String(), s.Student) {
 		t.Fatalf("teacher roster at B must list the student; got %d %s", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), `"join_route":"code"`) {
+		t.Fatalf("roster rows must say how the student joined: %s", w.Body)
 	}
 }

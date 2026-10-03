@@ -717,6 +717,7 @@ func main() {
 					// to. Identity fields stay institution-owned.
 					r.Post("/classes/{classId}/students", enrollmentTeacherH.AddStudent)
 					r.Post("/classes/{classId}/invites", enrollmentTeacherH.CreateInvites)
+					r.Patch("/classes/{classId}/joining", enrollmentTeacherH.SetJoining)
 					r.Get("/classes/{classId}/invites", enrollmentTeacherH.ListInvites)
 					r.Delete("/invites/{inviteId}", enrollmentTeacherH.RevokeInvite)
 					r.Delete("/classes/{classId}/students/{userId}", enrollmentTeacherH.RemoveStudent)
@@ -810,6 +811,7 @@ func main() {
 					r.Post("/groups", institutionH.CreateGroup)
 					r.Get("/groups/{groupId}", institutionH.GetGroup)
 					r.Post("/groups/{groupId}/invites", enrollmentInstH.CreateInvites)
+					r.Patch("/groups/{groupId}/joining", enrollmentInstH.SetJoining)
 					r.Get("/groups/{groupId}/invites", enrollmentInstH.ListInvites)
 					r.Delete("/invites/{inviteId}", enrollmentInstH.RevokeInvite)
 					r.Patch("/groups/{groupId}", institutionH.UpdateGroup)

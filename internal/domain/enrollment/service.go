@@ -349,3 +349,13 @@ func (s *Service) RemoveStudentFromClass(ctx context.Context, teacherID, groupID
 		`DELETE FROM group_students WHERE group_id=$1 AND user_id=$2`, groupID, studentID)
 	return err
 }
+
+// SetJoining turns class-code joining on or off for one class. With joining
+// off, only invited students and verified institute emails get in.
+func (s *Service) SetJoining(ctx context.Context, instID, groupID string, enabled bool) error {
+	tag, err := s.db.Exec(ctx, `UPDATE groups SET joining_enabled=$3 WHERE id=$1 AND institution_id=$2`, groupID, instID, enabled)
+	if err == nil && tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return err
+}

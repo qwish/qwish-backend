@@ -142,3 +142,50 @@ func (h *StudentHandler) AcceptInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	middleware.JSON(w, http.StatusOK, res)
 }
+
+type joiningRequest struct {
+	JoiningEnabled *bool `json:"joining_enabled"`
+}
+
+func decodeJoining(w http.ResponseWriter, r *http.Request) (bool, bool) {
+	var req joiningRequest
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil || req.JoiningEnabled == nil {
+		middleware.BadRequest(w, "joining_enabled is required")
+		return false, false
+	}
+	return *req.JoiningEnabled, true
+}
+
+func joiningDone(w http.ResponseWriter, err error, enabled bool) {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		middleware.NotFound(w, "class")
+	case err != nil:
+		middleware.InternalError(w)
+	default:
+		middleware.JSON(w, http.StatusOK, map[string]bool{"joining_enabled": enabled})
+	}
+}
+
+// PATCH /api/v1/teacher/classes/{classId}/joining
+func (h *TeacherHandler) SetJoining(w http.ResponseWriter, r *http.Request) {
+	classID := chi.URLParam(r, "classId")
+	if ok, err := h.svc.TeacherOwnsClass(r.Context(), middleware.GetUserID(r), classID); err != nil || !ok {
+		inviteFail(w, ErrNotYourClass)
+		return
+	}
+	enabled, ok := decodeJoining(w, r)
+	if !ok {
+		return
+	}
+	joiningDone(w, h.svc.SetJoining(r.Context(), middleware.GetInstitutionID(r), classID, enabled), enabled)
+}
+
+// PATCH /api/v1/institution/groups/{groupId}/joining
+func (h *InstitutionHandler) SetJoining(w http.ResponseWriter, r *http.Request) {
+	enabled, ok := decodeJoining(w, r)
+	if !ok {
+		return
+	}
+	joiningDone(w, h.svc.SetJoining(r.Context(), middleware.GetInstitutionID(r), chi.URLParam(r, "groupId"), enabled), enabled)
+}

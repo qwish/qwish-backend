@@ -1,6 +1,7 @@
 package enrollment
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -51,7 +52,8 @@ func (h *TeacherHandler) CreateInvites(w http.ResponseWriter, r *http.Request) {
 		middleware.InternalError(w)
 		return
 	}
-	h.svc.notifyInvites(r.Context(), b.Created)
+	// Email after responding: up to 500 sends must not hold the request open.
+	go h.svc.notifyInvites(context.WithoutCancel(r.Context()), b.Created)
 	middleware.JSON(w, http.StatusCreated, b)
 }
 
@@ -103,7 +105,8 @@ func (h *InstitutionHandler) CreateInvites(w http.ResponseWriter, r *http.Reques
 		middleware.InternalError(w)
 		return
 	}
-	h.svc.notifyInvites(r.Context(), b.Created)
+	// Email after responding: up to 500 sends must not hold the request open.
+	go h.svc.notifyInvites(context.WithoutCancel(r.Context()), b.Created)
 	middleware.JSON(w, http.StatusCreated, b)
 }
 

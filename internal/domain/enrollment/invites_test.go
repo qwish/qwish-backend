@@ -61,3 +61,30 @@ func TestAcceptInviteJoinsClass(t *testing.T) {
 		t.Fatalf("accept %+v %v", r, err)
 	}
 }
+
+// Re-inviting an address that already has a pending invite doesn't email again
+// (a timed-out request retried by the client must not spam everyone).
+func TestReinviteDoesNotEmailAgain(t *testing.T) {
+	pool := openTestDB(t)
+	f := seedFixture(t, pool)
+	svc := NewService(pool)
+	sent := 0
+	svc.SetMailer(func(context.Context, string, string, string) error { sent++; return nil })
+	ctx := context.Background()
+	d := fmt.Sprintf("m%d.edu", time.Now().UnixNano())
+	pool.Exec(ctx, `INSERT INTO institution_domains (institution_id, domain, verified_at) VALUES ($1,$2,now())`, f.InstitutionID, d)
+	t.Cleanup(func() {
+		pool.Exec(ctx, `DELETE FROM student_invites WHERE institution_id=$1`, f.InstitutionID)
+		pool.Exec(ctx, `DELETE FROM institution_domains WHERE domain=$1`, d)
+	})
+	for i := 0; i < 2; i++ {
+		b, err := svc.CreateInvites(ctx, f.InstitutionID, f.GroupID, f.TeacherID, []string{"a@" + d})
+		if err != nil {
+			t.Fatal(err)
+		}
+		svc.notifyInvites(ctx, b.Created)
+	}
+	if sent != 1 {
+		t.Fatalf("emails sent = %d, want 1", sent)
+	}
+}

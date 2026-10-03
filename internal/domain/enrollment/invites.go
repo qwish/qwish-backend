@@ -20,6 +20,9 @@ type Invite struct {
 	Status    string    `json:"status"`
 	GroupID   *string   `json:"group_id,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
+	// fresh is true when this call inserted the invite (not a repeat), so only
+	// fresh invites are emailed.
+	fresh bool
 }
 
 type RejectedEmail struct {
@@ -82,8 +85,8 @@ func (s *Service) CreateInvites(ctx context.Context, instID, groupID, invitedBy 
 			VALUES ($1,$2,$3,NULLIF($4,'')::uuid)
 			ON CONFLICT (institution_id, COALESCE(group_id,'00000000-0000-0000-0000-000000000000'::uuid), email) WHERE status='pending'
 			DO UPDATE SET created_at=student_invites.created_at
-			RETURNING id, email, status, group_id::text, created_at`, instID, groupID, addr, invitedBy).
-			Scan(&inv.ID, &inv.Email, &inv.Status, &inv.GroupID, &inv.CreatedAt)
+			RETURNING id, email, status, group_id::text, created_at, xmax = 0`, instID, groupID, addr, invitedBy).
+			Scan(&inv.ID, &inv.Email, &inv.Status, &inv.GroupID, &inv.CreatedAt, &inv.fresh)
 		if err != nil {
 			return out, err
 		}
@@ -208,6 +211,9 @@ func (s *Service) notifyInvites(ctx context.Context, invites []Invite) {
 		return
 	}
 	for _, inv := range invites {
+		if !inv.fresh {
+			continue
+		}
 		var inst, class string
 		if s.db.QueryRow(ctx, `SELECT i.name, COALESCE(g.name,'') FROM student_invites si JOIN institutions i ON i.id=si.institution_id
 			LEFT JOIN groups g ON g.id=si.group_id WHERE si.id=$1`, inv.ID).Scan(&inst, &class) != nil {

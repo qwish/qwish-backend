@@ -1,0 +1,16 @@
+meta {
+  name: GET /ready
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{apiUrl}}/ready
+  body: none
+  auth: none
+}
+
+docs {
+  Readiness: HTTP 200 when the database is reachable; HTTP 503 while draining or unavailable.
+  Like /health, this endpoint lives outside /api/v1.
+}

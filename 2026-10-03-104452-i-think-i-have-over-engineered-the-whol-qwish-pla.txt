@@ -1,0 +1,510 @@
+▗ ▗   ▖ ▖  Claude Code v2.1.287
+           Opus 5.5 · Claude Pro
+ ▘▘   ▝▝   ~/Documents/NumPieBackend/qwish-backend
+
+▎ Your voice can help guide AI
+▎ Take 15 min to share your experiences with Anthropic Interviewer. Start now (https://clau.de/yourthoughts)
+
+❯ /model 
+  ⎿  Kept model as Opus 5.5
+
+❯ I think i have over engineered the whol qwish platform. help me fix it. list  
+  all the things that are unncessary for MVP. keep it simple. we are not        
+  building an ERP                                                               
+
+⏺ Skill(ponytail:ponytail-audit)
+  ⎿  Successfully loaded skill
+
+  Ran 4 shell commands (ctrl+o to expand)
+
+⏺ Scanned all projects. Grabbing one more number (endpoint count), then report.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ You're right, it's over-built. ~260k lines across 11 apps, 324 API endpoints, 
+  82 migrations and 35 backend domains, and the core loop is still "student
+  takes quiz → gets score → shows it off."
+
+  What the MVP keeps: the student does a daily quiz, gets a score and a streak,
+  sees a leaderboard, and shares a profile link. Someone needs a way to put
+  quizzes in. Everything else is phase 2 or later.
+
+  Cut whole apps (biggest wins)
+
+  1. delete: qwish-web-app/ (29.6k lines). It's a second student app next to
+     numpie. Pick one: mobile.
+  2. delete: qwish-institute-dashboard/ (25k). Academic years, versioned
+     curriculum trees, admissions, promotions, audit log. This is the ERP part.
+     Bring it back once colleges pay.
+  3. yagni: qwish-teacher-panel/ (20k, 17 sections). Keep 3: quizzes, classes,
+     simple results. Drop leadership, inbox, edit-requests, topic-requests,
+     insights, assessments, activities, today, help and reports.
+  4. delete: qwish-recruiter-dashboard/, qwish-brand-dashboard/ and
+     qwish-hr-leetcode-monitor-extension/. These sell to customers you don't
+     have yet, and they're mostly stubs. Drop them for now.
+  5. yagni: qwish-super-admin/ (28.5k). Trim to quiz CRUD and a user list.
+     Supabase Studio covers the rest.
+  6. delete: qwish-web-coming-soon/, since the brand website covers it. That
+     also removes the separate MongoDB.
+  7. yagni: packages/qwish-ui (49 motion components, 5.7k). It only matters if
+     several dashboards share it, and they're being cut.
+  8. delete: avatar-gen/ as a separate service. Use initials or a single SVG
+     function inside the app.
+
+  Backend domains to drop (qwish-backend/internal/domain/)
+
+  9. delete: recruiter, portfolio, leadership, studygroup, survey, editrequest, 
+     topicrequest, parent, demo, onboardingsession, featureonboarding. None of
+     these are core loop.
+  10. delete: enrollment (2.8k), curriculum (1.4k) and learning (1.4k). Flat
+      quiz categories are enough. Syllabus mapping is for institutes.
+  11. yagni: institution (2.9k). Keep only college_name on the user.
+  12. yagni: metrics (1.6k), activity (1.6k) and analytics. Firebase Analytics
+      is already installed.
+  13. delete: offline, push and notification. Use a local reminder notification
+      for the streak. Server push can come later.
+  14. stdlib: internal/algorithms/probabilistic.go (Count-Min Sketch). At MVP
+      scale, a SQL COUNT/GROUP BY does the same job.
+  15. delete: internal/playintegrity. Add anti-cheat once cheating actually
+      shows up.
+  16. yagni: admin (4.4k), user (3.5k) and auth (2.8k). That's very large for
+      MVP. Supabase Auth handles login, so auth should be about 300 lines.
+
+  Keep: auth (thin), user, quiz, attempt, scoring, streak, leaderboard, points
+  (if visible), upload, contact.
+
+  numpie (91k lines; core flow needs maybe 25k)
+
+  17. delete: profile/story/ (3.8k-line story renderer), the portfolio wizard,
+      the CV entries screen and achievements. Keep one share-scorecard screen.
+  18. delete: the enrollment, curriculum, assignments, activities, demo, survey 
+      and student features. Keep auth, onboarding (trimmed), home, browse,
+      attempt, leaderboard, profile (trimmed) and settings.
+  19. delete: the deps passkeys (email/OTP via Supabase is enough),
+      firebase_messaging (see #13) and figma_squircle (use
+      RoundedRectangleBorder).
+
+  Docs and clutter in the root
+
+  20. delete: SYSTEM_AUDIT, SYSTEM_ARCHITECTURE_AUDIT, INSTITUTE_* plans, the
+      research report, code-reviews/, brag-output*/ and graphify-out/. Keep
+      PRODUCT.md, rewritten as one page about the core loop.
+
+  Separate from the audit, but urgent: the root folder holds
+  qwish-app-firebase-adminsdk-*.json, qwish-backend.env and recovery-codes.txt.
+  Those are live credentials sitting next to your code. Move them out of the
+  workspace and rotate any that have been shared, synced or committed anywhere.
+
+  net: about −180k lines (≈70%), −7 apps, −20 backend domains, ~250 endpoints,
+  −4 Flutter deps possible.
+
+  Two notes:
+  - Moving the code out: archive it instead of deleting it. Move it to an
+    _later/ folder or a git branch. The workspace isn't a git repo yet, so run
+    git init and commit first to keep the current state.
+  - Migrations: don't rewrite the 82 migrations. Old tables can sit unused, and
+    you can drop them in one new migration once the code is gone.
+
+  I haven't changed anything yet. Want me to start with the backend cut (#9–16)?
+  It's the riskiest part because every frontend calls it.
+
+✻ Crunched for 46s · done 8:59 AM
+
+※ recap: You asked me to slim Qwish down to a simple MVP, and I listed about 70% of the code as safe to cut, with nothing changed yet. Next step: you say whether I should start archiving the unused backend domains. (disable recaps in /config)
+
+❯ flowchart TD                                                                  
+      A[Institute applies] --> B[Platform admin reviews and provisions          
+  institute admin]                                                              
+      B --> C[Institute admin signs in]                                         
+      C --> D[Configure institute, admission policy, academic years,            
+  departments]                                                                  
+      D --> E[Invite teachers and create classes]                               
+      D --> F[Create/import student roster]                                     
+      F --> G[Issue claim codes]                                                
+      E --> H[Issue class invite code]                                          
+      G --> I[Student signs in to NumPie]                                       
+      H --> I                                                                   
+      I --> J[Preview code and confirm destination]                             
+      J -->|Policy allows| K[Enrollment and requested class memberships         
+  created]                                                                      
+      J -->|Review required or transfer| L[Admission request]                   
+      L --> M[Institute admin reviews]                                          
+      M -->|New student| K                                                      
+      M -->|Transfer| N[Student confirms transfer in NumPie]                    
+      N --> K                                                                   
+      E --> O[Teacher signs in and opens assigned classes]                      
+      K --> O                                                                   
+      D --> P[Publish curriculum version and assign it to class/year]           
+      O --> Q[Author quiz and publish it]                                       
+      Q --> R[Assign quiz to whole class or selected students]                  
+      R --> S[Student sees assignment, attempts quiz, submits]                  
+      P --> T[Student reads class curriculum]                                   
+      S --> U[Learning evidence, results, notifications]                        
+      U --> V[Teacher reviews class/student progress]                           
+      U --> W[Institute reviews analytics and reports]                          
+      O --> X[Teacher reviews portfolio and edit/topic requests]                
+      X --> Y[Institute reviews identity edits and institute queues]            
+  make this diagram more detailed with all features and their hierarchy to take 
+  better decisions. dont make any changes to code yet                           
+
+⏺ Pulling the real route list from the backend so the diagram matches the code,
+  not just the docs.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Two diagrams below. The first is your lifecycle with every real step added.
+  The second is the full feature tree for each surface. I pulled both from the
+  324 routes in cmd/api/main.go, not from the docs. I haven't changed any code.
+
+  Each node is colour-tagged with my proposed MVP verdict, so you can make the
+  cut directly on the diagram:
+  - 🟩 core: needed in every version of the MVP
+  - 🟦 inst: needed only if colleges are how you launch
+  - 🟨 later: real feature, but after there's traction
+  - 🟥 cut: speculative
+
+  1. Lifecycle flow (detailed)
+
+  mermaid
+  flowchart TD
+    classDef core fill:#16a34a,color:#fff,stroke:#14532d
+    classDef inst fill:#2563eb,color:#fff,stroke:#1e3a8a
+    classDef later fill:#d97706,color:#fff,stroke:#78350f
+    classDef cut fill:#dc2626,color:#fff,stroke:#7f1d1d
+
+    subgraph S0["0 · Acquisition (public, no login)"]
+      W1["Brand website"]:::core --> W2["Contact form + Turnstile"]:::inst
+      W3["Coming-soon waitlist (Mongo)"]:::cut
+      D1["Demo quizzes"]:::later --> D2["Demo score → register"]:::later
+      O1["Onboarding session: pick taxonomy"]:::later --> O2["Recommended
+  quizzes"]:::later --> O3["Submit session → carry into account"]:::later
+      SV["Public surveys"]:::cut
+    end
+
+    subgraph S1["1 · Platform admin (super-admin)"]
+      A1["Institute applies (/onboarding/institution)"]:::inst -->
+  A2["Institution review queue"]:::inst
+      W2 --> A0["Resolve / invite from contact"]:::later --> A2
+      A2 --> A3{"Approve / reject / suspend"}:::inst
+      A3 -->|approve| A4["Provision institute admin + send credentials"]:::inst
+      A3 --> A5["Duplicate detection, referral-code reset, multiplier"]:::cut
+    end
+
+    subgraph S2["2 · Institute setup"]
+      C1["Admin sign-in (password / passkey)"]:::inst --> C2["Setup
+  checklist"]:::later
+      C2 --> C3["Settings + point rules"]:::cut
+      C2 --> C4["Admission policy + policy tester"]:::cut
+      C2 --> C5["Academic years + departments"]:::cut
+      C2 --> C6["Curriculum versions (grade→subject→chapter→concept) publish +
+  assign"]:::cut
+      C2 --> C7["Groups / classes"]:::inst
+      C2 --> C8["Invite teachers (resend, status, remove)"]:::inst
+      C2 --> C9["Roster: manual add / CSV import"]:::later
+      C9 --> C10["Claim codes per student"]:::later
+      C7 --> C11["Class invite code"]:::inst
+    end
+
+    subgraph S3["3 · Student entry"]
+      U1["Sign in: OTP / passkey"]:::core --> U2["Create profile (college, year,
+  domain)"]:::core
+      U2 --> U3{"Has a code?"}:::inst
+      U3 -->|no| L0
+      U3 -->|class / claim code| U4["Preview code → confirm destination"]:::inst
+      U4 -->|policy allows| U5["Enrollment + class membership"]:::inst
+      U4 -->|review / transfer| U6["Admission request"]:::cut --> U7["Institute
+  reviews"]:::cut
+      U7 -->|new| U5
+      U7 -->|transfer| U8["Student confirms transfer"]:::cut --> U5
+      U5 --> U9["Promotions / bulk status / revert batch"]:::cut
+    end
+
+    subgraph S4["4 · Teacher authoring"]
+      T1["Accept invite → sign in"]:::inst --> T2["My classes +
+  students"]:::inst
+      T2 --> T3["Author quiz: 7 question types, reorder, images"]:::core
+      T3 --> T3a["Question bank reuse"]:::later
+      T3 --> T3b["AI question generation"]:::later
+      T3 --> T3c["Map question → curriculum unit / learning map"]:::cut
+      T3 --> T3d["Favorites, duplicate"]:::later
+      T3 --> T4["Publish / unpublish"]:::core
+      T4 --> T4a["Moderation queue (approve / reject / request edits)"]:::later
+      T4 --> T5["Assign: class or selected students, due date, attempts,
+  purpose"]:::inst
+      T5 --> T5a["Edit recipients, remind, close"]:::later
+    end
+
+    subgraph S5["5 · Student learning loop"]
+      L0["Home: daily pick, featured, recommendations"]:::core --> L1["Browse /
+  taxonomy / saved"]:::core
+      T5 --> L2["Assigned work list"]:::inst
+      L1 --> L3["Start attempt"]:::core
+      L2 --> L3
+      L3 --> L4["Answer questions"]:::core
+      L4 --> L4a["Clues"]:::later
+      L4 --> L4b["Behavior telemetry (anti-cheat)"]:::cut
+      L4 --> L4c["Offline pack + sync"]:::cut
+      L4 --> L5["Complete → scoring (Qwish Score 100-900)"]:::core
+      L5 --> L6["Points ledger + expiry"]:::later
+      L5 --> L7["Streak"]:::core
+      L5 --> L8["Rank / leaderboard"]:::core
+      L5 --> L9["Badges, milestones"]:::later
+      L5 --> L10["Insights: weekly, trend, breakdown, report card"]:::later
+      L8 --> L11["Share scorecard"]:::core
+      L11 --> L12["Story renderer, portfolio, CV entries, skills,
+  education"]:::cut
+      L11 --> L13["Public profile /verify/p/:id"]:::core
+      L1 --> L14["Report quiz / question"]:::later
+      L1 --> L15["Request a topic"]:::cut
+      L0 --> L16["Follow users, study groups"]:::cut
+    end
+
+    subgraph S6["6 · Feedback & oversight"]
+      L5 --> F1["Teacher: quiz results"]:::inst
+      F1 --> F2["Response insights, class learning matrix"]:::later
+      F2 --> F3["Misconceptions → review → follow-up remedial assignment"]:::cut
+      F1 --> F4["Student support notes"]:::cut
+      F1 --> F5["Parent summaries (public token link)"]:::cut
+      L5 --> F6["Institute: overview + action centre"]:::later
+      F6 --> F7["Reports: student perf, teacher activity, quiz analytics, streak
+  health, points"]:::later
+      F6 --> F8["Metrics catalog, distributions, custom dashboard
+  layouts"]:::cut
+      F6 --> F9["Audit log"]:::cut
+      T2 --> F10["Enrollment edit requests → institute queue"]:::cut
+      L15 --> F11["Topic requests → teacher / institute queue"]:::cut
+    end
+
+    subgraph S7["7 · Demand side"]
+      L13 --> R1["Student toggles recruiter_visible"]:::later
+      R1 --> R2["Recruiter: candidate search + shortlist"]:::later
+      R3["Parent link invite → child overview"]:::cut
+      R4["Brands + sponsorship requests"]:::cut
+    end
+
+    subgraph S8["8 · Background (15 cron jobs)"]
+      J1["reset-streaks, snapshot-leaderboard, abandon-stale-attempts,
+  close-expired-quizzes"]:::core
+      J2["expire-points, assignment-reminders,
+  recompute-question-difficulty"]:::later
+      J3["streak-nudges, weekly-digests, rank-change-alerts,
+  weekly-insights-email, teacher-notifications, dispatch-announcements,
+  purge-*"]:::cut
+    end
+
+  2. Feature hierarchy by surface
+
+  mermaid
+  flowchart LR
+    classDef core fill:#16a34a,color:#fff,stroke:#14532d
+    classDef inst fill:#2563eb,color:#fff,stroke:#1e3a8a
+    classDef later fill:#d97706,color:#fff,stroke:#78350f
+    classDef cut fill:#dc2626,color:#fff,stroke:#7f1d1d
+
+    Q["Qwish"]
+
+    Q --> APP["NumPie app (Flutter, 91k lines)"]
+    APP --> a1["Auth: OTP"]:::core
+    APP --> a1b["Auth: passkeys, session revoke"]:::cut
+    APP --> a2["Home / browse / attempt"]:::core
+    APP --> a3["Streak, leaderboard, score"]:::core
+    APP --> a4["Profile + share scorecard"]:::core
+    APP --> a5["Story renderer (3.8k), portfolio wizard, CV,
+  achievements"]:::cut
+    APP --> a6["Join institute / class"]:::inst
+    APP --> a7["Assignments"]:::inst
+    APP --> a8["Curriculum reader"]:::cut
+    APP --> a9["Insights, report card"]:::later
+    APP --> a10["Notifications (push + in-app + SSE stream)"]:::later
+    APP --> a11["Follow, study groups, survey, demo, offline"]:::cut
+    APP --> a12["Settings, notification prefs, learning prefs"]:::later
+
+    Q --> WEB["qwish-web-app (Expo web, 30k)"]:::cut
+
+    Q --> TP["Teacher panel (20k, 17 sections)"]
+    TP --> t1["Quizzes: author, publish"]:::core
+    TP --> t2["Classes + students"]:::inst
+    TP --> t3["Assessments / assignments"]:::inst
+    TP --> t4["Results"]:::inst
+    TP --> t5["Insights, analytics, reports, matrix"]:::later
+    TP --> t6["Leadership, inbox, today, help"]:::cut
+    TP --> t7["Edit requests, topic requests, support, misconceptions, parent
+  summaries"]:::cut
+    TP --> t8["AI generate, question bank"]:::later
+    TP --> t9["Custom dashboard layouts, feature onboarding"]:::cut
+
+    Q --> ID["Institute dashboard (25k, 15 sections)"]
+    ID --> i1["Groups / classes"]:::inst
+    ID --> i2["Teachers invite"]:::inst
+    ID --> i3["Students list"]:::inst
+    ID --> i4["Overview"]:::later
+    ID --> i5["Academics: years, curriculum versions"]:::cut
+    ID --> i6["Admissions policy + requests, promotions"]:::cut
+    ID --> i7["Action centre, audit log, edit/topic requests"]:::cut
+    ID --> i8["Reports, analytics, metrics, layouts"]:::later
+    ID --> i9["Settings: point rules"]:::cut
+
+    Q --> SA["Super admin (28.5k)"]
+    SA --> s1["Quiz CRUD + featured + taxonomy"]:::core
+    SA --> s2["User list, suspend"]:::core
+    SA --> s3["Institution approve + provision"]:::inst
+    SA --> s4["Moderation queue, content reports"]:::later
+    SA --> s5["Impersonation, merge/purge students, reset pw"]:::later
+    SA --> s6["Point economy, reserve, multipliers"]:::cut
+    SA --> s7["Announcements, promos, surveys, demo quizzes"]:::cut
+    SA --> s8["Brands, sponsorships"]:::cut
+    SA --> s9["Admin accounts, security policy, sessions, audit + notification
+  logs"]:::cut
+    SA --> s10["Metrics, distributions, trends, layouts"]:::cut
+
+    Q --> REC["Recruiter dashboard (stub)"]:::later
+    Q --> BR["Brand dashboard (stub)"]:::cut
+    Q --> EXT["Proctoring extension (spec only)"]:::cut
+    Q --> SITE["Brand website"]:::core
+    Q --> CS["Coming-soon (Mongo)"]:::cut
+    Q --> UI["packages/qwish-ui (49 comps)"]:::cut
+    Q --> AV["avatar-gen service"]:::cut
+
+    Q --> BE["Backend (324 endpoints, 35 domains)"]
+    BE --> b1["auth, user, quiz, attempt, scoring, streak, leaderboard,
+  upload"]:::core
+    BE --> b2["institution, enrollment (thin), teacher (thin)"]:::inst
+    BE --> b3["points, notification, push, admin, metrics, recruiter"]:::later
+    BE --> b4["curriculum, learning, editrequest, topicrequest, parent,
+  portfolio, studygroup, survey, demo, offline, onboardingsession,
+  featureonboarding, leadership, avatar, activity"]:::cut
+    BE --> b5["algorithms (Count-Min), playintegrity, pprof routes"]:::cut
+
+  Decision to make first
+
+  Your flow starts with "Institute applies." That makes it an institute-first
+  (B2B) launch, which needs every 🟦 node. If students sign up on their own
+  (B2C), all of 🟦 drops out and the MVP is only 🟩: around 40 endpoints, the
+  app, the website and a thin admin.
+
+  Either way, the 🟥 nodes are the ERP. The deepest cut is admissions,
+  promotions, curriculum versions and the edit/topic-request queues.
+
+  Mermaid this size is hard to read in a terminal. Paste it into mermaid.live,
+  or I can publish it as a zoomable page.
+
+✻ Baked for 1m 8s · done 9:05 AM
+
+※ recap: You're cutting Qwish down to an MVP, and I've mapped every feature into two diagrams tagged core, inst, later and cut, with no code changed. Next, decide whether launch is institute-first or students sign up directly, since that sets what gets cut. (disable recaps in /config)
+
+❯ List all ERP features                                                         
+
+⏺ Here are the ERP features, meaning school-administration features rather than
+  the quiz and learning product. All of them come from the route dump and folder
+  scan above.
+
+  1. Admissions & enrollment
+
+  - Admission policy plus a policy tester. institution: /admissions/policy,
+    /admissions/policy/test
+  - Admission request queue with counts and approve/reject. /admissions/requests
+  - Transfer flow between institutes, where the student has to confirm.
+    students/join/requests/{id}
+  - Join by code: preview → confirm. /students/join/preview|confirm
+  - Claim codes for pre-created students. /students/claim
+  - Enrollment records, status changes and bulk status.
+    /enrollments/{id}/status, /enrollments/bulk-status
+  - Promotions between academic years: promote, batches, revert.
+    /enrollments/promote, /promotions, /promotions/{batchId}/revert
+  - Roster creation: manual add plus CSV import. /students, /students/import
+  - Student find/explain/ids lookup. /students/find, /students/explain,
+    /students/ids
+  - Student status (active/suspended). /students/{id}/status
+
+  2. Academic structure
+
+  - Academic years and departments. Dashboard academics/
+  - Curriculum versioning: a grade → subject → chapter → concept tree, immutable
+    published versions, assigned to class/year. Domains curriculum, learning
+  - Mapping questions to curriculum units, plus learning maps.
+    /teacher/questions/{id}/learning-map
+  - Students read the class curriculum. /users/me/curricula, numpie curriculum/
+  - Groups/classes CRUD, adding students/teachers to groups. /groups/*
+
+  3. Staff management (HR-like)
+
+  - Teacher invites, resend and invite list. /teachers/invite,
+    /teachers/invites/*
+  - Teacher status, removal and counts. /teachers/{id}/status, /teachers/counts
+  - Teacher activity report. /reports/teacher-activity
+  - Leadership views. Domain leadership, teacher panel leadership/
+  - Teacher feature onboarding and preferences. /teacher/feature-onboarding
+
+  4. Workflow queues & approvals
+
+  - Enrollment edit requests (identity corrections), teacher → institute. Domain
+    editrequest
+  - Topic requests, student → teacher → institute. Domain topicrequest
+  - Action centre with owner assignment. /action-centre, /action-centre/owner
+  - Setup checklist. /setup-checklist
+  - Referral code reset requests. /referral-code-reset-request
+  - Portfolio entry review: submit → reviews.
+    /users/me/profile-entries/{id}/submit|reviews
+
+  5. Pedagogy case management
+
+  - Assignments with purpose types (baseline/practice/follow_up/diagnostic),
+    recipients, reminders and close
+  - Follow-up outcomes review. /teacher/follow-up-outcomes
+  - Misconception tracking and review per student. /teacher/misconceptions
+  - Student support notes. /teacher/students/{id}/support, /support-reviews
+  - Learning evidence per student. /students/{id}/learning-evidence
+  - Class learning matrix. /teacher/class-learning-matrix
+
+  6. Parent portal
+
+  - Parent ↔ child linking: invite, accept, remove. /parent/*
+  - Child overview for parents
+  - Teacher-written parent summaries behind a public token link.
+    /public/parent-summaries/{token}
+
+  7. Reporting & BI
+
+  - 5 institute reports: student performance, teacher activity, quiz analytics,
+    streak health, points summary
+  - Metrics catalog plus distributions, duplicated ×3 (teacher/institute/admin).
+    Domain metrics
+  - Custom dashboard layouts with CRUD and reorder, also ×3. /dashboard-layouts
+  - Learning summary, scoped and unscoped
+  - Weekly digests and insights emails (cron)
+
+  8. Governance, compliance & security
+
+  - Audit log in both institute and super-admin
+  - Admin accounts CRUD, resend and passkey reset. /admin/admin-accounts
+  - Security policy. /admin/security-policy
+  - Session management and revoke-others, in both admin and user
+  - Impersonation start/end
+  - Student merge, purge and duplicate detection
+  - Notification log
+
+  9. Finance-like
+
+  - Point economy config. /point-economy
+  - Points reserve and points liability, the latter ×3
+  - Per-institute point rules and multipliers
+  - Points expiry (cron)
+
+  10. Platform tenancy
+
+  - Institute application → review queue → approve/reject/suspend/reactivate
+  - Provisioning the institute admin and resending credentials
+  - Brand accounts plus sponsorship request approval
+  - Announcements with audience estimate, promos and surveys
+
+  Size: these features take up roughly all of qwish-institute-dashboard, about
+  70% of qwish-super-admin, about 60% of qwish-teacher-panel, and these backend
+  domains: enrollment, curriculum, learning, institution, editrequest,
+  topicrequest, parent, leadership, metrics, activity, featureonboarding, and
+  most of admin. That comes to about 150 of the 324 endpoints.
+
+  What to keep if you launch through institutes: one class invite code → join
+  class, teacher invite, assign quiz to class, class results. That's around 10
+  endpoints, and it covers the B2B story without the ERP.
+
+✻ Crunched for 22s · done 10:01 AM

@@ -2,10 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/pprof"
+	"os"
+	"os/signal"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -56,7 +61,15 @@ import (
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	cfg := config.Load()
+	storageCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	s3Client, err := storage.NewS3Client(storageCtx, cfg)
+	cancel()
+	if err != nil {
+		log.Fatalf("S3 configuration: %v", err)
+	}
 	pool := db.Connect(cfg.DatabaseURL)
 	defer pool.Close()
 
@@ -82,7 +95,6 @@ func main() {
 	})
 	attemptSvc.SetNotifier(notifSvc)
 	obSessionSvc.SetAttempts(attemptSvc)
-	r2Client := storage.NewR2Client(cfg)
 	offlineSvc := offline.NewService(pool)
 	studyGroupSvc := studygroup.NewService(pool)
 	sched := scheduler.New(pool, streakSvc, pushSvc, notifSvc, userSvc)
@@ -108,7 +120,7 @@ func main() {
 	parentH := parent.NewHandler(pool)
 	topicH := topicrequest.NewHandler(pool)
 	topicH.SetNotifier(notifSvc, cfg.TeacherURL)
-	uploadH := upload.NewHandler(r2Client)
+	uploadH := upload.NewHandler(s3Client)
 	enrollmentSvc := enrollment.NewService(pool)
 	enrollmentSvc.SetMailer(func(ctx context.Context, to, subject, body string) error {
 		return notifSvc.SendEmail(ctx, to, subject, body, "student_invite")
@@ -202,6 +214,8 @@ func main() {
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		mw.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	var draining atomic.Bool
+	r.Get("/ready", readinessHandler(pool.Ping, &draining))
 
 	// ==========================================
 	// API v1
@@ -236,9 +250,9 @@ func main() {
 		}
 
 		// ---- Internal cron endpoints ----
-		// Triggered by the Render cron services declared in render.yaml (see
-		// runInProcessCron removal): scheduling lives outside the process, so a
-		// restart or deploy can no longer swallow a run. Authenticated by
+		// Triggered by the Lightsail systemd timers in deploy/cron (or Render
+		// cron services during transition). Scheduling lives outside the process.
+		// Authenticated by
 		// CRON_SECRET only — a cron caller has no Supabase JWT — and registered
 		// ONLY when the secret is non-empty, since RequireCronSecret compares a
 		// missing header against the configured value and an empty secret would
@@ -247,6 +261,8 @@ func main() {
 		if cfg.CronSecret != "" {
 			r.Route("/internal/cron", func(r chi.Router) {
 				r.Use(mw.RequireCronSecret(cfg.CronSecret))
+				r.Use(mw.WriteDeadline(15 * time.Minute))
+				r.Use(chimw.Timeout(15 * time.Minute))
 				r.Post("/expire-points", func(w http.ResponseWriter, r *http.Request) {
 					if err := sched.ExpirePoints(r.Context()); err != nil {
 						mw.InternalError(w)
@@ -1034,19 +1050,29 @@ func main() {
 		Addr:                addr,
 		Handler:             r,
 		ReadTimeout:         15 * time.Second,
+		ReadHeaderTimeout:   5 * time.Second,
 		WriteTimeout:        30 * time.Second,
 		IdleTimeout:         60 * time.Second,
 		MaxHeaderValueCount: 100,
 	}
 
-	// Scheduling lives outside this process: the Render cron services in
-	// render.yaml POST the /api/v1/internal/cron/* endpoints. The old
-	// in-process ticker loop lost any run that a restart or deploy landed on,
-	// which silently froze streak resets.
-
-	if err := srv.ListenAndServe(); err != nil {
+	shutdownDone := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		draining.Store(true)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			// SSE streams or long cron requests may outlive the drain period.
+			log.Printf("HTTP shutdown: %v; closing remaining connections", err)
+			_ = srv.Close()
+		}
+		close(shutdownDone)
+	}()
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+	<-shutdownDone
 }
 
 // buildOriginSet parses a comma-separated ALLOWED_ORIGINS value.

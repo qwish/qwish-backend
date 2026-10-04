@@ -16,11 +16,9 @@ type Config struct {
 	SupabaseAnonKey          string
 	SupabaseServiceKey       string
 	SupabaseJWTSecret        string
-	R2AccountID              string
-	R2AccessKeyID            string
-	R2SecretAccessKey        string
-	R2BucketName             string
-	R2PublicURL              string
+	AWSRegion                string
+	S3BucketName             string
+	S3PublicURL              string
 	ResendAPIKey             string
 	CronSecret               string
 	AllowedOrigins           string
@@ -58,11 +56,9 @@ func Load() *Config {
 		SupabaseAnonKey:          mustEnv("SUPABASE_ANON_KEY"),
 		SupabaseServiceKey:       mustEnv("SUPABASE_SERVICE_ROLE_KEY"),
 		SupabaseJWTSecret:        mustEnv("SUPABASE_JWT_SECRET"),
-		R2AccountID:              getEnv("R2_ACCOUNT_ID", ""),
-		R2AccessKeyID:            getEnv("R2_ACCESS_KEY_ID", ""),
-		R2SecretAccessKey:        getEnv("R2_SECRET_ACCESS_KEY", ""),
-		R2BucketName:             getEnv("R2_BUCKET_NAME", "quizapp-media"),
-		R2PublicURL:              getEnv("R2_PUBLIC_URL", ""),
+		AWSRegion:                mustEnv("AWS_REGION"),
+		S3BucketName:             mustEnv("S3_BUCKET_NAME"),
+		S3PublicURL:              getEnv("S3_PUBLIC_URL", ""),
 		ResendAPIKey:             getEnv("RESEND_API_KEY", ""),
 		CronSecret:               getEnv("CRON_SECRET", ""),
 		AllowedOrigins:           getEnv("ALLOWED_ORIGINS", "*"),

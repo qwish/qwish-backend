@@ -1,0 +1,10 @@
+[Unit]
+Description=Qwish weekly leaderboard snapshot
+
+[Timer]
+OnCalendar=Mon *-*-* 00:01:00 UTC
+Persistent=true
+Unit=qwish-cron@weekly-snapshot.service
+
+[Install]
+WantedBy=timers.target

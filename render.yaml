@@ -18,7 +18,7 @@ services:
       # go.mod requires 1.27.1; Render's default toolchain lags, so pin it.
       - key: GO_VERSION
         value: 1.27.1
-      # The five below are mustEnv in internal/config/config.go — the process
+      # The database/auth settings below are mustEnv in internal/config/config.go — the process
       # log.Fatalf's on boot if any is unset.
       - key: DATABASE_URL
         sync: false
@@ -30,15 +30,17 @@ services:
         sync: false
       - key: SUPABASE_JWT_SECRET
         sync: false
-      - key: R2_ACCOUNT_ID
+      - key: AWS_REGION
         sync: false
-      - key: R2_ACCESS_KEY_ID
+      - key: AWS_ACCESS_KEY_ID
         sync: false
-      - key: R2_SECRET_ACCESS_KEY
+      - key: AWS_SECRET_ACCESS_KEY
         sync: false
-      - key: R2_BUCKET_NAME
+      - key: AWS_SESSION_TOKEN
         sync: false
-      - key: R2_PUBLIC_URL
+      - key: S3_BUCKET_NAME
+        sync: false
+      - key: S3_PUBLIC_URL
         sync: false
       - key: RESEND_API_KEY
         sync: false

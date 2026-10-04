@@ -1,0 +1,10 @@
+[Unit]
+Description=Qwish hourly sweeps
+
+[Timer]
+OnCalendar=*-*-* *:00:00 UTC
+Persistent=true
+Unit=qwish-cron@hourly.service
+
+[Install]
+WantedBy=timers.target

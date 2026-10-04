@@ -1,0 +1,10 @@
+[Unit]
+Description=Qwish nightly maintenance
+
+[Timer]
+OnCalendar=*-*-* 00:00:00 UTC
+Persistent=true
+Unit=qwish-cron@nightly.service
+
+[Install]
+WantedBy=timers.target

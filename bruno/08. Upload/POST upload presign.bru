@@ -20,3 +20,9 @@ body:json {
     "prefix": "quiz-images"
   }
 }
+
+docs {
+  Returns a five-minute Amazon S3 PUT URL and a permanent public S3 image URL.
+  PUT the image bytes to upload_url with Content-Type: image/jpeg, then display public_url.
+  Browser uploads require the frontend origin in the S3 bucket CORS configuration.
+}

@@ -1,0 +1,19 @@
+[Unit]
+Description=Qwish scheduled jobs (%i)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=qwish-cron
+Group=qwish-cron
+EnvironmentFile=/etc/qwish/cron.env
+ExecStart=/usr/local/lib/qwish/run-cron.sh %i
+TimeoutStartSec=2h
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost

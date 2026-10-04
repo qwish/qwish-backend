@@ -43,6 +43,7 @@ def main():
     # Write environment files
     dev_env = (
         "vars {\n"
+        "  apiUrl: http://localhost:8080\n"
         "  baseUrl: http://localhost:8080/api/v1\n"
         "  token: \n"
         "}\n"
@@ -52,6 +53,7 @@ def main():
         
     prod_env = (
         "vars {\n"
+        "  apiUrl: https://api.qwish.in\n"
         "  baseUrl: https://api.qwish.in/api/v1\n"
         "  token: \n"
         "}\n"
@@ -157,7 +159,9 @@ def main():
             bruno_path = convert_path_params(path)
             
             # Make URL local by default, using {{baseUrl}}
-            if bruno_path.startswith("/"):
+            if bruno_path in ("/health", "/ready"):
+                url = f"{{{{apiUrl}}}}{bruno_path}"
+            elif bruno_path.startswith("/"):
                 url = f"{{{{baseUrl}}}}{bruno_path}"
             else:
                 url = f"{{{{baseUrl}}}}/{bruno_path}"

@@ -7,12 +7,13 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o bin/api ./cmd/api
 
-FROM alpine:3.19
+FROM alpine:3.23
 RUN apk --no-cache add ca-certificates tzdata
 
 WORKDIR /app
 COPY --from=builder /app/bin/api .
 COPY --from=builder /app/migrations ./migrations
 
+USER 65532:65532
 EXPOSE 8080
 CMD ["./api"]

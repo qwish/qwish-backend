@@ -12,11 +12,11 @@ import (
 const maxUploadSize = 5 << 20 // 5MB
 
 type Handler struct {
-	r2 *storage.R2Client
+	s3 *storage.S3Client
 }
 
-func NewHandler(r2 *storage.R2Client) *Handler {
-	return &Handler{r2: r2}
+func NewHandler(client *storage.S3Client) *Handler {
+	return &Handler{s3: client}
 }
 
 type presignReq struct {
@@ -44,7 +44,7 @@ func (h *Handler) PresignUpload(w http.ResponseWriter, r *http.Request) {
 		req.Prefix = "quiz-images"
 	}
 
-	uploadURL, publicURL, key, err := h.r2.PresignUpload(r.Context(), req.Prefix, req.ContentType, 5*time.Minute)
+	uploadURL, publicURL, key, err := h.s3.PresignUpload(r.Context(), req.Prefix, req.ContentType, 5*time.Minute)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -87,7 +87,7 @@ func (h *Handler) UploadImage(w http.ResponseWriter, r *http.Request) {
 		prefix = "quiz-images"
 	}
 
-	url, err := h.r2.Upload(r.Context(), prefix, contentType, file, header.Size)
+	url, err := h.s3.Upload(r.Context(), prefix, contentType, file, header.Size)
 	if err != nil {
 		middleware.InternalError(w)
 		return

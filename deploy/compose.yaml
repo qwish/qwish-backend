@@ -1,0 +1,60 @@
+name: qwish
+
+services:
+  api:
+    image: ${API_IMAGE:?Set API_IMAGE to a versioned image in deploy.env}
+    env_file:
+      - path: ./api.env
+        format: raw
+    environment:
+      PORT: "8080"
+      APP_ENV: production
+      GOMEMLIMIT: ${API_GOMEMLIMIT:-800MiB}
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: ${API_MEMORY_LIMIT:-1g}
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: [CMD, wget, --spider, -q, "http://127.0.0.1:8080/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    environment:
+      API_HOSTNAME: ${API_HOSTNAME:?Set API_HOSTNAME in deploy.env}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in deploy.env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:

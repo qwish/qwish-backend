@@ -1,0 +1,19 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$API_HOSTNAME} {
+	log
+	# Host timers call port 8080 through loopback, bypassing this public proxy.
+	@internal path /api/v1/internal/*
+	respond @internal 404
+
+	reverse_proxy api:8080 {
+		# Caddy flushes text/event-stream immediately by default. Keep normal
+		# cancellation so disconnected clients release their API subscriptions.
+		health_uri /ready
+		health_interval 10s
+		health_timeout 3s
+		health_status 200
+	}
+}

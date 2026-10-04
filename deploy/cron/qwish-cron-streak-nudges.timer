@@ -1,0 +1,10 @@
+[Unit]
+Description=Qwish daily streak nudges
+
+[Timer]
+OnCalendar=*-*-* 14:00:00 UTC
+Persistent=true
+Unit=qwish-cron@streak-nudges.service
+
+[Install]
+WantedBy=timers.target

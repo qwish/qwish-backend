@@ -67,10 +67,10 @@ Endpoints:
 - `POST /institution/recruiter-reports` body `{student_ids, template, branding_override}` → enqueue PDF gen, return job id.
 - `GET /institution/recruiter-reports` — list.
 - `GET /institution/recruiter-reports/{id}` — meta.
-- `GET /institution/recruiter-reports/{id}/pdf` — signed R2 URL.
+- `GET /institution/recruiter-reports/{id}/pdf` — signed S3 URL from a private reports bucket.
 - `GET /recruiter-reports/{id}/verify?sig=` — **public** verify endpoint (no auth), HMAC over `(report_id, student_ids, scores)` using server key.
 
-PDF: use `github.com/jung-kurt/gofpdf` or `chromedp` headless. Store PDF in R2 via existing `storage` pkg. Sign with `HMAC-SHA256(REPORT_SIGNING_KEY)`.
+PDF: use `github.com/jung-kurt/gofpdf` or `chromedp` headless. Store PDF in a private S3 reports bucket via the existing `storage` pkg; do not use the public media bucket for private reports. Sign with `HMAC-SHA256(REPORT_SIGNING_KEY)`.
 
 New env: `REPORT_SIGNING_KEY`.
 

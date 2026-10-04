@@ -1473,7 +1473,7 @@ Revokes an active parent-student link.
 ## POST `/upload/presign`
 **Auth required:** Yes (teacher, super_admin, moderator)
 
-Generates a presigned S3 PUT URL for uploading files directly to cloud storage (R2).
+Generates a five-minute presigned Amazon S3 PUT URL for uploading images directly to the media bucket. Upload with HTTP `PUT` and the requested `Content-Type`, then use `public_url` to display the image. AWS credentials remain on the backend.
 
 ### Request Body
 ```json
@@ -1488,12 +1488,14 @@ Generates a presigned S3 PUT URL for uploading files directly to cloud storage (
 ### Response `200`
 ```json
 {
-  "upload_url": "https://<bucket>.r2.cloudflarestorage.com/quiz-images/uuid.jpg?X-Amz-...",
-  "public_url": "https://media.yourdomain.com/quiz-images/uuid.jpg",
+  "upload_url": "https://<bucket>.s3.ap-south-1.amazonaws.com/quiz-images/uuid.jpg?X-Amz-...",
+  "public_url": "https://<bucket>.s3.ap-south-1.amazonaws.com/quiz-images/uuid.jpg",
   "key": "quiz-images/uuid.jpg",
   "expires_in": 300
 }
 ```
+
+The bucket must allow public reads for media objects and CORS for the uploading frontend's origin. The presigned PUT endpoint does not enforce the multipart endpoint's 5 MB size limit.
 
 ---
 
@@ -1509,7 +1511,7 @@ Generates a presigned S3 PUT URL for uploading files directly to cloud storage (
 
 ### Response `201`
 ```json
-{ "url": "https://media.yourdomain.com/quiz-images/uuid.jpg" }
+{ "url": "https://<bucket>.s3.ap-south-1.amazonaws.com/quiz-images/uuid.jpg" }
 ```
 
 ### Errors
@@ -3412,7 +3414,7 @@ All return:
 { "message": "done" }
 ```
 
-> In production, these jobs also run automatically in-process via Go tickers — external cron triggers are optional.
+> Scheduling runs outside the API process. Lightsail systemd timers in `deploy/cron/` trigger these endpoints. Exactly one scheduler should be enabled: Lightsail timers, Render cron, or the opt-in GitHub workflow. Cron requests allow up to 15 minutes.
 
 ---
 
@@ -3421,10 +3423,17 @@ All return:
 ## GET `/health`
 **Auth required:** No
 
+Process liveness. This endpoint is at `/health`, outside `/api/v1`.
+
 ### Response `200`
 ```json
 { "status": "ok" }
 ```
+
+## GET `/ready`
+**Auth required:** No
+
+Database readiness at `/ready`, outside `/api/v1`. Database checks have a two-second timeout and responses are not cached. HTTP `200` returns the normal success envelope with `data.status = "ok"`. HTTP `503` returns `success: false` and error code `NOT_READY` when the database is unavailable or the server is draining during shutdown. Database error details are not exposed.
 
 ---
 

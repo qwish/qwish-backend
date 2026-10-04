@@ -1,0 +1,17 @@
+.git
+.github
+.env
+.env.*
+.aws
+.codex
+.agents
+deploy
+docs
+bruno
+bin
+api
+2026-*.txt
+*.md
+*.html
+*.docx
+.DS_Store

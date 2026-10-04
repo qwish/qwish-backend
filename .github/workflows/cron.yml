@@ -5,6 +5,8 @@
 # Setup: repo Settings → Secrets and variables → Actions
 #   API_URL      e.g. https://qwish-backend-dev.onrender.com  (no trailing slash)
 #   CRON_SECRET  same value as the web service's CRON_SECRET
+#   ENABLE_GITHUB_CRON repository variable = true to enable scheduled runs.
+#   Leave unset/false when Lightsail timers or Render cron own the schedule.
 #
 # GitHub's scheduler is best-effort and can fire late (occasionally by 30+ min)
 # or skip a tick under load. That is survivable here: every job is idempotent
@@ -29,6 +31,7 @@ on:
 
 jobs:
   run:
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.ENABLE_GITHUB_CRON == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: POST cron endpoints

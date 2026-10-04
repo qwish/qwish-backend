@@ -13,3 +13,8 @@ post {
 headers {
   Authorization: Bearer {{token}}
 }
+
+docs {
+  Send multipart/form-data with file (JPEG, PNG, or WebP, max 5 MB) and optional prefix.
+  The backend writes to Amazon S3 and returns a permanent public S3 image URL.
+}

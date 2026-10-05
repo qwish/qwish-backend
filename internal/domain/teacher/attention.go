@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -63,12 +64,14 @@ type AttentionRepeat struct {
 // AttentionReason is one reason a student is listed. Date is what the reason is
 // ordered by: the review date, the oldest due date, or the oldest evidence date.
 type AttentionReason struct {
-	Kind      string             `json:"kind"` // support_review_overdue | overdue_work | needs_support | repeated_wrong
-	Date      string             `json:"date"`
-	Status    string             `json:"status,omitempty"`
-	Items     []AttentionWork    `json:"items,omitempty"`
-	Concepts  []AttentionConcept `json:"concepts,omitempty"`
-	Questions []AttentionRepeat  `json:"questions,omitempty"`
+	Kind        string             `json:"kind"` // support_review_overdue | overdue_work | needs_support | repeated_wrong
+	Date        string             `json:"date"`
+	Status      string             `json:"status,omitempty"`
+	TeacherID   string             `json:"teacher_id,omitempty"` // support plan owner
+	TeacherName string             `json:"teacher_name,omitempty"`
+	Items       []AttentionWork    `json:"items,omitempty"`
+	Concepts    []AttentionConcept `json:"concepts,omitempty"`
+	Questions   []AttentionRepeat  `json:"questions,omitempty"`
 }
 
 type AttentionStudent struct {
@@ -81,7 +84,8 @@ type AttentionStudent struct {
 // attentionCTE defines the three reasons over the operational roster: active,
 // claimed, non-deleted students in the teacher's active classes. Suspended and
 // pending-claim students are roster exceptions, never academic risk.
-// $1 institution, $2 class ids, $3 teacher, $4 today in the institution's zone.
+// $1 institution, $2 class ids, $3 teacher (NULL: any teacher's plan, for
+// institution admins), $4 today in the institution's zone.
 const attentionCTE = `
 WITH roster AS (
   SELECT DISTINCT gs.user_id AS student_id
@@ -90,9 +94,12 @@ WITH roster AS (
     JOIN enrollments e ON e.user_id=gs.user_id AND e.institution_id=$1 AND e.status='active'
    WHERE gs.group_id = ANY($2::uuid[])
 ), support AS (
-  SELECT s.student_id, s.review_on, s.status
+  -- One row per student: with several teachers' plans, the oldest review.
+  SELECT DISTINCT ON (s.student_id) s.student_id, s.review_on, s.status, s.teacher_id
     FROM teacher_student_support s JOIN roster USING (student_id)
-   WHERE s.teacher_id=$3 AND s.institution_id=$1 AND s.status<>'resolved' AND s.review_on < $4::date
+   WHERE ($3::uuid IS NULL OR s.teacher_id=$3::uuid) AND s.institution_id=$1
+     AND s.status<>'resolved' AND s.review_on < $4::date
+   ORDER BY s.student_id, s.review_on
 ), work AS (
   -- Recipient deadline overrides and availability apply; excused is never owed.
   SELECT ar.student_id, a.id AS assignment_id, q.title AS quiz_title, a.group_id AS class_id,
@@ -164,8 +171,9 @@ SELECT r.student_id, r.name,
        (SELECT COALESCE(json_agg(json_build_object('id', g.id, 'name', g.name) ORDER BY g.name), '[]')
           FROM group_students gs JOIN groups g ON g.id=gs.group_id
          WHERE gs.user_id=r.student_id AND gs.group_id = ANY($2::uuid[])),
-       (SELECT json_build_object('review_on', to_char(s.review_on,'YYYY-MM-DD'), 'status', s.status)
-          FROM support s WHERE s.student_id=r.student_id),
+       (SELECT json_build_object('review_on', to_char(s.review_on,'YYYY-MM-DD'), 'status', s.status,
+               'teacher_id', s.teacher_id, 'teacher_name', COALESCE(NULLIF(t.display_name,''), t.full_name, ''))
+          FROM support s JOIN users t ON t.id=s.teacher_id WHERE s.student_id=r.student_id),
        (SELECT json_agg(json_build_object('assignment_id', w.assignment_id, 'quiz_title', w.quiz_title,
                'class_id', w.class_id, 'due_at', w.due_at) ORDER BY w.due_at)
           FROM work w WHERE w.student_id=r.student_id),
@@ -227,15 +235,7 @@ func (h *Handler) Attention(w http.ResponseWriter, r *http.Request) {
 		scope["state"], scope["reason"] = "no_assigned_classes", NoClassesReason
 	}
 
-	var totals AttentionTotals
-	if err := h.db.QueryRow(ctx, attentionTotalsSQL, instID, classes, teacherID, today).Scan(
-		&totals.EligibleStudents, &totals.StudentsNeedingAttention, &totals.SupportReviewsOverdue,
-		&totals.StudentsMissingWork, &totals.OverdueSubmissions, &totals.StudentsNeedingSupport,
-		&totals.StudentsRepeatingErrors, &totals.RepeatedWrongQuestions); err != nil {
-		middleware.InternalError(w)
-		return
-	}
-	students, err := h.attentionRows(ctx, instID, classes, teacherID, today, tz, limit, (page-1)*limit)
+	totals, students, err := QueryAttention(ctx, h.db, instID, classes, &teacherID, today, tz, limit, (page-1)*limit)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -270,8 +270,23 @@ func (h *Handler) activeClassIDs(ctx context.Context, teacherID, instID string) 
 	return ids, rows.Err()
 }
 
-func (h *Handler) attentionRows(ctx context.Context, instID string, classes []string, teacherID, today, tz string, limit, offset int) ([]AttentionStudent, error) {
-	rows, err := h.db.Query(ctx, attentionRowsSQL, instID, classes, teacherID, today, tz, limit, offset)
+// QueryAttention computes the attention totals and one page of students over
+// classIDs, which the caller has already authorised. teacherID narrows support
+// reviews to that teacher's plans; nil counts every teacher's.
+func QueryAttention(ctx context.Context, db *pgxpool.Pool, instID string, classIDs []string, teacherID *string, today, tz string, limit, offset int) (AttentionTotals, []AttentionStudent, error) {
+	var t AttentionTotals
+	if err := db.QueryRow(ctx, attentionTotalsSQL, instID, classIDs, teacherID, today).Scan(
+		&t.EligibleStudents, &t.StudentsNeedingAttention, &t.SupportReviewsOverdue,
+		&t.StudentsMissingWork, &t.OverdueSubmissions, &t.StudentsNeedingSupport,
+		&t.StudentsRepeatingErrors, &t.RepeatedWrongQuestions); err != nil {
+		return t, nil, err
+	}
+	students, err := attentionRows(ctx, db, instID, classIDs, teacherID, today, tz, limit, offset)
+	return t, students, err
+}
+
+func attentionRows(ctx context.Context, db *pgxpool.Pool, instID string, classes []string, teacherID *string, today, tz string, limit, offset int) ([]AttentionStudent, error) {
+	rows, err := db.Query(ctx, attentionRowsSQL, instID, classes, teacherID, today, tz, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -288,13 +303,15 @@ func (h *Handler) attentionRows(ctx context.Context, instID string, classes []st
 		}
 		if supportJSON != nil {
 			var s struct {
-				ReviewOn string `json:"review_on"`
-				Status   string `json:"status"`
+				ReviewOn    string `json:"review_on"`
+				Status      string `json:"status"`
+				TeacherID   string `json:"teacher_id"`
+				TeacherName string `json:"teacher_name"`
 			}
 			if err := json.Unmarshal(supportJSON, &s); err != nil {
 				return nil, err
 			}
-			st.Reasons = append(st.Reasons, AttentionReason{Kind: "support_review_overdue", Date: s.ReviewOn, Status: s.Status})
+			st.Reasons = append(st.Reasons, AttentionReason{Kind: "support_review_overdue", Date: s.ReviewOn, Status: s.Status, TeacherID: s.TeacherID, TeacherName: s.TeacherName})
 		}
 		if workJSON != nil {
 			var items []AttentionWork

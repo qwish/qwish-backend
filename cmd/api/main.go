@@ -807,6 +807,7 @@ func main() {
 					portfolioH.InstitutionRoutes(r)
 					r.Get("/overview", institutionH.Overview)
 					r.Get("/classes/attention", institutionH.ClassAttention)
+					r.Get("/classes/{classId}/attention", institutionH.ClassStudentsAttention)
 					r.Get("/learning-summary", learningH.InstitutionSummary)
 					r.Get("/learning-summary/scoped", learningH.InstitutionScopedSummary)
 					r.Get("/students", institutionH.ListStudents)

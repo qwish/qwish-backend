@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/qwish/backend/internal/domain/teacher"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -345,4 +347,61 @@ func (h *Handler) overdueSupportReviews(ctx context.Context, instID, today strin
 		list = append(list, s)
 	}
 	return list, rows.Err()
+}
+
+// GET /institution/classes/{classId}/attention?page=&limit=
+// The class drill-down: the teacher queue's student rows and definitions, at
+// admin scope (every teacher's support plans), for one active class of this
+// institution. Anything else is 404.
+func (h *Handler) ClassStudentsAttention(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	instID, classID := middleware.GetInstitutionID(r), chi.URLParam(r, "classId")
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit < 1 || limit > 100 {
+		limit = 25
+	}
+	var name, tz string
+	var teachers []byte
+	err := h.db.QueryRow(ctx, `SELECT g.name, i.timezone,
+		(SELECT COALESCE(json_agg(json_build_object('id', u.id, 'name', COALESCE(NULLIF(u.display_name,''), u.full_name)) ORDER BY u.display_name), '[]')
+		   FROM group_teachers gt JOIN users u ON u.id=gt.user_id WHERE gt.group_id=g.id)
+		FROM groups g JOIN institutions i ON i.id=g.institution_id
+		WHERE g.id::text=$1 AND g.institution_id=$2 AND g.archived_at IS NULL`, classID, instID).Scan(&name, &tz, &teachers)
+	if err != nil {
+		middleware.NotFound(w, "class")
+		return
+	}
+	var classTeachers []ClassTeacher
+	if err := json.Unmarshal(teachers, &classTeachers); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	now := time.Now()
+	today := now.In(loc).Format("2006-01-02")
+	totals, students, err := teacher.QueryAttention(ctx, h.db, instID, []string{classID}, nil, today, tz, limit, (page-1)*limit)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSONWithMeta(w, http.StatusOK, map[string]any{
+		"scope":              map[string]any{"kind": "class", "class_id": classID, "class_name": name},
+		"from":               nil,
+		"to":                 today,
+		"timezone":           tz,
+		"generated_at":       now.UTC(),
+		"definition_version": teacher.AttentionDefinitionVersion,
+		"teachers":           classTeachers,
+		"totals":             totals,
+		"students":           students,
+	}, &middleware.Meta{Page: page, Limit: limit, Total: totals.StudentsNeedingAttention})
 }

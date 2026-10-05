@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/domain/teacher"
 )
 
 // classAttentionSeed, expected for the institution:
@@ -206,5 +207,54 @@ func TestClassAttentionFixtures(t *testing.T) {
 	_, iso := getClassAttention(t, pool, other.AdminA, other.InstA, "")
 	if iso.Data.Totals.ActiveClasses != 0 || len(iso.Data.Classes) != 0 || iso.Data.Totals.PendingApprovals.Count != 0 {
 		t.Errorf("other institution sees %+v", iso.Data.Totals)
+	}
+}
+
+// The class drill-down uses the teacher queue's definitions with admin scope:
+// any teacher's support plan counts, and only this institution's classes open.
+func TestClassStudentsAttention(t *testing.T) {
+	pool := openTestDB(t)
+	s := seedClassAttention(t, pool)
+	h := NewHandler(pool, nil, nil, "", "")
+	get := func(instID, classID string) (int, struct {
+		Data struct {
+			Scope    map[string]any             `json:"scope"`
+			Teachers []ClassTeacher             `json:"teachers"`
+			Totals   teacher.AttentionTotals    `json:"totals"`
+			Students []teacher.AttentionStudent `json:"students"`
+		} `json:"data"`
+	}) {
+		req := withURLParam(withAuth(httptest.NewRequest("GET", "/", nil), s.Admin, "institution_admin", instID), "classId", classID)
+		w := httptest.NewRecorder()
+		h.ClassStudentsAttention(w, req)
+		var body struct {
+			Data struct {
+				Scope    map[string]any             `json:"scope"`
+				Teachers []ClassTeacher             `json:"teachers"`
+				Totals   teacher.AttentionTotals    `json:"totals"`
+				Students []teacher.AttentionStudent `json:"students"`
+			} `json:"data"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &body)
+		return w.Code, body
+	}
+
+	_, a := get(s.Inst, s.A)
+	if a.Data.Totals.EligibleStudents != 2 || len(a.Data.Students) != 2 || a.Data.Students[0].StudentID != s.S1 || a.Data.Students[1].StudentID != s.S2 {
+		t.Errorf("class A = %+v", a.Data)
+	}
+	if len(a.Data.Teachers) != 1 || a.Data.Teachers[0].Name != "Teacher One" {
+		t.Errorf("class A teachers = %+v", a.Data.Teachers)
+	}
+	_, b := get(s.Inst, s.B)
+	if len(b.Data.Students) != 1 || b.Data.Students[0].StudentID != s.S3 || b.Data.Students[0].Reasons[0].Kind != "support_review_overdue" || b.Data.Students[0].Reasons[0].TeacherName != "Teacher Two" {
+		t.Errorf("class B = %+v (another teacher's plan must count for an admin)", b.Data.Students)
+	}
+	if code, _ := get(s.Inst, s.D); code != http.StatusNotFound {
+		t.Errorf("archived class: %d, want 404", code)
+	}
+	other := seedTwoInstitutes(t, pool)
+	if code, _ := get(other.InstA, s.A); code != http.StatusNotFound {
+		t.Errorf("another institution's class: %d, want 404", code)
 	}
 }

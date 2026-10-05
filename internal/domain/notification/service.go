@@ -179,6 +179,13 @@ func (s *Service) SendTeacherVerified(ctx context.Context, to, name, instName, l
 		tmplTeacherVerified(name, instName, loginURL), "teacher_verified")
 }
 
+// SendAccountInvite tells a directly added institute admin or teacher their
+// account exists and that they sign in with email + one-time code.
+func (s *Service) SendAccountInvite(ctx context.Context, to, name, roleLabel, instName, loginURL, reference string) error {
+	return s.SendEmail(ctx, to, "You’re invited to "+instName+" on Qwish",
+		tmplAccountInvite(name, roleLabel, instName, s.dashURL(loginURL)), reference)
+}
+
 // SendInstitutionInvite emails a "bring Qwish to your institution" invite with a
 // link to the public application form. reference ties it back to the originating
 // contact submission (e.g. "institution_invite:<submissionID>").

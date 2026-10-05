@@ -831,6 +831,7 @@ func main() {
 					r.Patch("/teachers/{userId}/status", institutionH.UpdateTeacherStatus)
 					r.Delete("/teachers/{userId}", institutionH.RemoveTeacher)
 					r.Post("/teachers/invite", institutionH.InviteTeacher)
+					r.Post("/teachers", institutionH.AddTeacher)
 					r.Get("/groups", institutionH.ListGroups)
 					r.Post("/groups", institutionH.CreateGroup)
 					r.Get("/groups/{groupId}", institutionH.GetGroup)
@@ -926,6 +927,7 @@ func main() {
 
 					// Institutions (Super Admin + Moderator read)
 					r.Get("/institutions", adminH.ListInstitutions)
+					r.With(mw.RequireRole("super_admin")).Post("/institutions", adminH.CreateInstitution)
 					r.Get("/institutions/queue", adminH.InstitutionQueue)
 					r.Get("/institutions/{institutionId}", adminH.GetInstitution)
 					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/approve", adminH.ApproveInstitution)

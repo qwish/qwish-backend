@@ -242,6 +242,23 @@ func tmplTeacherVerified(name, instName, loginURL string) string {
 	return emailLayout(esc(instName)+" verified your Qwish teacher account", body)
 }
 
+// tmplAccountInvite tells someone an account was created for them. There is
+// no password: they sign in with their email and a one-time code.
+func tmplAccountInvite(name, roleLabel, instName, loginURL string) string {
+	greeting := "Hi"
+	if name != "" {
+		greeting = "Hi " + esc(name)
+	}
+	body := heading("You’re invited to Qwish") +
+		paragraph(greeting+",") +
+		paragraph("<strong>"+esc(instName)+"</strong> has added you to Qwish as "+esc(roleLabel)+".") +
+		paragraph("Sign in with this email address — we’ll send you a one-time code each time you sign in.") +
+		primaryButton("Sign in to Qwish", loginURL) +
+		fallbackLink(loginURL) +
+		mutedNote("If you weren’t expecting this, you can safely ignore this email.")
+	return emailLayout(esc(instName)+" invited you to Qwish", body)
+}
+
 func tmplInstitutionInvite(name, applyLink string) string {
 	greeting := "Hi"
 	if name != "" {

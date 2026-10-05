@@ -4873,3 +4873,31 @@ Set by trigger (migration 088) on every move into `pending_approval`. Null for
 quizzes pending before the migration: show "age unavailable", never an age
 derived from `created_at`.
 
+
+---
+
+## Direct onboarding (email + OTP, no passwords)
+
+### POST `/admin/institutions` (super_admin)
+Creates a **verified** institution, its referral codes and its institution
+admin account in one transaction, then emails the admin that they are invited.
+
+```json
+{ "name": "Green Valley School", "type": "school", "contact_email": "office@gv.edu",
+  "timezone": "Asia/Kolkata", "admin_name": "R. Iyer", "admin_email": "principal@gv.edu",
+  "phone": "", "website": "", "city": "Pune", "state": "MH", "country": "India" }
+```
+`type` is `school|college|tuition`; `admin_email` defaults to `contact_email`;
+`timezone` defaults to `Asia/Kolkata`. `201 { id, admin_user_id, admin_email, invite_sent }`.
+`409 EMAIL_ALREADY_REGISTERED` when the admin email already has a Qwish account.
+
+### POST `/institution/teachers` (institution_admin)
+`{ "name": "Meera Iyer", "email": "meera@gv.edu" }` → an **active** teacher in
+this institution and an invite email. `201 { id, email, invite_sent }`. A pending
+link invite to the same address is revoked. `409` as above; `422 NOT_VERIFIED`
+for an unverified institution.
+
+Neither sends a password. The person signs in on their panel with their email
+and a one-time code; the first sign-in attaches the Supabase identity to the
+pre-created account by verified email. `invite_sent: false` means the account
+exists but the email failed — they can still sign in with email + code.

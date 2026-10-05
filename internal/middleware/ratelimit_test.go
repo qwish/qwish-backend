@@ -68,3 +68,16 @@ func TestRemainingCountsDown(t *testing.T) {
 		t.Fatalf("exhausted: remaining = %d, want 0", got)
 	}
 }
+
+func TestClientIPTrustsProxyHeadersOnlyFromPrivatePeers(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
+	r.RemoteAddr = "198.51.100.7:4000" // public peer: header is spoofable
+	if got := clientIP(r); got != "198.51.100.7" {
+		t.Fatalf("public peer: got %s", got)
+	}
+	r.RemoteAddr = "127.0.0.1:4000" // via local Caddy
+	if got := clientIP(r); got != "203.0.113.9" {
+		t.Fatalf("proxied: got %s", got)
+	}
+}

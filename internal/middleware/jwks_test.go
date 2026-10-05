@@ -27,18 +27,35 @@ func TestParseOptsRejectsForeignIssuer(t *testing.T) {
 	opts := parseOpts(testSupabaseURL)
 	exp := time.Now().Add(time.Hour).Unix()
 
-	ours := signHS256(t, jwt.MapClaims{"sub": "u1", "iss": SupabaseIssuer(testSupabaseURL), "exp": exp})
+	ours := signHS256(t, jwt.MapClaims{"sub": "u1", "iss": SupabaseIssuer(testSupabaseURL), "aud": "authenticated", "exp": exp})
 	if _, err := jwt.Parse(ours, keyFunc, opts...); err != nil {
 		t.Fatalf("own issuer rejected: %v", err)
 	}
 
 	for _, iss := range []string{"https://other.supabase.co/auth/v1", ""} {
-		claims := jwt.MapClaims{"sub": "u1", "exp": exp}
+		claims := jwt.MapClaims{"sub": "u1", "aud": "authenticated", "exp": exp}
 		if iss != "" {
 			claims["iss"] = iss
 		}
 		if _, err := jwt.Parse(signHS256(t, claims), keyFunc, opts...); err == nil {
 			t.Errorf("iss=%q accepted, want rejected", iss)
+		}
+	}
+}
+
+// Tokens without an expiry or for another audience must be rejected.
+func TestParseOptsRequiresExpAndAudience(t *testing.T) {
+	keyFunc := makeKeyFunc(testSecret, testSupabaseURL)
+	opts := parseOpts(testSupabaseURL)
+	iss := SupabaseIssuer(testSupabaseURL)
+	exp := time.Now().Add(time.Hour).Unix()
+	for name, claims := range map[string]jwt.MapClaims{
+		"no exp":   {"sub": "u1", "iss": iss, "aud": "authenticated"},
+		"anon aud": {"sub": "u1", "iss": iss, "aud": "anon", "exp": exp},
+		"no aud":   {"sub": "u1", "iss": iss, "exp": exp},
+	} {
+		if _, err := jwt.Parse(signHS256(t, claims), keyFunc, opts...); err == nil {
+			t.Errorf("%s accepted, want rejected", name)
 		}
 	}
 }

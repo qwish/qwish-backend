@@ -104,15 +104,17 @@ func (c *S3Client) PresignURL(ctx context.Context, key string, ttl time.Duration
 }
 
 // PresignUpload generates a temporary pre-signed PUT URL for direct client upload, along with the expected public URL.
-func (c *S3Client) PresignUpload(ctx context.Context, prefix, contentType string, ttl time.Duration) (string, string, string, error) {
+// size is signed as Content-Length, so S3 rejects any body of a different length.
+func (c *S3Client) PresignUpload(ctx context.Context, prefix, contentType string, size int64, ttl time.Duration) (string, string, string, error) {
 	ext := extensionFromContentType(contentType)
 	key := path.Join(prefix, uuid.New().String()+ext)
 
 	presigner := s3.NewPresignClient(c.client)
 	req, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(c.bucket),
-		Key:         aws.String(key),
-		ContentType: aws.String(contentType),
+		Bucket:        aws.String(c.bucket),
+		Key:           aws.String(key),
+		ContentType:   aws.String(contentType),
+		ContentLength: aws.Int64(size),
 	}, s3.WithPresignExpires(ttl))
 	if err != nil {
 		return "", "", "", err
@@ -136,6 +138,10 @@ func extensionFromContentType(ct string) string {
 		return ".webp"
 	case "image/gif":
 		return ".gif"
+	case "video/mp4":
+		return ".mp4"
+	case "video/webm":
+		return ".webm"
 	default:
 		return ".bin"
 	}

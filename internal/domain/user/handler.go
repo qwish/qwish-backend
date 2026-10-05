@@ -46,7 +46,7 @@ func (h *Handler) GetMe(w http.ResponseWriter, r *http.Request) {
 // PATCH /api/v1/users/me
 func (h *Handler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 	// Retired personal fields sent by older app builds are ignored.
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<10))
 	if err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return

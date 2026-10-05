@@ -155,7 +155,7 @@ type QuizSummary struct {
 
 // recommendLimit caps the list. A first-run user choosing from more than this
 // is being asked to browse, not to start.
-const recommendLimit = 12
+const recommendLimit = 5
 
 // Recommendations lists quizzes an anonymous user may play right now.
 //
@@ -164,7 +164,11 @@ const recommendLimit = 12
 //     list uses for out-of-institution content, so nothing private leaks.
 //   - every question is multiple_choice: the pre-signup player renders that
 //     type only. A quiz with one puzzle question would strand the user.
-//   - subdomain in the picked topics, when any were picked.
+//   - in the picked interests, when any were picked: the topic itself, or
+//     its subject so a sparse topic still yields a full list.
+//
+// Exact topic matches rank first, then the most-played: distinct users who
+// completed the quiz (quiz_read_stats.completions), newest as tie-break.
 //
 // ponytail: MCQ-only is a player limitation, not a product one. Lift the
 // NOT EXISTS clause once the question-type renderers are extracted out of
@@ -178,17 +182,21 @@ func (s *Service) Recommendations(ctx context.Context, sessionID string) ([]Quiz
 	rows, err := s.db.Query(ctx,
 		`SELECT q.id, q.title, q.description, q.domain, q.question_count
 		   FROM quizzes q
+		   LEFT JOIN quiz_read_stats st ON st.quiz_id = q.id
 		  WHERE q.visibility = 'public'
 		    AND q.status = 'published'
 		    AND q.deleted_at IS NULL
 		    AND q.question_count > 0
 		    AND (cardinality($1::text[]) = 0
 		         OR q.subdomain = ANY($1::text[])
-		         OR q.domain = ANY($1::text[]))
+		         OR q.domain = ANY($1::text[])
+		         OR q.domain IN (SELECT domain_slug FROM subdomains WHERE slug = ANY($1::text[])))
 		    AND NOT EXISTS (
 		          SELECT 1 FROM questions qn
 		           WHERE qn.quiz_id = q.id AND qn.type <> 'multiple_choice')
-		  ORDER BY q.published_at DESC NULLS LAST
+		  ORDER BY COALESCE(q.subdomain = ANY($1::text[]), false) DESC,
+		           COALESCE(st.completions, 0) DESC,
+		           q.published_at DESC NULLS LAST, q.id
 		  LIMIT $2`, topics, recommendLimit)
 	if err != nil {
 		return nil, err

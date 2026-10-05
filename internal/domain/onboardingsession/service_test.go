@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/qwish/backend/internal/domain/quiz"
 )
 
@@ -121,6 +122,84 @@ func TestRecommendationsExcludeNonMCQAndRespectTopics(t *testing.T) {
 	}
 	if ids[offTopic] {
 		t.Error("quiz outside the picked topics was recommended")
+	}
+}
+
+// Five at most: exact topic matches first, then same-subject quizzes, each
+// ordered by how many users completed them.
+func TestRecommendationsRankTopicThenPopularity(t *testing.T) {
+	pool := openTestDB(t)
+	ctx := context.Background()
+	svc := NewService(pool, nil)
+	var author string
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM users WHERE email='system@qwish.internal'`).Scan(&author); err != nil {
+		t.Skipf("system author missing: %v", err)
+	}
+	// A throwaway subject so seeded quizzes can't interleave.
+	tag := uuid.NewString()[:8]
+	dom, topic := "zz_dom_"+tag, "zz_topic_"+tag
+	subs := []string{topic, "zz_a_" + tag, "zz_b_" + tag, "zz_c_" + tag}
+	if _, err := pool.Exec(ctx, `INSERT INTO domains (slug,label) VALUES ($1,'Test')`, dom); err != nil {
+		t.Fatal(err)
+	}
+	for _, sd := range subs {
+		if _, err := pool.Exec(ctx, `INSERT INTO subdomains (slug,domain_slug,label) VALUES ($1,$2,'T')`, sd, dom); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var quizzes []string
+	t.Cleanup(func() {
+		c := context.Background()
+		pool.Exec(c, `DELETE FROM questions WHERE quiz_id = ANY($1::uuid[])`, quizzes)
+		pool.Exec(c, `DELETE FROM quiz_read_stats WHERE quiz_id = ANY($1::uuid[])`, quizzes)
+		pool.Exec(c, `DELETE FROM quizzes WHERE id = ANY($1::uuid[])`, quizzes)
+		pool.Exec(c, `DELETE FROM subdomains WHERE domain_slug=$1`, dom)
+		pool.Exec(c, `DELETE FROM domains WHERE slug=$1`, dom)
+	})
+	mk := func(title, subdomain string, completions int) string {
+		var qid string
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO quizzes (created_by, title, type, visibility, status, question_count, domain, subdomain, published_at)
+			 VALUES ($1,$2,'knowledge_check','public','published',1,$3,$4, now()) RETURNING id`,
+			author, title, dom, subdomain).Scan(&qid); err != nil {
+			t.Fatalf("insert quiz: %v", err)
+		}
+		quizzes = append(quizzes, qid)
+		if _, err := pool.Exec(ctx, `INSERT INTO questions (quiz_id, position, type, prompt, options, correct_answer, time_limit_seconds)
+			 VALUES ($1,1,'multiple_choice','p','["A","B"]','"A"',60)`, qid); err != nil {
+			t.Fatalf("insert question: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO quiz_read_stats (quiz_id, completions) VALUES ($1,$2)
+			 ON CONFLICT (quiz_id) DO UPDATE SET completions=EXCLUDED.completions`, qid, completions); err != nil {
+			t.Fatalf("insert stats: %v", err)
+		}
+		return qid
+	}
+	topicQuiet := mk("topic-quiet", topic, 1)
+	topicHot := mk("topic-hot", topic, 50)
+	subjectHot := mk("subject-hot", subs[1], 90)
+	subjectMid := mk("subject-mid", subs[2], 20)
+	subjectLow := mk("subject-low", subs[3], 5)
+	mk("subject-cold", subs[1], 0) // sixth: must be cut by the limit
+
+	id, err := svc.Create(ctx, "en", []string{topic})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { pool.Exec(context.Background(), `DELETE FROM onboarding_sessions WHERE id=$1`, id) })
+	got, err := svc.Recommendations(ctx, id)
+	if err != nil {
+		t.Fatalf("Recommendations: %v", err)
+	}
+	want := []string{topicHot, topicQuiet, subjectHot, subjectMid, subjectLow}
+	if len(got) != len(want) {
+		t.Fatalf("got %d quizzes, want %d", len(got), len(want))
+	}
+	for i, q := range got {
+		if q.ID != want[i] {
+			t.Errorf("position %d: got %s, want %s", i, q.Title, want[i])
+		}
 	}
 }
 

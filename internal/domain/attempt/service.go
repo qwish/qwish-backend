@@ -697,9 +697,9 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		}
 	}
 
-	// One round trip for two independent scalars: the knowledge_check repeat
-	// guard and the institution multiplier.
-	var isRepeatAttempt bool
+	// One round trip for three independent scalars: the knowledge_check repeat
+	// guard, offline answer-key exposure, and the institution multiplier.
+	var isRepeatAttempt, answersExposed bool
 	var instMultiplier float64 = 1.0
 	if err := tx.QueryRow(ctx,
 		`SELECT
@@ -707,13 +707,16 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		     SELECT 1 FROM quiz_attempts
 		      WHERE quiz_id=$2 AND user_id=$1 AND status='completed' AND id <> $3
 		   ) ELSE false END,
+		   EXISTS (SELECT 1 FROM offline_answer_exposures WHERE user_id=$1 AND quiz_id=$2),
 		   COALESCE((SELECT i.point_multiplier FROM users u
 		               JOIN institutions i ON i.id = u.institution_id
 		              WHERE u.id=$1), 1.0)`,
 		userID, quizID, attemptID, quizType,
-	).Scan(&isRepeatAttempt, &instMultiplier); err != nil {
+	).Scan(&isRepeatAttempt, &answersExposed, &instMultiplier); err != nil {
 		return nil, err
 	}
+	// A downloaded answer key makes this practice: no points, like a repeat.
+	isRepeatAttempt = isRepeatAttempt || answersExposed
 
 	// Load all question responses with time_taken_ms and time_limit_seconds
 	rows, err := tx.Query(ctx,
@@ -769,7 +772,7 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 
 		// Only a first sight of a question measures ability; repeats measure
 		// memory of it and would let practice on one quiz inflate the rating.
-		if !seenBefore && qid != nil {
+		if !seenBefore && !answersExposed && qid != nil {
 			b := scoring.SeedDifficulty(qDifficulty)
 			if ratingB != nil {
 				b = *ratingB

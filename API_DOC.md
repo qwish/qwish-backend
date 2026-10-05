@@ -1361,11 +1361,11 @@ Array of topic requests (same shape as above).
 ## POST `/parent/link-invite`
 **Auth required:** Yes (student only)
 
-Generates a short invite code the student shares with their parent.
+Generates a 26-character invite code the student shares with their parent. Codes expire after 7 days and can be claimed by one parent only.
 
 ### Response `200`
 ```json
-{ "invite_code": "a1b2c3d4" }
+{ "invite_code": "ABCDEFGHIJKLMNOPQRSTUVWXYZ" }
 ```
 
 ---
@@ -1373,11 +1373,11 @@ Generates a short invite code the student shares with their parent.
 ## POST `/parent/link`
 **Auth required:** Yes (parent)
 
-Submits the invite code. Creates a pending link waiting for student acceptance.
+Submits the invite code. Creates a pending link waiting for student acceptance. Rate limited to 10 requests per hour per user.
 
 ### Request Body
 ```json
-{ "invite_code": "a1b2c3d4" }
+{ "invite_code": "ABCDEFGHIJKLMNOPQRSTUVWXYZ" }
 ```
 
 ### Response `200`
@@ -1391,7 +1391,8 @@ Submits the invite code. Creates a pending link waiting for student acceptance.
 ### Errors
 | Status | Code | Meaning |
 |--------|------|---------|
-| 404 | `NOT_FOUND` | Invite code not found or already used |
+| 403 | `FORBIDDEN` | Caller is not a parent |
+| 404 | `NOT_FOUND` | Invite code not found, expired, or already claimed |
 
 ---
 
@@ -1479,11 +1480,12 @@ Generates a five-minute presigned Amazon S3 PUT URL for uploading images directl
 ```json
 {
   "content_type": "image/jpeg",
-  "prefix": "quiz-images"
+  "prefix": "quiz-images",
+  "size": 482133
 }
 ```
 
-`prefix` is optional (defaults to `quiz-images`). `content_type` must be one of `image/jpeg`, `image/png`, or `image/webp`.
+`size` is required: the exact byte length of the file, at most 2 MB (2097152). It is signed into the URL, so the PUT must send exactly that many bytes. `prefix` is optional and currently must be `quiz-images`. `content_type` must be one of `image/jpeg`, `image/png`, `image/webp`, or `image/gif`. Upload routes are limited to 30 requests per minute per user.
 
 ### Response `200`
 ```json
@@ -1495,7 +1497,7 @@ Generates a five-minute presigned Amazon S3 PUT URL for uploading images directl
 }
 ```
 
-The bucket must allow public reads for media objects and CORS for the uploading frontend's origin. The presigned PUT endpoint does not enforce the multipart endpoint's 5 MB size limit.
+The bucket must allow public reads for media objects and CORS for the uploading frontend's origin.
 
 ---
 
@@ -1506,8 +1508,8 @@ The bucket must allow public reads for media objects and CORS for the uploading 
 ### Form Fields
 | Field | Required | Notes |
 |-------|----------|-------|
-| `file` | Yes | JPEG, PNG, or WebP — max 5 MB |
-| `prefix` | No | Storage path prefix, default `quiz-images` |
+| `file` | Yes | JPEG, PNG, WebP, or GIF (type checked from the file bytes) — max 2 MB |
+| `prefix` | No | Storage path prefix; only `quiz-images` (the default) is accepted |
 
 ### Response `201`
 ```json
@@ -1518,6 +1520,30 @@ The bucket must allow public reads for media objects and CORS for the uploading 
 | Status | Code | Meaning |
 |--------|------|---------|
 | 400 | `BAD_REQUEST` | File missing, too large, or unsupported format |
+
+---
+
+## POST `/upload/video`
+**Auth required:** Yes (teacher, super_admin, moderator)
+**Content-Type:** `multipart/form-data`
+
+### Form Fields
+| Field | Required | Notes |
+|-------|----------|-------|
+| `file` | Yes | MP4 or WebM (type checked from the file bytes) — max 25 MB |
+| `prefix` | No | Storage path prefix; only `quiz-videos` (the default) is accepted |
+
+### Response `201`
+```json
+{ "url": "https://<bucket>.s3.ap-south-1.amazonaws.com/quiz-videos/uuid.mp4" }
+```
+
+### Errors
+| Status | Code | Meaning |
+|--------|------|---------|
+| 400 | `BAD_REQUEST` | File missing, too large, or unsupported format |
+
+A question's `media_url` may hold an uploaded image, an uploaded video, or a YouTube (`youtube.com`, `youtu.be`) / Google Drive (`drive.google.com`) link. Clients treat YouTube/Drive hosts and `.mp4`/`.webm` paths as video.
 
 ---
 

@@ -21,3 +21,5 @@ docs/*
 deploy/previous-image
 deploy/*.env
 deploy/cron/*.env
+AWS_Commands_and_Steps.txt
+

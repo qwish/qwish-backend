@@ -37,7 +37,7 @@ func TestPresignUploadUsesS3RegionAndTemporaryCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uploadURL, publicURL, key, err := client.PresignUpload(context.Background(), "quiz-images", "image/jpeg", 5*time.Minute)
+	uploadURL, publicURL, key, err := client.PresignUpload(context.Background(), "quiz-images", "image/jpeg", 1234, 5*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +56,9 @@ func TestPresignUploadUsesS3RegionAndTemporaryCredentials(t *testing.T) {
 	}
 	if !strings.Contains(u.Query().Get("X-Amz-Credential"), "/ap-south-1/s3/aws4_request") {
 		t.Fatalf("wrong signing region: %s", uploadURL)
+	}
+	if !strings.Contains(u.Query().Get("X-Amz-SignedHeaders"), "content-length") {
+		t.Fatalf("content-length not signed, size limit unenforced: %s", uploadURL)
 	}
 	// A bodyless presign must not constrain browser uploads to an empty checksum.
 	if u.Query().Has("x-amz-checksum-crc32") {

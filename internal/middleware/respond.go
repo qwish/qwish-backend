@@ -3,6 +3,7 @@ package middleware
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 type Response struct {
@@ -63,4 +64,19 @@ func NotFound(w http.ResponseWriter, resource string) {
 
 func InternalError(w http.ResponseWriter) {
 	Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", "an unexpected error occurred")
+}
+
+// LimitBody caps every request body so no handler can be made to buffer an
+// unbounded upload. Handlers set tighter per-route limits on top of this.
+// ponytail: two global ceilings by content type; add per-route limits if a
+// route needs more than 3 MiB of JSON.
+func LimitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limit := int64(3 << 20)
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+			limit = 26 << 20 // 25 MiB video plus form overhead
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
+		next.ServeHTTP(w, r)
+	})
 }

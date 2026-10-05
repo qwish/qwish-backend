@@ -3,7 +3,6 @@ package admin
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/middleware"
@@ -334,15 +334,28 @@ func TestAdminSessionRevocation(t *testing.T) {
 	f := seedConsole(t, pool)
 	sid := "sess-" + uuid.NewString()
 	t.Cleanup(func() { pool.Exec(context.Background(), `DELETE FROM admin_sessions WHERE session_id=$1`, sid) })
-	payload, _ := json.Marshal(map[string]interface{}{"session_id": sid, "amr": []map[string]string{{"method": "otp"}}})
-	token := "x." + base64.RawURLEncoding.EncodeToString(payload) + ".y"
+	var uid string
+	if err := pool.QueryRow(context.Background(), `SELECT supabase_uid FROM admin_accounts WHERE id=$1`, f.admin).Scan(&uid); err != nil {
+		t.Fatal(err)
+	}
+	// Session claims are only trusted after signature verification, so the
+	// token goes through the real Authenticate middleware.
+	const secret, supabaseURL = "test-secret", "https://test.supabase.co"
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub": uid, "session_id": sid, "amr": []map[string]string{{"method": "otp"}},
+		"iss": middleware.SupabaseIssuer(supabaseURL), "aud": "authenticated",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	}).SignedString([]byte(secret))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
+	handler := middleware.Authenticate(secret, supabaseURL, pool)(middleware.TrackAdminSessions(pool)(inner))
 	chain := func(r *http.Request) *httptest.ResponseRecorder {
 		r.Header.Set("Authorization", "Bearer "+token)
-		r = r.WithContext(context.WithValue(r.Context(), middleware.ContextKeyAdminID, f.admin))
 		rec := httptest.NewRecorder()
-		middleware.TrackAdminSessions(pool)(inner).ServeHTTP(rec, r)
+		handler.ServeHTTP(rec, r)
 		return rec
 	}
 	if rec := chain(httptest.NewRequest("GET", "/", nil)); rec.Code != 204 {

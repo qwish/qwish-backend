@@ -127,12 +127,14 @@ func SupabaseIssuer(supabaseURL string) string {
 }
 
 // parseOpts are the validation rules applied to every access token: signature
-// algorithm, and the issuer so a token minted for another project can't be
-// replayed here.
+// algorithm, the issuer so a token minted for another project can't be
+// replayed here, a mandatory expiry, and the signed-in user audience.
 func parseOpts(supabaseURL string) []jwt.ParserOption {
 	return []jwt.ParserOption{
 		jwt.WithValidMethods([]string{"HS256", "ES256"}),
 		jwt.WithIssuer(SupabaseIssuer(supabaseURL)),
+		jwt.WithExpirationRequired(),
+		jwt.WithAudience("authenticated"),
 	}
 }
 

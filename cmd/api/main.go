@@ -225,6 +225,7 @@ func main() {
 	r.Use(mw.RequestLog)
 	r.Use(chimw.Recoverer)
 	r.Use(mw.RequestID)
+	r.Use(mw.LimitBody)
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -730,7 +731,7 @@ func main() {
 
 				// Parent
 				r.Post("/parent/link-invite", parentH.GenerateInvite)
-				r.Post("/parent/link", parentH.Link)
+				r.With(mw.RateLimitByUser(10, time.Hour)).Post("/parent/link", parentH.Link)
 				r.Post("/parent/link/{linkId}/accept", parentH.Accept)
 				r.Delete("/parent/link/{linkId}", parentH.Revoke)
 				r.Get("/parent/children", parentH.ListChildren)
@@ -843,7 +844,9 @@ func main() {
 				// Upload
 				r.Route("/upload", func(r chi.Router) {
 					r.Use(mw.RequireRole("teacher", "super_admin", "moderator"))
+					r.Use(mw.RateLimitByUser(30, time.Minute))
 					r.Post("/image", uploadH.UploadImage)
+					r.Post("/video", uploadH.UploadVideo)
 					r.Post("/presign", uploadH.PresignUpload)
 				})
 

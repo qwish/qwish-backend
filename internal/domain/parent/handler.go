@@ -2,11 +2,13 @@ package parent
 
 import (
 	"context"
+	"crypto/rand"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
@@ -28,11 +30,10 @@ func (h *Handler) GenerateInvite(w http.ResponseWriter, r *http.Request) {
 		middleware.Forbidden(w)
 		return
 	}
-	code := uuid.New().String()[:8]
+	code := rand.Text() // 128-bit, unguessable
 	_, err := h.db.Exec(r.Context(),
-		`INSERT INTO parent_student_links (parent_id, student_id, invite_code, status)
-		 VALUES ('00000000-0000-0000-0000-000000000000',$1,$2,'pending')
-		 ON CONFLICT DO NOTHING`,
+		`INSERT INTO parent_student_links (student_id, invite_code, status)
+		 VALUES ($1,$2,'pending')`,
 		userID, code)
 	if err != nil {
 		middleware.InternalError(w)
@@ -50,22 +51,26 @@ func (h *Handler) Link(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "invite_code is required")
 		return
 	}
+	if middleware.GetRole(r) != "parent" {
+		middleware.Forbidden(w)
+		return
+	}
 	parentID := middleware.GetUserID(r)
 
-	// Find the pending link
-	var linkID, studentID string
+	// Claim atomically: only an unclaimed, unexpired pending code, so a second
+	// code holder can never replace the parent the student is about to approve.
+	var linkID string
 	err := h.db.QueryRow(r.Context(),
-		`SELECT id, student_id FROM parent_student_links WHERE invite_code=$1 AND status='pending'`,
-		req.InviteCode,
-	).Scan(&linkID, &studentID)
-	if err != nil {
+		`UPDATE parent_student_links SET parent_id=$1
+		 WHERE invite_code=$2 AND status='pending' AND parent_id IS NULL
+		   AND created_at > now() - interval '7 days'
+		 RETURNING id`,
+		parentID, req.InviteCode,
+	).Scan(&linkID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		middleware.NotFound(w, "invite code")
 		return
 	}
-
-	// Update the link with parent_id
-	_, err = h.db.Exec(r.Context(),
-		`UPDATE parent_student_links SET parent_id=$1 WHERE id=$2`, parentID, linkID)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -80,7 +85,7 @@ func (h *Handler) Accept(w http.ResponseWriter, r *http.Request) {
 
 	tag, err := h.db.Exec(r.Context(),
 		`UPDATE parent_student_links SET status='active', linked_at=now()
-		 WHERE id=$1 AND student_id=$2 AND status='pending'`,
+		 WHERE id=$1 AND student_id=$2 AND status='pending' AND parent_id IS NOT NULL`,
 		linkID, userID)
 	if err != nil || tag.RowsAffected() == 0 {
 		middleware.BadRequest(w, "link not found or already processed")
@@ -206,13 +211,13 @@ func getChildOverview(ctx context.Context, db *pgxpool.Pool, studentID string) (
 	}
 
 	return map[string]interface{}{
-		"student_id":    studentID,
-		"display_name":  displayName,
-		"total_points":  points,
-		"current_streak": streak,
-		"quizzes_taken": quizCount,
-		"average_score": avgScore,
+		"student_id":      studentID,
+		"display_name":    displayName,
+		"total_points":    points,
+		"current_streak":  streak,
+		"quizzes_taken":   quizCount,
+		"average_score":   avgScore,
 		"recent_attempts": attempts,
-		"badges":        badges,
+		"badges":          badges,
 	}, nil
 }

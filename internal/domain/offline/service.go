@@ -46,9 +46,9 @@ type PackQuiz struct {
 }
 
 type Pack struct {
-	Version   string     `json:"version"`   // RFC3339 of newest quiz in the pack
-	Count     int        `json:"count"`
-	Quizzes   []PackQuiz `json:"quizzes"`
+	Version string     `json:"version"` // RFC3339 of newest quiz in the pack
+	Count   int        `json:"count"`
+	Quizzes []PackQuiz `json:"quizzes"`
 }
 
 // BuildPack returns the user's saved practice quizzes that are currently
@@ -103,6 +103,13 @@ func (s *Service) BuildPack(ctx context.Context, userID, institutionID, since st
 
 	// Attach questions in one pass keyed by quiz_id.
 	if len(ids) > 0 {
+		// Record answer exposure before handing out the key; online scoring
+		// reads this to stop downloaded answers earning points or rating.
+		if _, err := s.db.Exec(ctx,
+			`INSERT INTO offline_answer_exposures (user_id, quiz_id)
+			 SELECT $1, unnest($2::uuid[]) ON CONFLICT DO NOTHING`, userID, ids); err != nil {
+			return nil, false, err
+		}
 		byQuiz := map[string][]PackQuestion{}
 		qrows, err := s.db.Query(ctx,
 			`SELECT quiz_id, id, position, type, prompt, media_url, options, correct_answer, time_limit_seconds, clues

@@ -10,6 +10,15 @@ Implemented after this review: findings 1–3 are addressed in the working tree.
 
 The original findings below document the reviewed state. The other findings remain outstanding. The authorization changes were compiled with `go build ./...`; security regression tests have not been run in this remediation turn.
 
+Second remediation (same day): findings 4–9 and the JWT/forwarded-IP items are addressed in the working tree.
+- 4: presigned PUTs require `size` (≤5 MiB), signed as Content-Length; prefix is allowlisted; multipart uploads are type-checked by content sniffing; upload routes are rate limited per user (30/min). Per-user storage quotas and quarantine are not implemented.
+- 5: global `LimitBody` middleware (3 MiB JSON, 6 MiB multipart) under the existing per-route limits; UpdateMe capped at 16 KiB.
+- 6: atomic first-claim (`parent_id IS NULL`), parent-role check, 128-bit `crypto/rand.Text` codes with 7-day expiry, 10/hour claim limit, NULL instead of the zero-UUID sentinel; acceptance requires a claimed link. Old short pending codes are revoked by migration 094.
+- 7: offline pack downloads are recorded in `offline_answer_exposures`; online completion of an exposed quiz awards no points and applies no rating observations.
+- 8/9: migration 094 revokes anon/authenticated access to badges, user_education, user_skills and EXECUTE on refresh_leaderboard_score.
+- JWTs now require `exp` and `aud=authenticated`; X-Forwarded-For/X-Real-IP are trusted only from loopback/private peers.
+Verified: migrations 001–094 apply on scratch Postgres; `go test ./...` passes; admin `TestAdminSessionRevocation` now signs a real token and runs it through Authenticate.
+
 ## High
 
 ### 1. Individual admin session revocation can be bypassed with a URL token

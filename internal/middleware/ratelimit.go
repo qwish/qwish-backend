@@ -210,9 +210,17 @@ func (rl *rateLimiter) cleanupLoop() {
 	}
 }
 
-// clientIP extracts the originating client IP, honouring the proxy headers set
-// by Render's load balancer, and falls back to the raw connection address.
+// clientIP extracts the originating client IP. Proxy headers are honoured only
+// when the TCP peer is a loopback/private address (Caddy, Render's balancer);
+// a client reaching the API directly cannot spoof its rate-limit key.
 func clientIP(r *http.Request) string {
+	peer := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(peer); err == nil {
+		peer = host
+	}
+	if ip := net.ParseIP(peer); ip == nil || !(ip.IsLoopback() || ip.IsPrivate()) {
+		return peer
+	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		// First entry is the original client; the rest are intermediary proxies.
 		if first := strings.TrimSpace(strings.Split(xff, ",")[0]); first != "" {
@@ -222,10 +230,7 @@ func clientIP(r *http.Request) string {
 	if xrip := strings.TrimSpace(r.Header.Get("X-Real-IP")); xrip != "" {
 		return xrip
 	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
-	}
-	return r.RemoteAddr
+	return peer
 }
 
 // remaining is how many more requests key may make right now, without

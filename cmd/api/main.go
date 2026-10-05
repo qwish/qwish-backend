@@ -766,6 +766,7 @@ func main() {
 					r.Get("/metrics/catalog", teacherMetricsH.Catalog)
 					r.Get("/metrics", teacherMetricsH.Metrics)
 					r.Get("/distributions", teacherMetricsH.Distributions)
+					r.Get("/activity-heatmap", teacherMetricsH.InstitutionActivity)
 					r.Get("/points-liability", teacherMetricsH.PointsLiability)
 
 					// Dashboard layouts — private to the calling user.
@@ -865,6 +866,7 @@ func main() {
 					r.Get("/metrics/catalog", instMetricsH.Catalog)
 					r.Get("/metrics", instMetricsH.Metrics)
 					r.Get("/distributions", instMetricsH.Distributions)
+					r.Get("/activity-heatmap", instMetricsH.InstitutionActivity)
 					r.Get("/points-liability", instMetricsH.PointsLiability)
 
 					// Dashboard layouts — private to the calling user, so no

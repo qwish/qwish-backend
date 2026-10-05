@@ -65,3 +65,21 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	middleware.JSON(w, http.StatusOK, out)
 }
+
+// GET /users/me/notices?page=&limit= — notices delivered to the caller.
+func (h *Handler) Mine(w http.ResponseWriter, r *http.Request) {
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
+	list, total, err := h.svc.Received(r.Context(), middleware.GetUserID(r), limit, (page-1)*limit)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSONWithMeta(w, http.StatusOK, list, &middleware.Meta{Page: page, Limit: limit, Total: total})
+}

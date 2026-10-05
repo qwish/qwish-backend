@@ -295,3 +295,49 @@ func (s *Service) List(ctx context.Context, a Actor, limit, offset int) ([]Notic
 	}
 	return out, rows.Err()
 }
+
+// ReceivedNotice is a notice as its recipient sees it. Read and
+// NotificationID come from the notification that delivered it, so marking that
+// notification read marks the notice read.
+type ReceivedNotice struct {
+	ID              string    `json:"id"`
+	Title           string    `json:"title"`
+	Body            string    `json:"body"`
+	Category        string    `json:"category"`
+	FromName        string    `json:"from_name"`
+	InstitutionName string    `json:"institution_name"`
+	CreatedAt       time.Time `json:"created_at"`
+	Read            bool      `json:"read"`
+	NotificationID  string    `json:"notification_id"`
+}
+
+// Received lists the notices delivered to userID, newest first. Delivery is
+// the record: a notice appears only for the people it was sent to, never for
+// someone who joined the class afterwards.
+func (s *Service) Received(ctx context.Context, userID string, limit, offset int) ([]ReceivedNotice, int, error) {
+	const from = `FROM user_notifications un
+		JOIN notices n ON un.reference = 'notice:' || n.id::text`
+	const where = ` WHERE un.user_id=$1 AND un.kind='notice'`
+	var total int
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) `+from+where, userID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query(ctx, `SELECT n.id, n.title, n.body, n.category,
+		COALESCE(NULLIF(u.display_name,''), u.full_name, ''), i.name, n.created_at, un.read_at IS NOT NULL, un.id
+		`+from+`
+		JOIN users u ON u.id=n.created_by JOIN institutions i ON i.id=n.institution_id`+where+`
+		ORDER BY n.created_at DESC, n.id LIMIT $2 OFFSET $3`, userID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []ReceivedNotice{}
+	for rows.Next() {
+		var n ReceivedNotice
+		if err := rows.Scan(&n.ID, &n.Title, &n.Body, &n.Category, &n.FromName, &n.InstitutionName, &n.CreatedAt, &n.Read, &n.NotificationID); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, n)
+	}
+	return out, total, rows.Err()
+}

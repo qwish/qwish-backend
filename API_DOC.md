@@ -4886,3 +4886,21 @@ and staff/institute-admin invites no longer carry a set-password link. The perso
 and a one-time code; the first sign-in attaches the Supabase identity to the
 pre-created account by verified email. `invite_sent: false` means the account
 exists but the email failed — they can still sign in with email + code.
+
+---
+
+## Student notices
+
+### GET `/users/me/notices?page=1&limit=20`
+Notices delivered to the caller, newest first (`limit` ≤ 50). Delivery is the
+record: a notice appears only for the people it was sent to, never for someone
+who joined the class later.
+
+```json
+{ "data": [{ "id": "…", "title": "Lab on Friday", "body": "Bring your lab coat.",
+             "category": "event", "from_name": "R. Iyer", "institution_name": "Green Valley School",
+             "created_at": "…", "read": false, "notification_id": "…" }],
+  "meta": { "page": 1, "limit": 20, "total": 7 } }
+```
+`category` is `event|test|general`. `read` follows the notification that
+delivered the notice; mark it read with `PATCH /users/me/notifications/{notification_id}/read`.

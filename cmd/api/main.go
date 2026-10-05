@@ -587,6 +587,7 @@ func main() {
 				r.Get("/users/me/insights/weekly", userH.GetMyWeeklyInsights)
 				r.With(mw.RequireUserRecord()).Get("/users/me/insights/breakdown", userH.GetMyInsightsBreakdown)
 				r.Get("/users/me/insights/trend", userH.GetMyScoreTrend)
+				r.Get("/users/me/notices", noticeH.Mine)
 				r.Get("/users/me/learning-summary", learningH.StudentSummary)
 				r.Get("/users/me/assignments", learningH.StudentAssignments)
 				r.With(mw.RequireRole("student")).Get("/users/me/curricula", learningH.StudentCurricula)

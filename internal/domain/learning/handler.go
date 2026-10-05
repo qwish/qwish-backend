@@ -306,12 +306,12 @@ func (h *Handler) TeacherClassSummary(w http.ResponseWriter, r *http.Request) {
 		GROUP BY le.user_id,le.concept_id,c.code,c.title
 	)
 	SELECT concept_id,code,title,COUNT(*) AS students_assessed,
-	       SUM(correct_count),SUM(error_count),SUM(distinct_questions),
+	       SUM(correct_count),SUM(error_count) AS error_evidence,SUM(distinct_questions),
 	       COUNT(*) FILTER(WHERE distinct_questions>=2 AND error_count>correct_count) AS students_needing_support,
-	       MAX(latest_evidence_at)
+	       MAX(latest_evidence_at) AS latest_evidence
 	FROM per_student
 	GROUP BY concept_id,code,title
-	ORDER BY students_needing_support DESC,error_count DESC,latest_evidence_at DESC
+	ORDER BY students_needing_support DESC,error_evidence DESC,latest_evidence DESC
 	LIMIT 100`, middleware.GetInstitutionID(r), middleware.GetUserID(r), classID)
 	if err != nil {
 		middleware.InternalError(w)

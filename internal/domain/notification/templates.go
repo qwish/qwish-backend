@@ -40,6 +40,9 @@ const (
 // markup. Use for every dynamic value that originates from user input.
 func esc(s string) string { return html.EscapeString(s) }
 
+// logoURL is the hosted brand mark (512×512 PNG), shown at 56×56.
+const logoURL = "https://qwish.in/logo.png"
+
 // emailLayout wraps body content in the shared branded shell. preheader is the
 // short snippet shown in inbox previews (hidden in the body). bodyHTML is the
 // inner content, already escaped where it contains dynamic values.
@@ -58,23 +61,23 @@ func emailLayout(preheader, bodyHTML string) string {
   <tr>
     <td align="center" style="padding:32px 16px;">
       <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:100%%;max-width:600px;">
-        <!-- Header / wordmark -->
+        <!-- Header / logo. Alt text is styled as the wordmark for clients that block images. -->
         <tr>
           <td align="center" style="padding:8px 0 24px 0;">
-            <span style="font-family:%[3]s;font-size:26px;font-weight:700;letter-spacing:-0.5px;color:%[4]s;">Qwish<span style="color:%[5]s;">.</span></span>
+            <a href="https://qwish.in" target="_blank" style="text-decoration:none;"><img src="%[9]s" width="56" height="56" alt="Qwish" style="display:block;width:56px;height:56px;border:0;outline:none;text-decoration:none;border-radius:12px;font-family:%[3]s;font-size:26px;font-weight:700;color:%[4]s;"></a>
           </td>
         </tr>
         <!-- Card -->
         <tr>
-          <td style="background:%[6]s;border-radius:20px;box-shadow:rgba(0,0,0,0.04) 0px 2px 6px, rgba(0,0,0,0.06) 0px 4px 12px;padding:40px;font-family:%[3]s;color:%[4]s;">
-%[7]s
+          <td style="background:%[5]s;border-radius:20px;box-shadow:rgba(0,0,0,0.04) 0px 2px 6px, rgba(0,0,0,0.06) 0px 4px 12px;padding:40px;font-family:%[3]s;color:%[4]s;">
+%[6]s
           </td>
         </tr>
         <!-- Footer -->
         <tr>
-          <td align="center" style="padding:24px 16px 8px 16px;font-family:%[3]s;font-size:12px;line-height:18px;color:%[8]s;">
+          <td align="center" style="padding:24px 16px 8px 16px;font-family:%[3]s;font-size:12px;line-height:18px;color:%[7]s;">
             One score. Nationwide visibility.<br>
-            &copy; %[9]d Qwish &nbsp;&middot;&nbsp; <a href="https://qwish.in" style="color:%[8]s;text-decoration:underline;">qwish.in</a><br>
+            &copy; %[8]d Qwish &nbsp;&middot;&nbsp; <a href="https://qwish.in" style="color:%[7]s;text-decoration:underline;">qwish.in</a><br>
             You received this email because you have a Qwish account.
           </td>
         </tr>
@@ -84,15 +87,15 @@ func emailLayout(preheader, bodyHTML string) string {
 </table>
 </body>
 </html>`,
-		preheader,    // 1
-		colorPageBg,  // 2
-		fontStack,    // 3
-		colorText,    // 4
-		colorPrimary, // 5
-		colorCard,    // 6
-		bodyHTML,     // 7
-		colorMuted,   // 8
-		time.Now().Year(),
+		preheader,         // 1
+		colorPageBg,       // 2
+		fontStack,         // 3
+		colorText,         // 4
+		colorCard,         // 5
+		bodyHTML,          // 6
+		colorMuted,        // 7
+		time.Now().Year(), // 8
+		logoURL,           // 9
 	)
 }
 

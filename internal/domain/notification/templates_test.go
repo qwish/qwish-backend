@@ -62,3 +62,14 @@ func TestAnnouncementEmailEscapesAndOnlyLinksHTTP(t *testing.T) {
 		}
 	}
 }
+
+// The header shows the hosted brand logo, sized for email clients, with alt
+// text so a client that blocks images still reads "Qwish".
+func TestEmailLayoutUsesBrandLogo(t *testing.T) {
+	html := emailLayout("pre", "<p>x</p>")
+	for _, want := range []string{`src="https://qwish.in/logo.png"`, `alt="Qwish"`, `width="56"`, `height="56"`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("layout missing %s", want)
+		}
+	}
+}

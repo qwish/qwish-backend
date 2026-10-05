@@ -61,12 +61,28 @@ func (h *Handler) GetLedger(w http.ResponseWriter, r *http.Request) {
 	offset := (page - 1) * limit
 
 	var total int
-	h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM points_ledger WHERE user_id=$1`, userID).Scan(&total)
+	if err := h.db.QueryRow(r.Context(), `SELECT COUNT(*) FROM points_ledger WHERE user_id=$1`, userID).Scan(&total); err != nil {
+		middleware.InternalError(w)
+		return
+	}
 
-	rows, err := h.db.Query(r.Context(),
-		`SELECT id, amount, reason, reference_id, balance_after, expires_at, created_at
-		 FROM points_ledger WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
-		userID, limit, offset)
+	cursorMode := r.URL.Query().Get("pagination") == "cursor" || r.URL.Query().Get("cursor") != ""
+	predicate := ""
+	args := []any{userID, limit + 1, offset}
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		c, err := middleware.DecodeCursor(raw)
+		if err != nil {
+			middleware.BadRequest(w, err.Error())
+			return
+		}
+		predicate = " AND (created_at,id)<($4,$5::uuid)"
+		args = append(args, c.Time, c.ID)
+	}
+	if cursorMode {
+		args[2] = 0
+	}
+	rows, err := h.db.Query(r.Context(), `SELECT id,amount,reason,reference_id,balance_after,expires_at,created_at FROM points_ledger WHERE user_id=$1`+predicate+` ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3`, args...)
+
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -74,25 +90,40 @@ func (h *Handler) GetLedger(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type Entry struct {
-		ID          string     `json:"id"`
-		Amount      int64      `json:"amount"`
-		Reason      string     `json:"reason"`
-		ReferenceID *string    `json:"reference_id,omitempty"`
-		BalanceAfter int64     `json:"balance_after"`
-		ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-		CreatedAt   time.Time  `json:"created_at"`
+		ID           string     `json:"id"`
+		Amount       int64      `json:"amount"`
+		Reason       string     `json:"reason"`
+		ReferenceID  *string    `json:"reference_id,omitempty"`
+		BalanceAfter int64      `json:"balance_after"`
+		ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+		CreatedAt    time.Time  `json:"created_at"`
 	}
 
 	var entries []Entry
 	for rows.Next() {
 		var e Entry
-		rows.Scan(&e.ID, &e.Amount, &e.Reason, &e.ReferenceID, &e.BalanceAfter, &e.ExpiresAt, &e.CreatedAt)
+		if err := rows.Scan(&e.ID, &e.Amount, &e.Reason, &e.ReferenceID, &e.BalanceAfter, &e.ExpiresAt, &e.CreatedAt); err != nil {
+			middleware.InternalError(w)
+			return
+		}
 		entries = append(entries, e)
 	}
 	if entries == nil {
 		entries = []Entry{}
 	}
-	middleware.JSONWithMeta(w, http.StatusOK, entries, &middleware.Meta{Page: page, Limit: limit, Total: total})
+	if err := rows.Err(); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	next := ""
+	if len(entries) > limit {
+		entries = entries[:limit]
+		if cursorMode {
+			last := entries[len(entries)-1]
+			next = middleware.EncodeCursor(last.CreatedAt, last.ID)
+		}
+	}
+	middleware.JSONWithMeta(w, http.StatusOK, entries, &middleware.Meta{Page: page, Limit: limit, Total: total, Cursor: next})
 }
 
 // GET /api/v1/users/me/streak  — handled by streak domain handler

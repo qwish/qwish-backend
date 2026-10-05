@@ -3,6 +3,7 @@ package leaderboard
 import (
 	"context"
 	"fmt"
+	"golang.org/x/sync/singleflight"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,9 +27,11 @@ type cachedPage struct {
 }
 
 type Handler struct {
-	db    *pgxpool.Pool
-	mu    sync.Mutex
-	cache map[string]cachedPage
+	db     *pgxpool.Pool
+	mu     sync.Mutex
+	cache  map[string]cachedPage
+	flight singleflight.Group
+	epoch  uint64
 }
 
 func NewHandler(db *pgxpool.Pool) *Handler {
@@ -185,21 +188,49 @@ func (h *Handler) page(ctx context.Context, scope, instID, domain string, limit,
 	}
 	h.mu.Unlock()
 
-	entries, total, err := h.loadPage(ctx, scope, instID, domain, limit, offset)
-	if err != nil {
-		return nil, 0, err
-	}
-	now := time.Now()
 	h.mu.Lock()
-	// ponytail: whole-map sweep on insert; keys are pages × institutions, small.
-	for k, c := range h.cache {
-		if now.After(c.expires) {
-			delete(h.cache, k)
-		}
-	}
-	h.cache[key] = cachedPage{entries, total, now.Add(pageTTL)}
+	epoch := h.epoch
 	h.mu.Unlock()
-	return entries, total, nil
+	ch := h.flight.DoChan(fmt.Sprintf("%d:%s", epoch, key), func() (any, error) {
+		entries, total, err := h.loadPage(ctx, scope, instID, domain, limit, offset)
+		if err != nil {
+			return nil, err
+		}
+		c := cachedPage{entries, total, time.Now().Add(pageTTL)}
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if h.epoch == epoch {
+			for k, v := range h.cache {
+				if time.Now().After(v.expires) {
+					delete(h.cache, k)
+				}
+			}
+			if len(h.cache) >= 256 {
+				for k := range h.cache {
+					delete(h.cache, k)
+					break
+				}
+			}
+			h.cache[key] = c
+		}
+		return c, nil
+	})
+	select {
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	case result := <-ch:
+		if result.Err != nil {
+			return nil, 0, result.Err
+		}
+		c := result.Val.(cachedPage)
+		return c.entries, c.total, nil
+	}
+}
+func (h *Handler) ClearCache() {
+	h.mu.Lock()
+	h.epoch++
+	h.cache = map[string]cachedPage{}
+	h.mu.Unlock()
 }
 
 func (h *Handler) loadPage(ctx context.Context, scope, instID, domain string, limit, offset int) ([]Entry, int, error) {

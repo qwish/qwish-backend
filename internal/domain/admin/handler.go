@@ -1647,7 +1647,7 @@ func (h *Handler) ListAnnouncements(w http.ResponseWriter, r *http.Request) {
 	// never selected here, so the console rendered them as blank.
 	rows, err := h.db.Query(r.Context(),
 		`SELECT a.id, a.title, a.body, a.cta_label, a.cta_url, a.delivery_types, a.audience,
-		        a.status, a.scheduled_at, a.sent_at, a.created_at,
+		        a.status,a.delivery_state, a.scheduled_at, a.sent_at, a.created_at,
 		        COALESCE(ac.name,''),
 		        COALESCE((SELECT COUNT(*) FROM content_delivery_events e WHERE e.content_kind='announcement' AND e.content_id=a.id AND e.event_type='impression'),0),
 		        COALESCE((SELECT array_agg(ai.institution_id::text) FROM announcement_institutions ai WHERE ai.announcement_id=a.id), ARRAY[]::text[])
@@ -1672,6 +1672,7 @@ func (h *Handler) ListAnnouncements(w http.ResponseWriter, r *http.Request) {
 		DeliveryTypes  []string   `json:"delivery_types"`
 		Audience       string     `json:"audience"`
 		Status         string     `json:"status"`
+		DeliveryState  string     `json:"delivery_state"`
 		ScheduledAt    *time.Time `json:"scheduled_at,omitempty"`
 		SentAt         *time.Time `json:"sent_at,omitempty"`
 		CreatedAt      time.Time  `json:"created_at"`
@@ -1683,7 +1684,7 @@ func (h *Handler) ListAnnouncements(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var a ann
 		rows.Scan(&a.ID, &a.Title, &a.Body, &a.CTALabel, &a.CTAURL, &a.DeliveryTypes, &a.Audience,
-			&a.Status, &a.ScheduledAt, &a.SentAt, &a.CreatedAt, &a.SentBy, &a.Reach, &a.InstitutionIDs)
+			&a.Status, &a.DeliveryState, &a.ScheduledAt, &a.SentAt, &a.CreatedAt, &a.SentBy, &a.Reach, &a.InstitutionIDs)
 		items = append(items, a)
 	}
 	if items == nil {

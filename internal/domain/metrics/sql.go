@@ -121,9 +121,9 @@ func BuildSeriesQuery(sel []MetricDef, w Window, sc Scope) (string, []any) {
 	b.WriteString("FROM buckets b\n")
 
 	for _, k := range keys {
-		s, _ := Source(k)
+		s, selected := seriesSource(k, groups[k], w)
 		var exprs []string
-		for _, m := range groups[k] {
+		for _, m := range selected {
 			exprs = append(exprs, fmt.Sprintf("%s AS %s", m.Expr, m.ID))
 		}
 		b.WriteString(fmt.Sprintf(
@@ -181,9 +181,9 @@ func BuildTotalsQuery(sel []MetricDef, w Window, sc Scope) (string, []any) {
 	// Each source collapses to exactly one row, so cross-joining them composes
 	// the window's totals without any grouping.
 	for i, k := range keys {
-		s, _ := Source(k)
+		s, selected := seriesSource(k, groups[k], w)
 		var exprs []string
-		for _, m := range groups[k] {
+		for _, m := range selected {
 			exprs = append(exprs, fmt.Sprintf("%s AS %s", m.Expr, m.ID))
 		}
 		clause := "FROM"
@@ -211,4 +211,27 @@ func BuildTotalsQuery(sel []MetricDef, w Window, sc Scope) (string, []any) {
 		args = append(args, sc.ID)
 	}
 	return b.String(), args
+}
+
+func seriesSource(key string, selected []MetricDef, w Window) (source, []MetricDef) {
+	s, _ := Source(key)
+	if key != "attempts_done" || w.Gran == GranHour {
+		return s, selected
+	}
+	rewritten := append([]MetricDef(nil), selected...)
+	for i, m := range rewritten {
+		switch m.ID {
+		case "attempts_completed":
+			rewritten[i].Expr = "COALESCE(SUM(qa.completed),0)::bigint"
+		case "avg_score":
+			rewritten[i].Expr = "SUM(qa.score_sum)/NULLIF(SUM(qa.score_count),0)"
+		case "active_users":
+			rewritten[i].Expr = "COUNT(DISTINCT qa.user_id)"
+		default:
+			return s, selected
+		}
+	}
+	s.From = "attempt_daily_metrics qa JOIN users u ON u.id=qa.user_id"
+	s.Where = "qa.completed>0"
+	return s, rewritten
 }

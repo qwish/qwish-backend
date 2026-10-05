@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/domain/scoring"
 )
@@ -98,6 +99,23 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+
+	bonus, err := s.RecordCompletionTx(ctx, tx, userID, cfg, "")
+	if err != nil {
+		return 0, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return bonus, nil
+}
+
+// RecordCompletionTx commits milestone claims and their credit with the attempt.
+func (s *Service) RecordCompletionTx(ctx context.Context, tx pgx.Tx, userID string, cfg *scoring.Config, reference string) (int64, error) {
+	var err error
+	if _, err = tx.Exec(ctx, `SELECT id FROM users WHERE id=$1 FOR NO KEY UPDATE`, userID); err != nil {
+		return 0, err
+	}
 
 	// Ensure the streak row exists, then read it locked together with the
 	// institution timezone. The lock must be taken from streaks itself:
@@ -209,9 +227,16 @@ func (s *Service) RecordCompletion(ctx context.Context, userID string, cfg *scor
 		return 0, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return 0, err
+	if bonus > 0 {
+		_, err = tx.Exec(ctx, `WITH bal AS (
+   UPDATE users SET total_points=total_points+$1,updated_at=now() WHERE id=$2 RETURNING total_points)
+   INSERT INTO points_ledger(user_id,amount,reason,reference_id,balance_after,expires_at)
+   SELECT $2,$1,'streak_bonus',NULLIF($3,'')::uuid,total_points,$4 FROM bal`, bonus, userID, reference, clock().AddDate(0, int(cfg.PointsExpiryMonths), 0))
+		if err != nil {
+			return 0, err
+		}
 	}
+
 	return bonus, nil
 }
 

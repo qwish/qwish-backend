@@ -5,8 +5,11 @@ import (
 	"math"
 	"time"
 
+	"encoding/json"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/jobs"
 )
 
 // Skill rating (the Qwish Score).
@@ -135,14 +138,10 @@ func ApplyRatings(ctx context.Context, tx pgx.Tx, userID string, obs []RatingObs
 		ids[i], deltas[i], seeds[i] = o.QuestionID, d, o.B
 	}
 
-	// Deltas rather than absolute values so concurrent attempts on the same
-	// question never overwrite each other's evidence.
-	if _, err = tx.Exec(ctx,
-		`UPDATE questions q SET rating_b = COALESCE(q.rating_b, t.seed) + t.delta, rating_n = q.rating_n + 1
-		   FROM unnest($1::uuid[], $2::float8[], $3::float8[]) AS t(id, delta, seed)
-		  WHERE q.id = t.id`, ids, deltas, seeds); err != nil {
+	if err = jobs.Enqueue(ctx, tx, "question_calibration", uuid.NewString(), userID, map[string]any{"ids": ids, "deltas": deltas, "seeds": seeds}); err != nil {
 		return 0, 0, err
 	}
+
 	if _, err = tx.Exec(ctx,
 		`INSERT INTO learner_ratings (user_id, theta, sigma, n, score, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, now())
@@ -295,4 +294,24 @@ func BackfillRatings(ctx context.Context, db *pgxpool.Pool) (int, error) {
 		return 0, err
 	}
 	return len(uids), tx.Commit(ctx)
+}
+
+func RegisterJobs(q *jobs.Queue) {
+	q.RegisterTx("question_calibration", func(ctx context.Context, tx pgx.Tx, j jobs.Job) (any, error) {
+		var p struct {
+			IDs    []string  `json:"ids"`
+			Deltas []float64 `json:"deltas"`
+			Seeds  []float64 `json:"seeds"`
+		}
+		if err := json.Unmarshal(j.Payload, &p); err != nil {
+			return nil, err
+		}
+		// Stable lock order across overlapping question sets avoids deadlocks.
+		if _, err := tx.Exec(ctx, `SELECT id FROM questions WHERE id=ANY($1::uuid[]) ORDER BY id FOR NO KEY UPDATE`, p.IDs); err != nil {
+			return nil, err
+		}
+		_, err := tx.Exec(ctx, `UPDATE questions q SET rating_b=COALESCE(q.rating_b,t.seed)+t.delta,rating_n=q.rating_n+1
+   FROM unnest($1::uuid[],$2::float8[],$3::float8[]) t(id,delta,seed) WHERE q.id=t.id`, p.IDs, p.Deltas, p.Seeds)
+		return nil, err
+	})
 }

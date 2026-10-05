@@ -54,6 +54,7 @@ import (
 	"github.com/qwish/backend/internal/domain/upload"
 	"github.com/qwish/backend/internal/domain/user"
 	"github.com/qwish/backend/internal/domain/useremail"
+	"github.com/qwish/backend/internal/jobs"
 	mw "github.com/qwish/backend/internal/middleware"
 	"github.com/qwish/backend/internal/playintegrity"
 	"github.com/qwish/backend/internal/scheduler"
@@ -64,22 +65,29 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	cfg := config.Load()
+
+	pool := db.Connect(cfg.DatabaseURL)
+	defer pool.Close()
+
+	db.RunMigrations(pool)
+	if os.Getenv("MIGRATE_ONLY") == "true" {
+		return
+	}
+	if os.Getenv("BACKFILL_RATINGS") == "true" {
+		if n, err := scoring.BackfillRatings(ctx, pool); err != nil {
+			log.Fatalf("rating backfill failed: %v", err)
+		} else if n > 0 {
+			log.Printf("rating backfill: %d learners", n)
+		}
+		return
+	}
+
 	storageCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	s3Client, err := storage.NewS3Client(storageCtx, cfg)
 	cancel()
 	if err != nil {
 		log.Fatalf("S3 configuration: %v", err)
 	}
-	pool := db.Connect(cfg.DatabaseURL)
-	defer pool.Close()
-
-	db.RunMigrations(pool)
-	if n, err := scoring.BackfillRatings(context.Background(), pool); err != nil {
-		log.Printf("rating backfill failed: %v", err)
-	} else if n > 0 {
-		log.Printf("rating backfill: %d learners", n)
-	}
-
 	// Services
 	authSvc := auth.NewService(pool, cfg)
 	userSvc := user.NewService(pool)
@@ -90,14 +98,21 @@ func main() {
 	attemptSvc := attempt.NewService(pool, quizSvc, streakSvc)
 	pushSvc := push.NewService(pool, cfg.FCMProjectID, cfg.FCMCredentialsJSON)
 	notifSvc := notification.NewService(pool, cfg.ResendAPIKey, cfg.InstituteURL, cfg.SuperAdminURL)
-	notifSvc.SetPusher(func(ctx context.Context, userID, title, body string, data map[string]string) {
-		pushSvc.SendToUser(ctx, userID, push.Payload{Title: title, Body: body, Data: data})
+	notifSvc.SetPusher(func(ctx context.Context, userID, title, body string, data map[string]string) error {
+		return pushSvc.DeliverToUser(ctx, userID, push.Payload{Title: title, Body: body, Data: data})
 	})
 	attemptSvc.SetNotifier(notifSvc)
 	obSessionSvc.SetAttempts(attemptSvc)
 	offlineSvc := offline.NewService(pool)
 	studyGroupSvc := studygroup.NewService(pool)
-	sched := scheduler.New(pool, streakSvc, pushSvc, notifSvc, userSvc)
+	workerPool := db.ConnectWorker(cfg.DatabaseURL)
+	defer workerPool.Close()
+	workerNotif := notification.NewService(workerPool, cfg.ResendAPIKey, cfg.InstituteURL, cfg.SuperAdminURL)
+	workerPush := push.NewService(workerPool, cfg.FCMProjectID, cfg.FCMCredentialsJSON)
+	workerNotif.SetPusher(func(ctx context.Context, userID, title, body string, data map[string]string) error {
+		return workerPush.DeliverToUser(ctx, userID, push.Payload{Title: title, Body: body, Data: data})
+	})
+	sched := scheduler.New(workerPool, streak.NewService(workerPool), workerPush, workerNotif, user.NewService(workerPool))
 
 	// Handlers
 	authH := auth.NewHandler(authSvc)
@@ -170,8 +185,43 @@ func main() {
 	_ = notifSvc
 	_ = scoring.LoadConfig // referenced by services
 
+	// Background traffic has its own connection budget.
+	queue := jobs.New(workerPool)
+	attemptSvc.RegisterJobs(queue)
+	scoring.RegisterJobs(queue)
+	workerNotif.RegisterJobs(queue)
+	quiz.RegisterJobs(queue)
+	sched.RegisterJobs(queue)
+	teacher.NewHandler(workerPool).RegisterGenerationJobs(queue, questionGenerator)
+	responseCache := mw.NewResponseCache()
+	mw.ConfigureDistributedRateLimits(pool)
+	// A session connection carries invalidations and SSE across replicas.
+	go db.Listen(ctx, workerPool, "qwish_cache", func() {
+		responseCache.Clear()
+		leaderboardH.ClearCache()
+		scoring.InvalidateConfigCache()
+		userSvc.ClearRecommendationCache()
+	}, func(_ context.Context, table string) {
+		responseCache.Invalidate(table)
+		switch table {
+		case "users", "institutions", "leaderboard_scores", "enrollments", "group_students":
+			leaderboardH.ClearCache()
+		}
+		switch table {
+		case "users", "quizzes", "questions", "quiz_attempts", "quiz_read_stats", "learner_topic_mastery":
+			userSvc.ClearRecommendationCache()
+		}
+		if table == "point_economy_config" {
+			scoring.InvalidateConfigCache()
+		}
+	})
+	go notifSvc.StartBroadcast(ctx, workerPool)
+	queue.Start(ctx, 3)
+	defer queue.Wait()
 	// Router
 	r := chi.NewRouter()
+	r.Use(responseCache.ClearOnWrite)
+	r.Use(mw.ObserveRequests)
 	r.Use(mw.RequestLog)
 	r.Use(chimw.Recoverer)
 	r.Use(mw.RequestID)
@@ -200,9 +250,9 @@ func main() {
 				w.Header().Set("Vary", "Origin")
 			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Qwish-Client")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Qwish-Client, Idempotency-Key, Prefer, Last-Event-ID")
 			// Browsers hide response headers from scripts unless listed here.
-			w.Header().Set("Access-Control-Expose-Headers", "X-Request-Id, Retry-After, X-RateLimit-Remaining, X-Import-Skipped, Content-Disposition")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Request-Id, Retry-After, X-RateLimit-Remaining, X-Import-Skipped, Content-Disposition, Location")
 			if req.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
 				return
@@ -246,6 +296,7 @@ func main() {
 				r.Use(mw.RequireCronSecret(cfg.CronSecret))
 				r.Get("/quiz-list", quizH.Profile)
 				r.Get("/goroutine-leak", pprof.Handler("goroutineleak").ServeHTTP)
+				r.Get("/operational-metrics", mw.OperationalMetrics(pool, workerPool, responseCache))
 			})
 		}
 
@@ -390,6 +441,14 @@ func main() {
 			})
 		}
 
+		// Generation preserves the existing synchronous contract; callers can opt
+		// into durable 202 jobs using Prefer: respond-async or ?async=true.
+		r.Group(func(r chi.Router) {
+			r.Use(mw.Authenticate(cfg.SupabaseJWTSecret, cfg.SupabaseURL, pool))
+			r.Use(mw.RequireUserRecord(), mw.RequireRole("teacher"), mw.RateLimitByUser(20, time.Hour))
+			r.Use(mw.WriteDeadline(100*time.Second), chimw.Timeout(95*time.Second))
+			r.Post("/teacher/questions/generate", teacherH.GenerateQuestions(questionGenerator))
+		})
 		// Normal endpoints subject to 30s timeout
 		r.Group(func(r chi.Router) {
 			r.Use(chimw.Timeout(30 * time.Second))
@@ -399,7 +458,7 @@ func main() {
 				// Public + unauthenticated registration — rate-limit per IP.
 				r.With(mw.RateLimit(5, 10*time.Minute)).Post("/institution", onboardingH.RegisterInstitution)
 				r.Get("/institution/status", onboardingH.CheckStatus)
-				r.Get("/taxonomy", obSessionH.Taxonomy)
+				r.Get("/taxonomy", responseCache.Wrap(300*time.Second, obSessionH.Taxonomy))
 
 				// Pre-signup calibration. The opaque session bearer credential is
 				// carried in Authorization, never in a loggable URL path.
@@ -413,7 +472,7 @@ func main() {
 			})
 
 			// ------ Public Avatars (deterministic SVG, no auth) ------
-			r.Get("/avatars/options", avatarH.Meta)
+			r.Get("/avatars/options", responseCache.Wrap(300*time.Second, avatarH.Meta))
 			r.Get("/avatars/{seed}", avatarH.Get)
 
 			// ------ Public Contact Form ------
@@ -530,7 +589,7 @@ func main() {
 				r.With(mw.RequireUserRecord()).Get("/users/me", userH.GetMe)
 				r.Patch("/users/me", userH.UpdateMe)
 				r.Delete("/users/me", userH.DeleteMe)
-				r.Get("/users/me/stats", userH.GetMyStats)
+				r.Get("/users/me/stats", responseCache.Wrap(10*time.Second, userH.GetMyStats))
 				r.With(mw.RateLimitByUser(30, time.Minute)).Get("/users/me/story-stats", userH.GetMyStoryStats)
 				r.Get("/users/me/sign-ins", authH.MySignIns)
 				r.With(mw.RequireUserRecord(), mw.RateLimitByUser(30, time.Minute)).Get("/users/me/badges", userH.GetMyBadges)
@@ -541,8 +600,8 @@ func main() {
 				r.With(mw.RequireUserRecord()).Get("/users/me/streak", streakH.GetStreak)
 				r.With(mw.RequireUserRecord(), mw.RateLimitByUser(120, time.Minute)).Get("/users/me/rank", userH.GetMyRank)
 				r.Get("/users/me/profile-views", userH.GetMyProfileViews)
-				r.Get("/users/me/milestones", userH.GetMyMilestones)
-				r.Get("/users/me/education", userH.GetMyEducation)
+				r.Get("/users/me/milestones", responseCache.Wrap(10*time.Second, userH.GetMyMilestones))
+				r.Get("/users/me/education", responseCache.Wrap(30*time.Second, userH.GetMyEducation))
 				r.Post("/users/me/education", userH.AddMyEducation)
 				r.Delete("/users/me/education/{id}", userH.DeleteMyEducation)
 				r.Get("/users/me/notifications", notifH.List)
@@ -551,7 +610,7 @@ func main() {
 				r.Patch("/users/me/notifications/{id}/read", notifH.MarkRead)
 				r.With(mw.RequireUserRecord()).Post("/users/me/devices", pushH.Register)
 				r.With(mw.RequireUserRecord()).Delete("/users/me/devices/{token}", pushH.Unregister)
-				r.Get("/users/me/skills", userH.GetMySkills)
+				r.Get("/users/me/skills", responseCache.Wrap(30*time.Second, userH.GetMySkills))
 				r.Post("/users/me/skills", userH.AddMySkill)
 				r.Delete("/users/me/skills/{skill}", userH.DeleteMySkill)
 
@@ -570,7 +629,7 @@ func main() {
 				r.With(mw.RequireUserRecord()).Get("/users/me/content", userH.GetMyAppContent)
 				r.With(mw.RequireUserRecord(), mw.RateLimitByUser(240, time.Minute)).Post("/users/me/content/{kind}/{contentId}/events", userH.RecordMyContentEvent)
 				r.With(mw.RequireUserRecord()).Get("/users/me/quiz-pick", userH.PickMyQuiz)
-				r.Get("/users/me/learning-preferences", userH.GetMyLearningPreferences)
+				r.Get("/users/me/learning-preferences", responseCache.Wrap(30*time.Second, userH.GetMyLearningPreferences))
 				r.Patch("/users/me/learning-preferences", userH.UpdateMyLearningPreferences)
 				r.Get("/users/me/report-card", userH.GetMyReportCardPDF)
 				r.Get("/users/{userId}/profile", userH.GetPublicProfile)
@@ -584,11 +643,11 @@ func main() {
 				r.Patch("/users/me/notification-preferences", userH.UpdateMyNotifPrefs)
 
 				// Weekly score insights
-				r.Get("/users/me/insights/weekly", userH.GetMyWeeklyInsights)
-				r.With(mw.RequireUserRecord()).Get("/users/me/insights/breakdown", userH.GetMyInsightsBreakdown)
-				r.Get("/users/me/insights/trend", userH.GetMyScoreTrend)
+				r.Get("/users/me/insights/weekly", responseCache.Wrap(30*time.Second, userH.GetMyWeeklyInsights))
+				r.With(mw.RequireUserRecord()).Get("/users/me/insights/breakdown", responseCache.Wrap(30*time.Second, userH.GetMyInsightsBreakdown))
+				r.Get("/users/me/insights/trend", responseCache.Wrap(30*time.Second, userH.GetMyScoreTrend))
 				r.Get("/users/me/notices", noticeH.Mine)
-				r.Get("/users/me/learning-summary", learningH.StudentSummary)
+				r.Get("/users/me/learning-summary", responseCache.Wrap(15*time.Second, learningH.StudentSummary))
 				r.Get("/users/me/assignments", learningH.StudentAssignments)
 				r.With(mw.RequireRole("student")).Get("/users/me/curricula", learningH.StudentCurricula)
 
@@ -639,8 +698,8 @@ func main() {
 				// Quiz browser (student / teacher)
 				// Must precede /quizzes/{quizId}, otherwise chi treats "featured"
 				// as a quiz id.
-				r.Get("/quizzes/featured", userH.GetFeaturedQuizzes)
-				r.Get("/quizzes", quizH.List)
+				r.Get("/quizzes/featured", responseCache.Wrap(30*time.Second, userH.GetFeaturedQuizzes))
+				r.Get("/quizzes", responseCache.Wrap(10*time.Second, quizH.List))
 				r.Get("/quizzes/{quizId}", quizH.Get)
 				r.Post("/quizzes/{quizId}/save", quizH.Save)
 				r.Delete("/quizzes/{quizId}/save", quizH.Unsave)
@@ -686,13 +745,13 @@ func main() {
 					r.Get("/notices/audiences", noticeH.Audiences)
 					r.With(mw.RateLimitByUser(30, time.Hour)).Post("/notices", noticeH.Send)
 					r.Get("/notices", noticeH.List)
-					r.Get("/overview", teacherH.Overview)
-					r.Get("/attention", teacherH.Attention)
+					r.Get("/overview", responseCache.Wrap(15*time.Second, teacherH.Overview))
+					r.Get("/attention", responseCache.Wrap(10*time.Second, teacherH.Attention))
 					r.Get("/feature-onboarding", featureOnboardingH.List)
 					r.Put("/feature-onboarding/{featureKey}", featureOnboardingH.Update)
-					r.Get("/quizzes/taxonomy", quizH.GetTaxonomy)
+					r.Get("/quizzes/taxonomy", responseCache.Wrap(300*time.Second, quizH.GetTaxonomy))
 					r.Get("/quizzes/favorites", quizH.TeacherListFavorites)
-					r.Get("/quizzes", quizH.TeacherList)
+					r.Get("/quizzes", responseCache.Wrap(10*time.Second, quizH.TeacherList))
 					r.Post("/quizzes", quizH.TeacherCreate)
 					r.Put("/quizzes/{quizId}/favorite", quizH.TeacherFavorite)
 					r.Delete("/quizzes/{quizId}/favorite", quizH.TeacherUnfavorite)
@@ -703,8 +762,8 @@ func main() {
 					r.Post("/quizzes/{quizId}/unpublish", quizH.TeacherUnpublish)
 					r.Get("/quizzes/{quizId}/results", quizH.TeacherResults)
 					r.Get("/quizzes/{quizId}/response-insights", learningH.QuizInsights)
-					r.Get("/learning-summary", learningH.TeacherClassSummary)
-					r.Get("/class-learning-matrix", learningH.TeacherClassMatrix)
+					r.Get("/learning-summary", responseCache.Wrap(15*time.Second, learningH.TeacherClassSummary))
+					r.Get("/class-learning-matrix", responseCache.Wrap(15*time.Second, learningH.TeacherClassMatrix))
 					r.Post("/assignments", learningH.CreateAssignment)
 					r.Get("/assignments", learningH.ListAssignments)
 					r.Get("/follow-up-outcomes", learningH.FollowUpOutcomes)
@@ -723,7 +782,7 @@ func main() {
 					r.Get("/students/{userId}/attempts/{attemptId}", teacherH.StudentAttempt)
 					r.Post("/students/{userId}/parent-summaries", teacherH.CreateParentSummary(cfg.TeacherURL))
 					r.Get("/question-bank", teacherH.QuestionBank)
-					r.With(mw.RateLimitByUser(20, time.Hour)).Post("/questions/generate", teacherH.GenerateQuestions(questionGenerator))
+					r.Get("/questions/generation-jobs/{jobId}", teacherH.GenerationJob)
 					r.Get("/preferences", teacherH.GetPreferences)
 					r.Put("/preferences", teacherH.PutPreferences)
 					r.Get("/notification-preferences", teacherH.GetNotificationPrefs)
@@ -756,8 +815,8 @@ func main() {
 					r.Get("/classes/{classId}", teacherH.GetClass)
 					r.Post("/classes/{classId}/end", teacherH.EndClass)
 					r.Post("/classes/{classId}/reopen", teacherH.ReopenClass)
-					r.Get("/reports/quiz-analytics", teacherH.QuizAnalyticsReport)
-					r.Get("/reports/student-performance", teacherH.StudentPerformanceReport)
+					r.Get("/reports/quiz-analytics", responseCache.Wrap(30*time.Second, teacherH.QuizAnalyticsReport))
+					r.Get("/reports/student-performance", responseCache.Wrap(30*time.Second, teacherH.StudentPerformanceReport))
 					r.Get("/topic-requests", topicH.TeacherList)
 					r.Patch("/topic-requests/{requestId}", topicH.TeacherUpdate)
 
@@ -765,11 +824,11 @@ func main() {
 					// filters on always comes from the token.
 					// /metrics/catalog precedes /metrics so chi does not read
 					// "catalog" as a wildcard segment.
-					r.Get("/metrics/catalog", teacherMetricsH.Catalog)
-					r.Get("/metrics", teacherMetricsH.Metrics)
-					r.Get("/distributions", teacherMetricsH.Distributions)
-					r.Get("/activity-heatmap", teacherMetricsH.InstitutionActivity)
-					r.Get("/points-liability", teacherMetricsH.PointsLiability)
+					r.Get("/metrics/catalog", responseCache.Wrap(300*time.Second, teacherMetricsH.Catalog))
+					r.Get("/metrics", responseCache.Wrap(30*time.Second, teacherMetricsH.Metrics))
+					r.Get("/distributions", responseCache.Wrap(30*time.Second, teacherMetricsH.Distributions))
+					r.Get("/activity-heatmap", responseCache.Wrap(30*time.Second, teacherMetricsH.InstitutionActivity))
+					r.Get("/points-liability", responseCache.Wrap(30*time.Second, teacherMetricsH.PointsLiability))
 
 					// Dashboard layouts — private to the calling user.
 					// /order precedes {layoutId} so chi does not capture
@@ -806,17 +865,17 @@ func main() {
 					r.With(mw.RateLimitByUser(30, time.Hour)).Post("/notices", noticeH.Send)
 					r.Get("/notices", noticeH.List)
 					portfolioH.InstitutionRoutes(r)
-					r.Get("/overview", institutionH.Overview)
-					r.Get("/classes/attention", institutionH.ClassAttention)
-					r.Get("/classes/{classId}/attention", institutionH.ClassStudentsAttention)
-					r.Get("/learning-summary", learningH.InstitutionSummary)
-					r.Get("/learning-summary/scoped", learningH.InstitutionScopedSummary)
-					r.Get("/support-summary", learningH.InstitutionSupportSummary)
+					r.Get("/overview", responseCache.Wrap(15*time.Second, institutionH.Overview))
+					r.Get("/classes/attention", responseCache.Wrap(10*time.Second, institutionH.ClassAttention))
+					r.Get("/classes/{classId}/attention", responseCache.Wrap(10*time.Second, institutionH.ClassStudentsAttention))
+					r.Get("/learning-summary", responseCache.Wrap(15*time.Second, learningH.InstitutionSummary))
+					r.Get("/learning-summary/scoped", responseCache.Wrap(15*time.Second, learningH.InstitutionScopedSummary))
+					r.Get("/support-summary", responseCache.Wrap(15*time.Second, learningH.InstitutionSupportSummary))
 					r.Get("/students", institutionH.ListStudents)
 					r.Get("/students/ids", institutionH.ListStudentIDs)
 					r.Get("/students/find", institutionH.FindStudents)
 					r.Get("/students/explain", institutionH.ExplainStudent)
-					r.Get("/action-centre", institutionH.ActionCentre)
+					r.Get("/action-centre", responseCache.Wrap(10*time.Second, institutionH.ActionCentre))
 					r.Put("/action-centre/owner", institutionH.SetActionOwner)
 					// Enrollment-addressed routes stay off /students/... so they
 					// cannot collide with the existing /students/{userId}/status.
@@ -847,16 +906,16 @@ func main() {
 					r.Delete("/groups/{groupId}/students/{userId}", institutionH.RemoveStudentFromGroup)
 					r.Post("/groups/{groupId}/teachers", institutionH.AddTeacherToGroup)
 					r.Delete("/groups/{groupId}/teachers/{userId}", institutionH.RemoveTeacherFromGroup)
-					r.Get("/quizzes", quizH.InstitutionList)
+					r.Get("/quizzes", responseCache.Wrap(10*time.Second, quizH.InstitutionList))
 					r.Get("/quizzes/{quizId}", quizH.Get)
 					r.Get("/topic-requests", topicH.TeacherList)
 					r.Patch("/topic-requests/{requestId}", topicH.InstitutionUpdate)
 					r.Get("/topic-requests/counts", topicH.Counts)
-					r.Get("/reports/student-performance", institutionH.StudentPerformanceReport)
-					r.Get("/reports/teacher-activity", institutionH.TeacherActivityReport)
-					r.Get("/reports/quiz-analytics", institutionH.QuizAnalyticsReport)
-					r.Get("/reports/streak-health", institutionH.StreakHealthReport)
-					r.Get("/reports/points-summary", institutionH.PointsSummaryReport)
+					r.Get("/reports/student-performance", responseCache.Wrap(30*time.Second, institutionH.StudentPerformanceReport))
+					r.Get("/reports/teacher-activity", responseCache.Wrap(30*time.Second, institutionH.TeacherActivityReport))
+					r.Get("/reports/quiz-analytics", responseCache.Wrap(30*time.Second, institutionH.QuizAnalyticsReport))
+					r.Get("/reports/streak-health", responseCache.Wrap(30*time.Second, institutionH.StreakHealthReport))
+					r.Get("/reports/points-summary", responseCache.Wrap(30*time.Second, institutionH.PointsSummaryReport))
 					r.Get("/quizzes/{quizId}/results", institutionH.QuizResults)
 					r.Get("/settings", institutionH.GetSettings)
 					r.Patch("/settings", institutionH.UpdateSettings)
@@ -869,11 +928,11 @@ func main() {
 					// the resolver — there is no institution_id parameter here.
 					// /metrics/catalog precedes /metrics so chi does not read
 					// "catalog" as a wildcard segment.
-					r.Get("/metrics/catalog", instMetricsH.Catalog)
-					r.Get("/metrics", instMetricsH.Metrics)
-					r.Get("/distributions", instMetricsH.Distributions)
-					r.Get("/activity-heatmap", instMetricsH.InstitutionActivity)
-					r.Get("/points-liability", instMetricsH.PointsLiability)
+					r.Get("/metrics/catalog", responseCache.Wrap(300*time.Second, instMetricsH.Catalog))
+					r.Get("/metrics", responseCache.Wrap(30*time.Second, instMetricsH.Metrics))
+					r.Get("/distributions", responseCache.Wrap(30*time.Second, instMetricsH.Distributions))
+					r.Get("/activity-heatmap", responseCache.Wrap(30*time.Second, instMetricsH.InstitutionActivity))
+					r.Get("/points-liability", responseCache.Wrap(30*time.Second, instMetricsH.PointsLiability))
 
 					// Dashboard layouts — private to the calling user, so no
 					// extra role gate. /order precedes {layoutId} so chi does
@@ -892,17 +951,17 @@ func main() {
 					r.Use(mw.TrackAdminSessions(pool))
 
 					// Overview (all roles)
-					r.Get("/overview", adminH.Overview)
+					r.Get("/overview", responseCache.Wrap(15*time.Second, adminH.Overview))
 					r.Get("/activity-feed", adminH.ActivityFeed)
 
 					// Analytics (all roles, read-only).
 					// /metrics/catalog is registered before /metrics so chi does
 					// not read "catalog" as a wildcard segment.
-					r.Get("/metrics/catalog", metricsH.Catalog)
-					r.Get("/metrics", metricsH.Metrics)
-					r.Get("/distributions", metricsH.Distributions)
+					r.Get("/metrics/catalog", responseCache.Wrap(300*time.Second, metricsH.Catalog))
+					r.Get("/metrics", responseCache.Wrap(30*time.Second, metricsH.Metrics))
+					r.Get("/distributions", responseCache.Wrap(30*time.Second, metricsH.Distributions))
 					r.Get("/analytics/trends", analyticsH.Trends)
-					r.Get("/points-liability", metricsH.PointsLiability)
+					r.Get("/points-liability", responseCache.Wrap(30*time.Second, metricsH.PointsLiability))
 
 					// Dashboard layouts — private to the calling admin, so no
 					// extra role gate. /order precedes {layoutId} so chi does not
@@ -953,9 +1012,9 @@ func main() {
 					// "moderation-queue" as a quiz id.
 					r.Get("/quizzes/moderation-queue", adminH.ModerationQueue)
 					r.Get("/quizzes", adminH.ListQuizzes)
-					r.With(mw.RequireRole("super_admin")).Get("/featured-quizzes", userH.GetFeaturedQuizzes)
+					r.With(mw.RequireRole("super_admin")).Get("/featured-quizzes", responseCache.Wrap(30*time.Second, userH.GetFeaturedQuizzes))
 					r.With(mw.RequireRole("super_admin")).Put("/featured-quizzes", userH.SetFeaturedQuizzes)
-					r.Get("/quizzes/taxonomy", quizH.GetTaxonomy)
+					r.Get("/quizzes/taxonomy", responseCache.Wrap(300*time.Second, quizH.GetTaxonomy))
 					// Platform-authored quizzes are always attributed to the Qwish
 					// system account. The service owns author, visibility, publish
 					// status, scheduling and question-delivery validation.

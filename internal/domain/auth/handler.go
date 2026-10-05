@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/qwish/backend/internal/jsonx"
 	"github.com/qwish/backend/internal/middleware"
@@ -162,17 +163,18 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		// Organisation policy: once passkeys are required, an administrator who
 		// has one must use it. Admins without a passkey can still use a code so
 		// they can enrol one — refusing them would lock them out.
-		if h.svc.PasskeyRequiredForAdmin(r.Context(), uid) {
+		required, policyErr := h.svc.PasskeyRequiredForAdmin(r.Context(), uid)
+		if policyErr != nil {
+			middleware.Error(w, http.StatusServiceUnavailable, "AUTH_UNAVAILABLE", "authentication is temporarily unavailable")
+			return
+		}
+		if required {
 			middleware.Error(w, http.StatusForbidden, "PASSKEY_REQUIRED",
 				"your organisation requires administrators to sign in with a passkey")
 			return
 		}
 
-		// A teacher awaiting institution verification cannot sign in yet. Return
-		// 403 without tokens so the client can't enter the dashboard.
-		if existingUser.Role == "teacher" && existingUser.Status == "pending" {
-			middleware.Error(w, http.StatusForbidden, "PENDING_VERIFICATION",
-				"your teacher account is awaiting verification by your institution")
+		if !middleware.AuthorizeUserStatus(w, existingUser.Role, existingUser.Status) {
 			return
 		}
 		// The institution has to travel with the sign-in: the client caches
@@ -200,7 +202,12 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		// Organisation policy: once passkeys are required, an administrator who
 		// has one must use it. Admins without a passkey can still use a code so
 		// they can enrol one — refusing them would lock them out.
-		if h.svc.PasskeyRequiredForAdmin(r.Context(), uid) {
+		required, policyErr := h.svc.PasskeyRequiredForAdmin(r.Context(), uid)
+		if policyErr != nil {
+			middleware.Error(w, http.StatusServiceUnavailable, "AUTH_UNAVAILABLE", "authentication is temporarily unavailable")
+			return
+		}
+		if required {
 			middleware.Error(w, http.StatusForbidden, "PASSKEY_REQUIRED",
 				"your organisation requires administrators to sign in with a passkey")
 			return
@@ -212,7 +219,9 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		case "pending", "invite_failed":
 			// First successful OTP = invite accepted. Promote to active so the
 			// admin isn't blocked before reaching the middleware that would.
-			h.svc.ActivateAdmin(r.Context(), admin.ID)
+			if !h.activateAdminForLogin(w, r, admin.ID) {
+				return
+			}
 		default: // suspended (deleted rows excluded by GetAdminForLogin)
 			middleware.Error(w, http.StatusForbidden, "ACCOUNT_SUSPENDED", "account is suspended")
 			return
@@ -436,11 +445,31 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		middleware.Error(w, http.StatusUnauthorized, "INVALID_TOKEN", "invalid or expired refresh token")
+		return
 	}
 
 	authResp, err := h.svc.SupabaseRefresh(r.Context(), req.RefreshToken)
 	if err != nil {
 		middleware.Error(w, http.StatusUnauthorized, "INVALID_TOKEN", "invalid or expired refresh token")
+		return
+	}
+
+	if u, lookupErr := h.svc.GetUserBySupabaseUID(r.Context(), authResp.User.ID); lookupErr == nil {
+		if !middleware.AuthorizeUserStatus(w, u.Role, u.Status) {
+			return
+		}
+	} else if !errors.Is(lookupErr, pgx.ErrNoRows) {
+		middleware.Error(w, http.StatusServiceUnavailable, "AUTH_UNAVAILABLE", "authentication is temporarily unavailable")
+		return
+	}
+	required, policyErr := h.svc.PasskeyRequiredForAdmin(r.Context(), authResp.User.ID)
+	if policyErr != nil {
+		middleware.Error(w, http.StatusServiceUnavailable, "AUTH_UNAVAILABLE", "authentication is temporarily unavailable")
+		return
+	}
+	if required {
+		middleware.Error(w, http.StatusForbidden, "PASSKEY_REQUIRED", "sign in with a passkey")
 		return
 	}
 
@@ -516,4 +545,18 @@ func (h *Handler) UpdateReferralCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	middleware.JSON(w, http.StatusOK, map[string]string{"message": "institution updated"})
+}
+
+// A stale login lookup must not reactivate an account suspended concurrently.
+func (h *Handler) activateAdminForLogin(w http.ResponseWriter, r *http.Request, id string) bool {
+	activated, err := h.svc.ActivateAdmin(r.Context(), id)
+	if err != nil {
+		middleware.Error(w, http.StatusServiceUnavailable, "AUTH_UNAVAILABLE", "authentication is temporarily unavailable")
+		return false
+	}
+	if !activated {
+		middleware.Error(w, http.StatusForbidden, "ACCOUNT_UNAVAILABLE", "account status changed; sign in again")
+		return false
+	}
+	return true
 }

@@ -7,12 +7,14 @@ import (
 	"log"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/domain/notification"
 	"github.com/qwish/backend/internal/domain/push"
 	"github.com/qwish/backend/internal/domain/scoring"
 	"github.com/qwish/backend/internal/domain/streak"
 	"github.com/qwish/backend/internal/domain/user"
+	"github.com/qwish/backend/internal/jobs"
 )
 
 type Scheduler struct {
@@ -31,54 +33,89 @@ func New(db *pgxpool.Pool, streakSvc *streak.Service, pushSvc *push.Service, not
 // out notification/email channels. The conditional UPDATE is the delivery
 // claim: concurrent cron runs cannot claim the same announcement twice.
 func (s *Scheduler) DispatchAnnouncements(ctx context.Context) error {
-	rows, err := s.db.Query(ctx, `SELECT id, title, body, cta_label, cta_url, delivery_types, audience
-		FROM announcements WHERE status='scheduled' AND (scheduled_at IS NULL OR scheduled_at<=now())
-		ORDER BY COALESCE(scheduled_at,created_at) LIMIT 25`)
-	if err != nil {
+	if err := s.reconcileAnnouncements(ctx); err != nil {
 		return err
 	}
-	type due struct {
-		id, title, body, audience string
-		ctaLabel, ctaURL          *string
-		channels                  []string
-	}
-	items := []due{}
-	for rows.Next() {
-		var a due
-		if err := rows.Scan(&a.id, &a.title, &a.body, &a.ctaLabel, &a.ctaURL, &a.channels, &a.audience); err != nil {
-			rows.Close()
-			return err
-		}
-		items = append(items, a)
-	}
-	rows.Close()
-	for _, a := range items {
-		tag, err := s.db.Exec(ctx, `UPDATE announcements SET status='sent',sent_at=now() WHERE id=$1 AND status='scheduled'`, a.id)
+	for range 25 {
+		claimed, err := s.dispatchAnnouncement(ctx)
 		if err != nil {
 			return err
 		}
-		if tag.RowsAffected() == 0 {
-			continue
-		}
-		recipients, err := s.announcementRecipients(ctx, a.id, a.audience)
-		if err != nil {
-			return err
-		}
-		for _, recipient := range recipients {
-			for _, channel := range a.channels {
-				switch channel {
-				case "in_app_notification":
-					s.notifSvc.Emit(ctx, recipient.id, "announcement", a.title, a.body, notification.WithIcon("notifications"), notification.WithColor("indigo"), notification.WithReference(a.id))
-				case "email":
-					body := notification.AnnouncementEmailHTML(a.title, a.body, a.ctaLabel, a.ctaURL)
-					if err := s.notifSvc.SendEmail(ctx, recipient.email, a.title, body, "announcement:"+a.id); err != nil {
-						log.Printf("[announcement] email %s: %v", a.id, err)
-					}
-				}
-			}
+		if !claimed {
+			return nil
 		}
 	}
 	return nil
+}
+
+type announcementDelivery struct{ ID, UserID, Title, Body string }
+
+func (s *Scheduler) dispatchAnnouncement(ctx context.Context) (bool, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(context.Background())
+	var id, title, body, audience string
+	var ctaLabel, ctaURL *string
+	var channels []string
+	err = tx.QueryRow(ctx, `SELECT id,title,body,cta_label,cta_url,delivery_types,audience FROM announcements
+ WHERE status='scheduled' AND (scheduled_at IS NULL OR scheduled_at<=now()) ORDER BY COALESCE(scheduled_at,created_at),id FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&id, &title, &body, &ctaLabel, &ctaURL, &channels, &audience)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	// Set-based fanout stores all recipient jobs before committing the claim.
+	recipientSQL := `SELECT u.id,u.email FROM users u LEFT JOIN institutions i ON i.id=u.institution_id
+ WHERE u.status='active' AND u.deleted_at IS NULL AND (
+ $2='all' OR ($2='students' AND u.role='student') OR ($2='teachers' AND u.role='teacher') OR
+ ($2='institution' AND EXISTS(SELECT 1 FROM announcement_institutions ai WHERE ai.announcement_id=$1 AND (ai.institution_id=u.institution_id OR EXISTS(SELECT 1 FROM enrollments m WHERE m.user_id=u.id AND m.institution_id=ai.institution_id AND m.status IN ('active','suspended'))))) OR
+ ($2='country' AND lower(COALESCE(i.onboarding_country,'')) IN ('india','in')))`
+	for _, channel := range channels {
+		switch channel {
+		case "in_app_notification":
+			_, err = tx.Exec(ctx, `INSERT INTO background_jobs(kind,dedupe_key,owner_id,payload)
+    SELECT 'announcement_notification',$1::text||':'||r.id::text,r.id::text,
+    jsonb_build_object('ID',$1::text,'UserID',r.id::text,'Title',$3::text,'Body',$4::text)
+    FROM (`+recipientSQL+`) r ON CONFLICT(kind,dedupe_key) DO NOTHING`, id, audience, title, body)
+		case "email":
+			html := notification.AnnouncementEmailHTML(title, body, ctaLabel, ctaURL)
+			_, err = tx.Exec(ctx, `INSERT INTO background_jobs(kind,dedupe_key,owner_id,payload)
+    SELECT 'email','announcement:'||$1::text||':'||r.id::text,r.id::text,
+    jsonb_build_object('to',r.email,'subject',$3::text,'html',$4::text,'reference','announcement:'||$1::text)
+    FROM (`+recipientSQL+`) r ON CONFLICT(kind,dedupe_key) DO NOTHING`, id, audience, title, html)
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+	if _, err = tx.Exec(ctx, `UPDATE announcements SET status='sent',sent_at=now(),delivery_state='dispatching' WHERE id=$1`, id); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
+}
+func (s *Scheduler) reconcileAnnouncements(ctx context.Context) error {
+	_, err := s.db.Exec(ctx, `UPDATE announcements a SET delivery_state=CASE WHEN EXISTS(
+ SELECT 1 FROM background_jobs j WHERE (j.dedupe_key LIKE 'announcement:'||a.id::text||':%' OR (j.kind='announcement_notification' AND j.payload->>'ID'=a.id::text) OR (j.kind='push' AND j.payload->'data'->>'reference'=a.id::text)) AND j.state='failed') THEN 'failed' ELSE 'completed' END
+ WHERE a.delivery_state='dispatching' AND NOT EXISTS(
+ SELECT 1 FROM background_jobs j WHERE (j.dedupe_key LIKE 'announcement:'||a.id::text||':%' OR (j.kind='announcement_notification' AND j.payload->>'ID'=a.id::text) OR (j.kind='push' AND j.payload->'data'->>'reference'=a.id::text)) AND j.state IN ('pending','running'))`)
+	return err
+}
+func (s *Scheduler) RegisterJobs(q *jobs.Queue) {
+	q.RegisterTx("announcement_notification", func(ctx context.Context, tx pgx.Tx, j jobs.Job) (any, error) {
+		var p announcementDelivery
+		if err := json.Unmarshal(j.Payload, &p); err != nil {
+			return nil, err
+		}
+		var deliver bool
+		err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM announcements a JOIN users u ON u.id::text=$2 WHERE a.id::text=$1 AND a.status='sent' AND u.status='active' AND u.deleted_at IS NULL)`, p.ID, p.UserID).Scan(&deliver)
+		if err != nil || !deliver {
+			return nil, err
+		}
+		return nil, s.notifSvc.EmitTx(ctx, tx, p.UserID, "announcement", p.Title, p.Body, notification.WithIcon("notifications"), notification.WithColor("indigo"), notification.WithReference(p.ID))
+	})
 }
 
 type announcementRecipient struct{ id, email string }
@@ -113,6 +150,19 @@ func (s *Scheduler) ExpirePoints(ctx context.Context) error {
 		return err
 	}
 
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.Background())
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('qwish_expire_points'))`); err != nil {
+		return err
+	}
+	// Read balances only after locking affected users; concurrent awards cannot
+	// leave expiry ledger balances based on an outdated snapshot.
+	if _, err = tx.Exec(ctx, `SELECT u.id FROM users u WHERE EXISTS(SELECT 1 FROM points_ledger pl WHERE pl.user_id=u.id AND pl.amount>0 AND pl.expires_at<=now() AND NOT EXISTS(SELECT 1 FROM points_ledger e WHERE e.reference_id=pl.id AND e.reason='expiry')) ORDER BY u.id FOR NO KEY UPDATE OF u`); err != nil {
+		return err
+	}
 	// Expire every due ledger entry in one statement. This was a read followed by
 	// three round trips per expiring row — on a nightly sweep over the whole
 	// ledger that is thousands of sequential exchanges.
@@ -123,7 +173,7 @@ func (s *Scheduler) ExpirePoints(ctx context.Context) error {
 	// take what the first one left, and balance_after stays a truthful running
 	// figure rather than each row independently reading the same starting value.
 	expiry := time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0)
-	ct, err := s.db.Exec(ctx, `
+	ct, err := tx.Exec(ctx, `
 		WITH due AS (
 		  SELECT pl.id, pl.user_id, pl.amount,
 		         u.total_points,
@@ -157,6 +207,9 @@ func (s *Scheduler) ExpirePoints(ctx context.Context) error {
 		return err
 	}
 
+	if err = tx.Commit(ctx); err != nil {
+		return err
+	}
 	log.Printf("[cron] expire-points done (%d entries expired)", ct.RowsAffected())
 	return nil
 }

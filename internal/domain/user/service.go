@@ -2,7 +2,9 @@ package user
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"github.com/qwish/backend/internal/cache"
 	"sort"
 	"time"
 
@@ -25,11 +27,12 @@ var (
 const MinLearningTopics = 10
 
 type Service struct {
-	db *pgxpool.Pool
+	db              *pgxpool.Pool
+	recommendations *cache.Cache[[]RecommendedQuiz]
 }
 
 func NewService(db *pgxpool.Pool) *Service {
-	return &Service{db: db}
+	return &Service{db: db, recommendations: cache.New[[]RecommendedQuiz](256)}
 }
 
 type Profile struct {
@@ -454,7 +457,7 @@ func (s *Service) GetAttempts(ctx context.Context, userID string, page, limit in
 		 FROM quiz_attempts qa
 		 JOIN quizzes q ON q.id = qa.quiz_id
 		 WHERE qa.user_id=$1 AND qa.status='completed' AND ($2='' OR q.type=$2) AND ($3::timestamptz IS NULL OR qa.completed_at >= $3)
-		 ORDER BY qa.completed_at DESC
+		 ORDER BY qa.completed_at DESC, qa.id DESC
 		 LIMIT $4 OFFSET $5`, userID, quizType, since, limit, offset)
 	if err != nil {
 		return nil, 0, err
@@ -1363,7 +1366,28 @@ func buildSuggestion(wi *WeeklyInsights) string {
 	}
 }
 
+func (s *Service) ClearRecommendationCache() { s.recommendations.Clear() }
 func (s *Service) GetRecommendations(ctx context.Context, userID, instID string) ([]RecommendedQuiz, error) {
+	key, _ := json.Marshal([]string{userID, instID})
+	list, err := s.recommendations.Load(ctx, string(key), 15*time.Second, func() ([]RecommendedQuiz, error) { return s.loadRecommendations(ctx, userID, instID) })
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(list))
+	for i := range list {
+		ids[i] = list[i].ID
+	}
+	// Count an impression for every response, including cached responses.
+	if len(ids) > 0 {
+		_, err = s.db.Exec(ctx, `INSERT INTO recommendation_bandit_stats(user_id,quiz_id,impressions)
+ SELECT $1,id,1 FROM unnest($2::uuid[]) id ON CONFLICT(user_id,quiz_id) DO UPDATE SET impressions=recommendation_bandit_stats.impressions+1,updated_at=now()`, userID, ids)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return append([]RecommendedQuiz(nil), list...), nil
+}
+func (s *Service) loadRecommendations(ctx context.Context, userID, instID string) ([]RecommendedQuiz, error) {
 	rows, err := s.db.Query(ctx,
 		`WITH learner AS (
 		   SELECT COALESCE(interest_domains, '{}') AS interests
@@ -1409,8 +1433,8 @@ func (s *Service) GetRecommendations(ctx context.Context, userID, instID string)
 		   CROSS JOIN learner l CROSS JOIN ability a CROSS JOIN bandit_total bt
 		   LEFT JOIN subdomain_performance sp ON sp.subdomain = q.subdomain
 		   LEFT JOIN recent_domains rd ON rd.domain = q.domain
-		   LEFT JOIN LATERAL (SELECT AVG(difficulty)::float8 AS difficulty FROM questions WHERE quiz_id=q.id) qd ON true
-		   LEFT JOIN LATERAL (SELECT COUNT(DISTINCT user_id)::int AS completions FROM quiz_attempts WHERE quiz_id=q.id AND status='completed') pop ON true
+		   LEFT JOIN quiz_read_stats qd ON qd.quiz_id=q.id
+		   LEFT JOIN quiz_read_stats pop ON pop.quiz_id=q.id
 		   LEFT JOIN LATERAL (SELECT COUNT(*)::int AS attempts FROM quiz_attempts WHERE quiz_id=q.id AND user_id=$1 AND status='completed') hist ON true
 		   LEFT JOIN recommendation_bandit_stats bs ON bs.user_id=$1 AND bs.quiz_id=q.id
 		   LEFT JOIN learner_topic_mastery lm ON lm.user_id=$1
@@ -1460,15 +1484,6 @@ func (s *Service) GetRecommendations(ctx context.Context, userID, instID string)
 	if list == nil {
 		return s.GetFeaturedQuizzes(ctx)
 	}
-	ids := make([]string, len(list))
-	for i := range list {
-		ids[i] = list[i].ID
-	}
-	_, _ = s.db.Exec(ctx, `
-		INSERT INTO recommendation_bandit_stats (user_id, quiz_id, impressions)
-		SELECT $1, id, 1 FROM unnest($2::uuid[]) id
-		ON CONFLICT (user_id, quiz_id) DO UPDATE SET
-		  impressions=recommendation_bandit_stats.impressions+1, updated_at=now()`, userID, ids)
 	return list, nil
 }
 

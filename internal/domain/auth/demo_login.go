@@ -16,6 +16,7 @@ package auth
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 )
 
 // IsDemoLoginEmail reports whether email is the configured review address.
@@ -49,6 +50,9 @@ func (s *Service) MintDemoSession(ctx context.Context, email string) (uid, acces
 	u, err := s.getUserByEmail(ctx, email)
 	if err != nil {
 		return "", "", "", err
+	}
+	if u.Role != "student" || u.Status != "active" {
+		return "", "", "", errors.New("review account must be an active learner")
 	}
 	access, refresh, err = s.mintSession(u.SupabaseUID, u.Email, u.TokenGeneration)
 	if err != nil {

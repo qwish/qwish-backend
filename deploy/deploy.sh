@@ -22,6 +22,7 @@ if [[ -n "$previous_container" ]]; then
   docker inspect --format '{{.Config.Image}}' "$previous_container" > "$deploy_dir/previous-image"
 fi
 "${compose[@]}" pull
+"${compose[@]}" run --rm --no-deps -e MIGRATE_ONLY=true api
 if ! "${compose[@]}" up -d --wait --wait-timeout 600; then
   echo "Deployment did not become healthy. Inspect docker compose logs before rollback." >&2
   echo "The previous image, if available, is recorded in deploy/previous-image." >&2

@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/google/uuid"
+	"github.com/qwish/backend/internal/jobs"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/qwish/backend/internal/httpx"
 	"sync"
@@ -20,7 +23,6 @@ type Service struct {
 	apiKey    string
 	fromEmail string
 	push      pusherAdapter
-	pushQ     chan pushJob
 
 	// Dashboard URLs used for "go to dashboard" buttons in emails.
 	instituteURL  string // institution admin dashboard
@@ -50,7 +52,33 @@ type EmailPayload struct {
 
 // SendEmail delivers an email via Resend and writes a row to notification_log.
 // reference is an optional free-form context string (e.g. "teacher_invite:<id>").
+type queuedEmail struct {
+	To        string `json:"to"`
+	Subject   string `json:"subject"`
+	HTML      string `json:"html"`
+	Reference string `json:"reference"`
+}
+
+// Verification emails remain synchronous; other email is durably accepted.
 func (s *Service) SendEmail(ctx context.Context, to, subject, html string, reference ...string) error {
+	ref := ""
+	if len(reference) > 0 {
+		ref = reference[0]
+	}
+	if ref == "login_otp" || strings.HasPrefix(ref, "email_verification") || s.db == nil {
+		return s.deliverEmail(ctx, to, subject, html, "", reference...)
+	}
+	key := uuid.NewString()
+	if strings.HasPrefix(ref, "announcement:") || strings.HasPrefix(ref, "teacher:") {
+		key = ref + ":" + to
+	}
+	return jobs.Enqueue(ctx, s.db, "email", key, "", queuedEmail{to, subject, html, ref})
+}
+func (s *Service) QueueEmailTx(ctx context.Context, tx jobs.Execer, key, to, subject, html, reference string) error {
+	return jobs.Enqueue(ctx, tx, "email", key, "", queuedEmail{to, subject, html, reference})
+}
+
+func (s *Service) deliverEmail(ctx context.Context, to, subject, html, deliveryKey string, reference ...string) error {
 	ref := ""
 	if len(reference) > 0 {
 		ref = reference[0]
@@ -76,6 +104,9 @@ func (s *Service) SendEmail(ctx context.Context, to, subject, html string, refer
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if deliveryKey != "" {
+		req.Header.Set("Idempotency-Key", deliveryKey)
+	}
 	req.Header.Set("Authorization", "Bearer "+s.apiKey)
 
 	resp, err := httpx.Client.Do(req)

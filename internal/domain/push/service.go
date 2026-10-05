@@ -182,8 +182,13 @@ type Payload struct {
 // Invalid (404/UNREGISTERED) tokens are pruned. Errors are logged, never
 // surfaced — push is best-effort.
 func (s *Service) SendToUser(ctx context.Context, userID string, p Payload) {
+	if err := s.DeliverToUser(ctx, userID, p); err != nil {
+		log.Printf("[push] delivery: %v", err)
+	}
+}
+func (s *Service) DeliverToUser(ctx context.Context, userID string, p Payload) error {
 	if !s.Enabled() || s.db == nil || userID == "" {
-		return
+		return nil
 	}
 	var quietEnabled, championshipsEnabled bool
 	var quietFrom, quietUntil, offsetMinutes int
@@ -194,7 +199,7 @@ func (s *Service) SendToUser(ctx context.Context, userID string, p Payload) {
 	).Scan(&quietEnabled, &quietFrom, &quietUntil, &offsetMinutes, &championshipsEnabled)
 	if err == nil {
 		if p.Data["kind"] == "championship" && !championshipsEnabled {
-			return
+			return nil
 		}
 		if quietEnabled {
 			now := time.Now().UTC()
@@ -202,22 +207,28 @@ func (s *Service) SendToUser(ctx context.Context, userID string, p Payload) {
 			inside := quietFrom < quietUntil && localMinute >= quietFrom && localMinute < quietUntil ||
 				quietFrom > quietUntil && (localMinute >= quietFrom || localMinute < quietUntil)
 			if inside {
-				return
+				return nil
 			}
 		}
 	}
 	rows, err := s.db.Query(ctx, `SELECT token FROM device_tokens WHERE user_id=$1`, userID)
 	if err != nil {
-		log.Printf("[push] load tokens for user %s: %v", userID, err)
-		return
+		return err
 	}
 	defer rows.Close()
 	var tokens []string
 	for rows.Next() {
 		var t string
-		rows.Scan(&t)
+		if err := rows.Scan(&t); err != nil {
+			return err
+		}
 		tokens = append(tokens, t)
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	var deliveryErrors []error
 	// Collect dead tokens and prune them in one DELETE rather than one per
 	// token — a user with several stale devices paid a round trip each.
 	var dead []string
@@ -227,12 +238,13 @@ func (s *Service) SendToUser(ctx context.Context, userID string, p Payload) {
 				dead = append(dead, t)
 				continue
 			}
-			log.Printf("[push] send to token: %v", err)
+			deliveryErrors = append(deliveryErrors, err)
 		}
 	}
 	if len(dead) > 0 {
 		s.db.Exec(ctx, `DELETE FROM device_tokens WHERE token = ANY($1)`, dead)
 	}
+	return errors.Join(deliveryErrors...)
 }
 
 var errInvalidToken = errors.New("invalid registration token")

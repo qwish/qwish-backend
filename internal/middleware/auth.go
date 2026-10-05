@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -19,6 +20,7 @@ const (
 	ContextKeySupabaseUID contextKey = "supabase_uid"
 	ContextKeyEmail       contextKey = "email"
 	ContextKeyUserRecord  contextKey = "user_record"
+	contextKeyAuthMethod  contextKey = "authentication_method"
 )
 
 type userRow struct {
@@ -49,7 +51,9 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 			var tokenStr string
 			if strings.HasPrefix(authHeader, "Bearer ") {
 				tokenStr = strings.TrimPrefix(authHeader, "Bearer ")
-			} else {
+			} else if r.Method == http.MethodGet && r.URL.Path == "/api/v1/users/me/notifications/stream" {
+				// Native EventSource cannot supply Authorization. This exception is
+				// restricted to the stream; all live authorization checks still apply.
 				tokenStr = r.URL.Query().Get("token")
 			}
 			if tokenStr == "" {
@@ -75,6 +79,14 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 				return
 			}
 
+			// Keep only verified session claims; downstream middleware never
+			// decodes credentials independently or trusts their transport.
+			sid, _ := claims["session_id"].(string)
+			method := verifiedAuthenticationMethod(claims)
+			ctx := context.WithValue(r.Context(), ContextKeySessionID, sid)
+			ctx = context.WithValue(ctx, contextKeyAuthMethod, method)
+			r = r.WithContext(ctx)
+
 			// One round trip for everything the rest of this middleware needs:
 			// the users row, its institution's status, and any admin_accounts
 			// row for the same uid. This used to be two or three sequential
@@ -84,27 +96,76 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 			var u userRow
 			var instStatus, adminID, adminRole, adminStatus string
 			var adminTokenGen int
+			var policyEnabled, hasAdminPasskey, sessionRevoked bool
+			var sessionAdminID string
 			err = db.QueryRow(r.Context(), `
 				SELECT COALESCE(u.id::text,''), COALESCE(u.role,''),
 				       u.institution_id, COALESCE(u.status,''),
 				       COALESCE(u.token_generation,0),
 				       COALESCE(i.status,''),
 				       COALESCE(a.id::text,''), COALESCE(a.role,''), COALESCE(a.status,''),
-				       COALESCE(a.token_generation,0)
+				       COALESCE(a.token_generation,0),
+				       COALESCE((SELECT value='true'::jsonb FROM platform_settings WHERE key='require_admin_passkeys'),false),
+				       EXISTS(SELECT 1 FROM webauthn_credentials c WHERE c.admin_id=a.id),
+				       COALESCE(sess.admin_id::text,''),COALESCE(sess.revoked_at IS NOT NULL,false)
 				  FROM (VALUES ($1::uuid)) AS p(uid)
 				  LEFT JOIN users u
 				         ON u.supabase_uid = p.uid AND u.deleted_at IS NULL
 				  LEFT JOIN institutions i ON i.id = u.institution_id
 				  LEFT JOIN admin_accounts a
-				         ON a.supabase_uid = p.uid AND a.deleted_at IS NULL`,
-				supabaseUID,
+				         ON a.supabase_uid = p.uid AND a.deleted_at IS NULL
+				  LEFT JOIN admin_sessions sess ON sess.session_id=NULLIF($2,'')`,
+				supabaseUID, sid,
 			).Scan(&u.ID, &u.Role, &u.InstitutionID, &u.Status, &u.TokenGen,
-				&instStatus, &adminID, &adminRole, &adminStatus, &adminTokenGen)
+				&instStatus, &adminID, &adminRole, &adminStatus, &adminTokenGen,
+				&policyEnabled, &hasAdminPasskey, &sessionAdminID, &sessionRevoked)
 			if err != nil {
-				// Malformed sub (not a uuid) or a dead database — either way the
-				// request cannot be authenticated.
-				Unauthorized(w)
+				// Invalid identities are rejected separately; DB outages are 503.
+				if _, parseErr := uuid.Parse(supabaseUID); parseErr != nil {
+					Unauthorized(w)
+				} else {
+					Error(w, http.StatusServiceUnavailable, "AUTH_UNAVAILABLE", "authentication is temporarily unavailable")
+				}
 				return
+			}
+
+			// Console permissions require a live admin identity, rather than an
+			// untracked legacy users.role value with no policy/session owner.
+			if consoleRole(u.Role) && adminID == "" {
+				Error(w, http.StatusForbidden, "ADMIN_IDENTITY_REQUIRED", "administrator account is unavailable")
+				return
+			}
+
+			// Enforce administrator session state on every authenticated surface,
+			// including auth/passkey management and URL-authenticated SSE.
+			adminPrincipal := adminID != "" && (u.ID == "" || consoleRole(u.Role))
+			if adminPrincipal && u.ID != "" {
+				// A legacy users role cannot override a changed administrator role.
+				u.Role = adminRole
+			}
+			if adminPrincipal {
+				if sid == "" {
+					Error(w, http.StatusUnauthorized, "SESSION_REQUIRED", "sign in again to establish a tracked session")
+					return
+				}
+				if sessionAdminID != "" && (sessionAdminID != adminID || sessionRevoked) {
+					Error(w, http.StatusUnauthorized, "SESSION_REVOKED", "this session was signed out")
+					return
+				}
+				if tokenGen(claims) != adminTokenGen {
+					Unauthorized(w)
+					return
+				}
+				if policyEnabled {
+					if hasAdminPasskey && method != "webauthn" {
+						Error(w, http.StatusForbidden, "PASSKEY_REQUIRED", "sign in with a passkey")
+						return
+					}
+					if !hasAdminPasskey && !adminEnrollmentRoute(r) {
+						Error(w, http.StatusForbidden, "PASSKEY_ENROLLMENT_REQUIRED", "enroll a passkey, then sign in with it")
+						return
+					}
+				}
 			}
 
 			// No users row: fall back to the admin_accounts identity, exactly as
@@ -114,20 +175,21 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 					Unauthorized(w)
 					return
 				}
-				// Session revocation: a token minted before the last
-				// "sign out everywhere" is dead on the very next request,
-				// rather than lingering for the access token's full hour.
-				if tokenGen(claims) != adminTokenGen {
-					Unauthorized(w)
-					return
-				}
 				switch adminStatus {
 				case "active":
 					// proceed
 				case "pending", "invite_failed":
 					// First successful auth = invite accepted. Promote to active.
-					db.Exec(r.Context(),
-						`UPDATE admin_accounts SET status='active', accepted_at=now() WHERE id=$1`, adminID)
+					tag, activateErr := db.Exec(r.Context(),
+						`UPDATE admin_accounts SET status='active', accepted_at=now() WHERE id=$1 AND status IN ('pending','invite_failed') AND deleted_at IS NULL`, adminID)
+					if activateErr != nil {
+						Error(w, http.StatusServiceUnavailable, "AUTH_UNAVAILABLE", "authentication is temporarily unavailable")
+						return
+					}
+					if tag.RowsAffected() != 1 {
+						Unauthorized(w)
+						return
+					}
 				default: // suspended (deleted rows are excluded by the query)
 					Error(w, http.StatusForbidden, "ACCOUNT_SUSPENDED", "account is suspended")
 					return
@@ -147,13 +209,16 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 				Error(w, http.StatusForbidden, "APP_LOGIN_DENIED", "Login failed")
 				return
 			}
-			if u.Status == "suspended" {
-				Error(w, http.StatusForbidden, "ACCOUNT_SUSPENDED", "account is suspended")
+			if !AuthorizeUserStatus(w, u.Role, u.Status) {
+				return
+			}
+			if adminPrincipal && adminStatus != "active" {
+				Error(w, http.StatusForbidden, "ACCOUNT_SUSPENDED", "administrator account is not active")
 				return
 			}
 
-			// Session revocation — see the admin branch above.
-			if tokenGen(claims) != u.TokenGen {
+			// Console identities use the admin account's revocation generation.
+			if !adminPrincipal && tokenGen(claims) != u.TokenGen {
 				Unauthorized(w)
 				return
 			}
@@ -171,21 +236,16 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 				}
 			}
 
-			ctx := context.WithValue(r.Context(), ContextKeyUserID, u.ID)
+			ctx = context.WithValue(r.Context(), ContextKeyUserID, u.ID)
 			ctx = context.WithValue(ctx, ContextKeyUserRecord, true)
 			ctx = context.WithValue(ctx, ContextKeyRole, u.Role)
 			if u.InstitutionID != nil {
 				ctx = context.WithValue(ctx, ContextKeyInstID, *u.InstitutionID)
 			}
 
-			// A super_admin/moderator/support_agent may be resolved here via the
-			// users table (it's checked first) while also having an admin_accounts
-			// row. Admin handlers write the actor into admin_accounts FK columns and
-			// the audit log, so surface that admin id when one exists. Best-effort:
-			// when there's no admin_accounts row, GetAdminID stays empty and the
-			// handlers fall back to NULL.
-			if adminID != "" &&
-				(u.Role == "super_admin" || u.Role == "moderator" || u.Role == "support_agent") {
+			// Dual-table console identities keep their users ID for app-backed
+			// reads and their authoritative administrator ID for console writes.
+			if adminPrincipal {
 				ctx = context.WithValue(ctx, ContextKeyAdminID, adminID)
 			}
 
@@ -325,4 +385,56 @@ func AuthenticateJWTOnly(jwtSecret, supabaseURL string) func(http.Handler) http.
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// AuthorizeUserStatus is shared by request authentication and session issuance.
+func AuthorizeUserStatus(w http.ResponseWriter, role, status string) bool {
+	if status == "suspended" {
+		Error(w, http.StatusForbidden, "ACCOUNT_SUSPENDED", "account is suspended")
+		return false
+	}
+	if role == "teacher" && status != "active" {
+		Error(w, http.StatusForbidden, "PENDING_VERIFICATION", "your teacher account is awaiting verification by your institution")
+		return false
+	}
+	return true
+}
+
+func consoleRole(role string) bool {
+	return role == "super_admin" || role == "moderator" || role == "support_agent"
+}
+
+// Bootstrap access cannot authorize console operations or credential deletion.
+func adminEnrollmentRoute(r *http.Request) bool {
+	if r.Method == http.MethodGet {
+		return r.URL.Path == "/api/v1/auth/passkey/credentials"
+	}
+	if r.Method != http.MethodPost {
+		return false
+	}
+	switch r.URL.Path {
+	case "/api/v1/auth/passkey/register/begin", "/api/v1/auth/passkey/register/finish",
+		"/api/v1/auth/logout", "/api/v1/auth/sessions/revoke-all":
+		return true
+	}
+	return false
+}
+
+func verifiedAuthenticationMethod(claims jwt.MapClaims) string {
+	methods, _ := claims["amr"].([]any)
+	first := ""
+	for _, raw := range methods {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		method, _ := item["method"].(string)
+		if method == "webauthn" {
+			return method
+		}
+		if first == "" {
+			first = method
+		}
+	}
+	return first
 }

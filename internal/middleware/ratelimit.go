@@ -2,8 +2,13 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"strconv"
@@ -26,6 +31,7 @@ type rateLimiter struct {
 	clients map[string]*gcraState
 	max     int
 	window  time.Duration
+	keyKind string
 }
 
 // RateLimit returns middleware that allows at most max requests per client IP
@@ -35,14 +41,22 @@ func RateLimit(max int, window time.Duration) func(http.Handler) http.Handler {
 		clients: make(map[string]*gcraState),
 		max:     max,
 		window:  window,
+		keyKind: "ip",
 	}
-	go rl.cleanupLoop()
+	if distributedLimits == nil {
+		go rl.cleanupLoop()
+	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip := clientIP(r)
-			if allowed, retryAfter := rl.allow(ip); !allowed {
-				w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+			allowed, retryAfter, _, err := rl.allowRequest(r, ip)
+			if err != nil {
+				Error(w, http.StatusServiceUnavailable, "RATE_LIMIT_UNAVAILABLE", "please retry shortly")
+				return
+			}
+			if !allowed {
+				w.Header().Set("Retry-After", strconv.Itoa(retrySeconds(retryAfter)))
 				Error(w, http.StatusTooManyRequests, "RATE_LIMITED",
 					"too many requests, please try again later")
 				return
@@ -63,8 +77,11 @@ func RateLimitByJSONField(max int, window time.Duration, field string) func(http
 		clients: make(map[string]*gcraState),
 		max:     max,
 		window:  window,
+		keyKind: "body:" + field,
 	}
-	go rl.cleanupLoop()
+	if distributedLimits == nil {
+		go rl.cleanupLoop()
+	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,15 +107,20 @@ func RateLimitByJSONField(max int, window time.Duration, field string) func(http
 				return
 			}
 
-			if allowed, retryAfter := rl.allow(key); !allowed {
-				w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+			allowed, retryAfter, remaining, err := rl.allowRequest(r, key)
+			if err != nil {
+				Error(w, http.StatusServiceUnavailable, "RATE_LIMIT_UNAVAILABLE", "please retry shortly")
+				return
+			}
+			if !allowed {
+				w.Header().Set("Retry-After", strconv.Itoa(retrySeconds(retryAfter)))
 				w.Header().Set("X-RateLimit-Remaining", "0")
 				Error(w, http.StatusTooManyRequests, "RATE_LIMITED",
 					"too many requests for this "+field+", please try again later")
 				return
 			}
 			// Lets a sign-in form say "2 tries left" before the pause, not after.
-			w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(rl.remaining(key)))
+			w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(remaining))
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -113,8 +135,11 @@ func RateLimitByUser(max int, window time.Duration) func(http.Handler) http.Hand
 		clients: make(map[string]*gcraState),
 		max:     max,
 		window:  window,
+		keyKind: "user",
 	}
-	go rl.cleanupLoop()
+	if distributedLimits == nil {
+		go rl.cleanupLoop()
+	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -122,8 +147,13 @@ func RateLimitByUser(max int, window time.Duration) func(http.Handler) http.Hand
 			if key == "" {
 				key = "ip:" + clientIP(r)
 			}
-			if allowed, retryAfter := rl.allow(key); !allowed {
-				w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+			allowed, retryAfter, _, err := rl.allowRequest(r, key)
+			if err != nil {
+				Error(w, http.StatusServiceUnavailable, "RATE_LIMIT_UNAVAILABLE", "please retry shortly")
+				return
+			}
+			if !allowed {
+				w.Header().Set("Retry-After", strconv.Itoa(retrySeconds(retryAfter)))
 				Error(w, http.StatusTooManyRequests, "RATE_LIMITED",
 					"too many requests, please slow down")
 				return
@@ -223,3 +253,25 @@ func (rl *rateLimiter) remaining(key string) int {
 	}
 	return n
 }
+
+// Configure before serving requests. Each replica shares the same atomic GCRA state.
+var distributedLimits *pgxpool.Pool
+
+func ConfigureDistributedRateLimits(pool *pgxpool.Pool) { distributedLimits = pool }
+func (rl *rateLimiter) allowRequest(r *http.Request, key string) (bool, time.Duration, int, error) {
+	if distributedLimits == nil {
+		ok, retry := rl.allow(key)
+		return ok, retry, rl.remaining(key), nil
+	}
+	route := chi.RouteContext(r.Context()).RoutePattern()
+	ns := fmt.Sprintf("%s|%s|%d|%d", route, rl.keyKind, rl.max, rl.window)
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	var ok bool
+	var retry float64
+	var remaining int
+	err := distributedLimits.QueryRow(ctx, `SELECT allowed,retry_seconds,remaining FROM consume_rate_limit($1,$2,$3,$4)`, ns, key, rl.max, rl.window.Seconds()).Scan(&ok, &retry, &remaining)
+	return ok, time.Duration(retry * float64(time.Second)), remaining, err
+}
+
+func retrySeconds(d time.Duration) int { return max(1, int(math.Ceil(d.Seconds()))) }

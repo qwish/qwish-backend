@@ -3,6 +3,7 @@ package quiz
 import (
 	"context"
 	"fmt"
+	"github.com/qwish/backend/internal/jobs"
 	"os"
 	"testing"
 	"time"
@@ -75,6 +76,23 @@ func TestStudentFeedSortAndUnplayed(t *testing.T) {
 		pool.Exec(ctx, `DELETE FROM users WHERE full_name LIKE '%'||$1`, tag)
 	})
 
+	workerCtx, stop := context.WithCancel(ctx)
+	queue := jobs.New(pool)
+	RegisterJobs(queue)
+	queue.Start(workerCtx, 1)
+	t.Cleanup(func() { stop(); queue.Wait() })
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var ready bool
+		err := pool.QueryRow(ctx, `SELECT COALESCE(completions,0)=3 FROM quiz_read_stats WHERE quiz_id=$1`, popular).Scan(&ready)
+		if err == nil && ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("quiz stats worker did not catch up: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	svc := NewService(pool)
 	list := func(sort string, unplayed bool, page, limit int) []string {
 		t.Helper()
@@ -105,4 +123,32 @@ func TestStudentFeedSortAndUnplayed(t *testing.T) {
 	if got := list("popular", false, 1, 20); len(got) != 4 {
 		t.Fatalf("unplayed=false: got %d quizzes, want 4 (%v, played %s)", len(got), got, played)
 	}
+	// Cursor pages preserve the newest order, including NULL publication dates.
+	if _, err := pool.Exec(ctx, `UPDATE quizzes SET published_at=NULL WHERE id=$1`, quiet); err != nil {
+		t.Fatal(err)
+	}
+	want := list("newest", true, 1, 20)
+	var cursorIDs []string
+	cursor := ""
+	for i := 0; i < 5; i++ {
+		page, total, next, err := svc.ListForStudentCursor(ctx, "", "public", "", "", tag, "", "", nil, nil, student, true, 1, cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != len(want) {
+			t.Fatalf("cursor total: %d want %d", total, len(want))
+		}
+		for _, q := range page {
+			cursorIDs = append(cursorIDs, q.ID)
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	expect("cursor traversal", cursorIDs, want)
+	if _, _, _, err := svc.ListForStudentCursor(ctx, "", "public", "", "", tag, "", "", nil, nil, student, true, 1, "invalid"); err == nil {
+		t.Fatal("invalid cursor accepted")
+	}
+
 }

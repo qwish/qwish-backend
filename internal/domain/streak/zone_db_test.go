@@ -89,3 +89,44 @@ func TestStreakDayIsIndiaTimeWithoutInstitute(t *testing.T) {
 		t.Fatalf("second quiz the same IST day: streak %d, want 2", n)
 	}
 }
+
+func TestMilestoneCreditAndClaimRollBackTogether(t *testing.T) {
+	pool, id := newStreakUser(t)
+	t.Cleanup(func() { pool.Exec(context.Background(), `DELETE FROM points_ledger WHERE user_id=$1`, id) })
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `INSERT INTO streaks(user_id,current_streak,longest_streak,last_completed_date) VALUES($1,6,6,(now() AT TIME ZONE 'Asia/Kolkata')::date-1)`, id); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bonus, err := NewService(pool).RecordCompletionTx(ctx, tx, id, &scoring.Config{StreakBonus7Day: 70, PointsExpiryMonths: 6}, "")
+	if err != nil || bonus != 70 {
+		t.Fatalf("%d %v", bonus, err)
+	}
+	_ = tx.Rollback(ctx)
+	var claimed bool
+	var points int64
+	if err = pool.QueryRow(ctx, `SELECT s.milestone_7_claimed,u.total_points FROM streaks s JOIN users u ON u.id=s.user_id WHERE s.user_id=$1`, id).Scan(&claimed, &points); err != nil {
+		t.Fatal(err)
+	}
+	if claimed || points != 0 {
+		t.Fatalf("partial reward survived rollback: %v %d", claimed, points)
+	}
+	tx, err = pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err = NewService(pool).RecordCompletionTx(ctx, tx, id, &scoring.Config{StreakBonus7Day: 70, PointsExpiryMonths: 6}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var credits int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM points_ledger WHERE user_id=$1 AND reason='streak_bonus' AND amount=70`, id).Scan(&credits); err != nil || credits != 1 {
+		t.Fatalf("%d %v", credits, err)
+	}
+}

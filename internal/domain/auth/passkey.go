@@ -426,8 +426,11 @@ func (s *Service) TryPasskeyRefresh(ctx context.Context, refreshToken string) (a
 	sid, _ := claims["session_id"].(string)
 	if sid == "" {
 		sid = uuid.NewString()
-	} else if s.sessionRevoked(ctx, sid) {
-		return "", "", false
+	} else {
+		revoked, lookupErr := s.sessionRevoked(ctx, sid)
+		if lookupErr != nil || revoked {
+			return "", "", false
+		}
 	}
 
 	a, r, err := s.mintSessionWithID(admin.SupabaseUID, admin.Email, admin.TokenGeneration, sid)
@@ -629,7 +632,9 @@ func (h *Handler) PasskeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 
 	// First successful passkey assertion accepts a pending invite, mirroring OTP.
 	if admin.Status == "pending" || admin.Status == "invite_failed" {
-		h.svc.ActivateAdmin(r.Context(), admin.ID)
+		if !h.activateAdminForLogin(w, r, admin.ID) {
+			return
+		}
 	}
 	h.svc.touchCredential(r.Context(), cred)
 	h.writePasskeySession(w, r, admin)
@@ -844,28 +849,29 @@ func (h *Handler) PasskeyLoginFinishDiscoverable(w http.ResponseWriter, r *http.
 	}
 
 	if resolved.Status == "pending" || resolved.Status == "invite_failed" {
-		h.svc.ActivateAdmin(r.Context(), resolved.ID)
+		if !h.activateAdminForLogin(w, r, resolved.ID) {
+			return
+		}
 	}
 	h.svc.touchCredential(r.Context(), cred)
 	h.writePasskeySession(w, r, resolved)
 }
 
-// sessionRevoked reports whether a console session was revoked. A lookup error
-// counts as not revoked: the auth middleware re-checks on every request.
-func (s *Service) sessionRevoked(ctx context.Context, sid string) bool {
+// sessionRevoked distinguishes a new session from a failed revocation lookup.
+func (s *Service) sessionRevoked(ctx context.Context, sid string) (bool, error) {
 	var revoked bool
-	_ = s.db.QueryRow(ctx,
-		`SELECT revoked_at IS NOT NULL FROM admin_sessions WHERE session_id = $1`, sid).Scan(&revoked)
-	return revoked
+	err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM admin_sessions WHERE session_id=$1 AND revoked_at IS NOT NULL)`, sid).Scan(&revoked)
+	return revoked, err
 }
 
-// PasskeyRequiredForAdmin reports whether the "require admin passkeys" policy is
-// on and this Supabase identity is an administrator who has enrolled one.
-func (s *Service) PasskeyRequiredForAdmin(ctx context.Context, supabaseUID string) bool {
+// PasskeyRequiredForAdmin applies the login policy for an administrator who
+// already has a credential. New administrators can obtain an enrollment-only
+// OTP session; middleware enforces that restricted bootstrap access.
+func (s *Service) PasskeyRequiredForAdmin(ctx context.Context, supabaseUID string) (bool, error) {
 	var required bool
-	_ = s.db.QueryRow(ctx, `
-		SELECT COALESCE((SELECT value = 'true'::jsonb FROM platform_settings WHERE key = 'require_admin_passkeys'), false)
-		   AND EXISTS (SELECT 1 FROM admin_accounts a JOIN webauthn_credentials c ON c.admin_id = a.id
-		                WHERE a.supabase_uid::text = $1 AND a.deleted_at IS NULL)`, supabaseUID).Scan(&required)
-	return required
+	err := s.db.QueryRow(ctx, `
+ SELECT COALESCE((SELECT value='true'::jsonb FROM platform_settings WHERE key='require_admin_passkeys'),false)
+ AND EXISTS(SELECT 1 FROM admin_accounts a JOIN webauthn_credentials c ON c.admin_id=a.id
+ WHERE a.supabase_uid::text=$1 AND a.deleted_at IS NULL)`, supabaseUID).Scan(&required)
+	return required, err
 }

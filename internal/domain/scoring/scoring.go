@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/cache"
 )
 
 // Config holds point economy config values loaded at attempt start.
@@ -34,51 +35,18 @@ type ConfidenceTable struct {
 	NotSureWrong         float64 `json:"not_sure_wrong"`
 }
 
-// point_economy_config is a handful of rows that changes when an admin edits the
-// economy — effectively never relative to request volume. Every quiz start and
-// every snapshot-miss used to pay a round trip for it; against a remote Supabase
-// database that is 30–80ms of pure latency on the hottest path in the app.
-// ponytail: process-local cache, no invalidation hook. An admin edit takes up to
-// configTTL to appear, and each replica expires independently. If that ever
-// matters, add a NOTIFY listener rather than shortening the TTL.
 const configTTL = 30 * time.Second
 
-var (
-	configMu     sync.RWMutex
-	cachedConfig *Config
-	cachedAt     time.Time
-)
+var configs = cache.New[*Config](4)
 
-// InvalidateConfigCache drops the cached config so the next LoadConfig re-reads
-// the table. Call it after writing point_economy_config.
-func InvalidateConfigCache() {
-	configMu.Lock()
-	cachedConfig, cachedAt = nil, time.Time{}
-	configMu.Unlock()
-}
+func InvalidateConfigCache() { configs.Clear() }
 
-// LoadConfig reads all point economy config keys from DB and returns a Config.
-// Results are cached for configTTL; the returned *Config is shared and must be
-// treated as read-only.
+// LoadConfig coalesces simultaneous loads; entries are immutable snapshots.
 func LoadConfig(ctx context.Context, db *pgxpool.Pool) (*Config, error) {
-	configMu.RLock()
-	cfg, at := cachedConfig, cachedAt
-	configMu.RUnlock()
-	if cfg != nil && time.Since(at) < configTTL {
-		return cfg, nil
-	}
-
-	cfg, err := loadConfigUncached(ctx, db)
-	if err != nil {
-		return nil, err
-	}
-	configMu.Lock()
-	cachedConfig, cachedAt = cfg, time.Now()
-	configMu.Unlock()
-	return cfg, nil
+	return configs.Load(ctx, db.Config().ConnConfig.ConnString(), configTTL, func() (*Config, error) { return loadConfigUncached(ctx, db) })
 }
 
-func loadConfigUncached(ctx context.Context, db *pgxpool.Pool) (*Config, error) {
+func loadConfigUncached(ctx context.Context, db configQuerier) (*Config, error) {
 	rows, err := db.Query(ctx, `SELECT key, value FROM point_economy_config`)
 	if err != nil {
 		return nil, err
@@ -379,4 +347,13 @@ func CalculateFinalScore(totalCorrect, totalQuestions int, rawPoints int64, scor
 	contentMult := difficultyPointsMultiplier(avgDifficulty)
 	finalPts = int64(float64(finalPts) * difficultyMultiplier * contentMult * instMultiplier)
 	return finalPts
+}
+
+type configQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+// LoadConfigTx avoids borrowing another connection while the caller holds a transaction.
+func LoadConfigTx(ctx context.Context, tx pgx.Tx) (*Config, error) {
+	return loadConfigUncached(ctx, tx)
 }

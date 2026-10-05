@@ -158,11 +158,8 @@ type AdminAuthoringQuiz struct {
 // attemptStatsSelect aggregates a quiz's completed attempts: how many distinct
 // people took it, and the peer averages shown on the quiz detail screen.
 // Correlated on q.id — only valid inside a LATERAL join over `quizzes q`.
-const attemptStatsSelect = `SELECT COUNT(DISTINCT qa.user_id) AS taker_count,
-		               AVG(qa.score_pct)::float8 AS avg_score_pct,
-		               AVG(EXTRACT(EPOCH FROM (qa.completed_at - qa.started_at)))::float8 AS avg_seconds
-		        FROM quiz_attempts qa
-		        WHERE qa.quiz_id = q.id AND qa.status = 'completed'`
+const attemptStatsSelect = `SELECT COALESCE(rs.completions,0) AS taker_count,rs.avg_score_pct,rs.avg_seconds
+ FROM (VALUES(q.id)) AS requested(id) LEFT JOIN quiz_read_stats rs ON rs.quiz_id=requested.id`
 
 // studentListSelect is the SELECT/FROM prefix of the student quiz list query.
 // Shared with the profiling endpoint so profiled plans match production SQL.
@@ -252,7 +249,7 @@ func (s *Service) ListForStudentFilteredScope(ctx context.Context, institutionID
 	return s.listForStudentFilteredScope(ctx, institutionID, scope, quizType, saved, search, domain, subdomain, publishedAfter, publishedBefore, userID, sort, unplayed, page, limit)
 }
 
-func (s *Service) listForStudentFilteredScope(ctx context.Context, institutionID, scope, quizType, saved, search, domain, subdomain string, publishedAfter, publishedBefore *time.Time, userID, sort string, unplayed bool, page, limit int) ([]Quiz, int, error) {
+func (s *Service) listForStudentFilteredScope(ctx context.Context, institutionID, scope, quizType, saved, search, domain, subdomain string, publishedAfter, publishedBefore *time.Time, userID, sort string, unplayed bool, page, limit int, cursors ...*feedCursor) ([]Quiz, int, error) {
 	offset := (page - 1) * limit
 	var total int
 
@@ -280,6 +277,21 @@ func (s *Service) listForStudentFilteredScope(ctx context.Context, institutionID
 	}
 	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quizzes q WHERE `+baseWhere, args...).Scan(&total); err != nil {
 		return nil, 0, err
+	}
+
+	if len(cursors) > 0 {
+		offset = 0
+		c := cursors[0]
+		if c.ID != "" {
+			n := len(args) + 1
+			args = append(args, c.ID)
+			if c.PublishedAt == nil {
+				baseWhere += fmt.Sprintf(" AND q.published_at IS NULL AND q.id>$%d::uuid", n)
+			} else {
+				args = append(args, *c.PublishedAt)
+				baseWhere += fmt.Sprintf(" AND (q.published_at IS NULL OR q.published_at<$%d OR (q.published_at=$%d AND q.id>$%d::uuid))", n+1, n+1, n)
+			}
+		}
 	}
 
 	userArgN := len(args) + 1
@@ -1401,15 +1413,15 @@ func (s *Service) ListForInstitution(ctx context.Context, institutionID, statusF
 	rows, err := s.db.Query(ctx,
 		`SELECT q.id, q.institution_id, q.created_by, u.display_name, '' AS institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status, q.question_count,
-		        COUNT(qa.id) FILTER (WHERE qa.status = 'completed') AS taker_count,
-		        AVG(qa.score_pct) FILTER (WHERE qa.status = 'completed') AS average_score,
+		        COALESCE(rs.completed_attempts,0) AS taker_count,
+		        rs.avg_score_pct AS average_score,
 		        q.ends_at, q.published_at, q.group_id, q.created_at,
-		        COUNT(qa.id) AS started_count
+		        COALESCE(rs.started_count,0) AS started_count
 		 FROM quizzes q
 		 JOIN users u ON u.id = q.created_by
-		 LEFT JOIN quiz_attempts qa ON qa.quiz_id = q.id
+		 LEFT JOIN quiz_read_stats rs ON rs.quiz_id=q.id
 		 WHERE `+where+
-			` GROUP BY q.id, u.display_name`+
+
 			fmt.Sprintf(` ORDER BY q.created_at DESC LIMIT $%d OFFSET $%d`, n-1, n),
 		args...)
 	if err != nil {

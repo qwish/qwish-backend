@@ -12,8 +12,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/domain/quiz"
+	"github.com/qwish/backend/internal/domain/scoring"
 	"github.com/qwish/backend/internal/domain/streak"
 	"github.com/qwish/backend/internal/domain/user"
+	"github.com/qwish/backend/internal/jobs"
 )
 
 // Runs only with TEST_DATABASE_URL pointed at a migrated scratch database.
@@ -70,6 +72,11 @@ func TestCompleteUpdatesSkillRating(t *testing.T) {
 		return res
 	}
 
+	workerCtx, stop := context.WithCancel(ctx)
+	q := jobs.New(pool)
+	scoring.RegisterJobs(q)
+	q.Start(workerCtx, 1)
+	t.Cleanup(func() { stop(); q.Wait() })
 	first := play(3)
 	if first.ScorePct != 75 {
 		t.Fatalf("score_pct should be plain accuracy, got %v", first.ScorePct)
@@ -85,7 +92,14 @@ func TestCompleteUpdatesSkillRating(t *testing.T) {
 		t.Fatalf("n=%d leaderboard=%v response=%v", n, lb, first.QwishScore)
 	}
 	var moved int
-	must("questions", pool.QueryRow(ctx, `SELECT COUNT(*) FROM questions WHERE quiz_id=$1 AND rating_n=1`, quizID).Scan(&moved))
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		must("questions", pool.QueryRow(ctx, `SELECT COUNT(*) FROM questions WHERE quiz_id=$1 AND rating_n=1`, quizID).Scan(&moved))
+		if moved == 4 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if moved != 4 {
 		t.Fatalf("expected 4 questions to take evidence, got %d", moved)
 	}

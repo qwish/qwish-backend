@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -13,6 +12,7 @@ import (
 	"github.com/qwish/backend/internal/domain/quiz"
 	"github.com/qwish/backend/internal/domain/scoring"
 	"github.com/qwish/backend/internal/domain/streak"
+	"github.com/qwish/backend/internal/jobs"
 )
 
 type Service struct {
@@ -91,6 +91,7 @@ func applyServerGates(isCorrect bool, pts int64, timeTakenMs, timeLimitSeconds, 
 }
 
 type CompleteResp struct {
+	Legacy             bool                    `json:"legacy,omitempty"`
 	AttemptID          string                  `json:"attempt_id"`
 	ScorePct           float64                 `json:"score_pct"`
 	PerformanceBadge   string                  `json:"performance_badge"`
@@ -200,6 +201,13 @@ func (s *Service) Start(ctx context.Context, userID, quizID, assignmentID string
 		}
 	}
 
+	// Load and snapshot point economy config
+	cfg, err := scoring.LoadConfig(ctx, s.db)
+	if err != nil {
+		return nil, err
+	}
+	cfgJSON, _ := cfg.JSON()
+
 	// Select the delivered set before creating the attempt, then snapshot it in
 	// the same transaction. That set is subsequently enforced for answers and
 	// clues, so random selection cannot be bypassed by guessing another ID.
@@ -255,13 +263,6 @@ func (s *Service) Start(ctx context.Context, userID, quizID, assignmentID string
 	if len(questions) == 0 {
 		return nil, fmt.Errorf("quiz has no questions")
 	}
-
-	// Load and snapshot point economy config
-	cfg, err := scoring.LoadConfig(ctx, s.db)
-	if err != nil {
-		return nil, err
-	}
-	cfgJSON, _ := cfg.JSON()
 
 	// Create attempt
 	var attemptID string
@@ -477,7 +478,10 @@ func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, re
 	// Load config from snapshot
 	cfg, err := scoring.ConfigFromSnapshot(cfgSnapshot)
 	if err != nil {
-		cfg, _ = scoring.LoadConfig(ctx, s.db) // fallback to load from db
+		cfg, err = scoring.LoadConfigTx(ctx, tx)
+		if err != nil {
+			return nil, err
+		} // fallback to load from db
 	}
 
 	// Grade and interpret the exact question delivered to this attempt.
@@ -653,21 +657,44 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 	var quizID string
 	var cfgSnapshot json.RawMessage
 	var totalQuestions int
-	var quizType string
+	var quizType, status string
+	var saved json.RawMessage
 	err = tx.QueryRow(ctx,
-		`SELECT qa.quiz_id, qa.point_config_snapshot, qa.total_questions, q.type
+		`SELECT qa.quiz_id, qa.point_config_snapshot, qa.total_questions, q.type,qa.status,qa.completion_response
 		 FROM quiz_attempts qa
 		 JOIN quizzes q ON q.id = qa.quiz_id
-		 WHERE qa.id=$1 AND qa.user_id=$2 AND qa.status='in_progress' FOR UPDATE`,
+		 WHERE qa.id=$1 AND qa.user_id=$2 FOR UPDATE OF qa`,
 		attemptID, userID,
-	).Scan(&quizID, &cfgSnapshot, &totalQuestions, &quizType)
+	).Scan(&quizID, &cfgSnapshot, &totalQuestions, &quizType, &status, &saved)
 	if err != nil {
 		return nil, fmt.Errorf("attempt not found or already completed")
 	}
 
+	if status == "completed" {
+		if len(saved) == 0 {
+			return s.legacyCompletion(ctx, tx, userID, attemptID, quizType)
+		}
+		var resp CompleteResp
+		if err := json.Unmarshal(saved, &resp); err != nil {
+			return nil, err
+		}
+		return &resp, nil
+	}
+	if status != "in_progress" {
+		return nil, fmt.Errorf("attempt is not in progress")
+	}
+	// Serialize completions for one learner, including the first rating insert
+	// and the repeat-points guard, without locking another student's quiz.
+	if _, err = tx.Exec(ctx, `SELECT id FROM users WHERE id=$1 FOR NO KEY UPDATE`, userID); err != nil {
+		return nil, err
+	}
+
 	cfg, _ := scoring.ConfigFromSnapshot(cfgSnapshot)
 	if cfg == nil {
-		cfg, _ = scoring.LoadConfig(ctx, s.db)
+		cfg, err = scoring.LoadConfigTx(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// One round trip for two independent scalars: the knowledge_check repeat
@@ -724,7 +751,10 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		var ratingN int
 		var seenBefore bool
 
-		rows.Scan(&qid, &qtype, &correctAns, &studentAns, &confLevel, &cluesUsed, &comboLevel, &ptsEarned, &position, &prompt, &isCorrect, &qDifficulty, &ratingB, &ratingN, &guess, &seenBefore)
+		if err := rows.Scan(&qid, &qtype, &correctAns, &studentAns, &confLevel, &cluesUsed, &comboLevel, &ptsEarned, &position, &prompt, &isCorrect, &qDifficulty, &ratingB, &ratingN, &guess, &seenBefore); err != nil {
+			rows.Close()
+			return nil, err
+		}
 
 		rawPoints += ptsEarned
 		answered++
@@ -761,6 +791,10 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 			IsCorrect:       isCorrect,
 			Points:          ptsEarned,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
 	}
 	rows.Close() // Explicit close so tx is free for next statements
 
@@ -840,62 +874,49 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		return nil, fmt.Errorf("failed to submit assignment: %w", err)
 	}
 
-	err = tx.Commit(ctx)
+	streakBonus, err := s.streakSvc.RecordCompletionTx(ctx, tx, userID, cfg, attemptID)
 	if err != nil {
 		return nil, err
 	}
-
-	// Update spaced-repetition mastery and reward the recommendation arm. Both
-	// are best-effort learning signals and never invalidate a completed attempt.
-	s.recordAdaptiveLearning(ctx, userID, quizID, scorePct)
-
-	// Update streak and get bonus
-	// Best-effort, but never silent: this failing on every call once went
-	// unnoticed for two months while no streak moved.
-	streakBonus, err := s.streakSvc.RecordCompletion(ctx, userID, cfg)
+	awarded, err := s.checkBadgesTx(ctx, tx, userID, quizID, scorePct, totalCorrect, totalQuestions, attemptID)
 	if err != nil {
-		log.Printf("streak: record completion for %s: %v", userID, err)
+		return nil, err
 	}
-	if streakBonus > 0 {
-		// Credit and ledger in one statement rather than two round trips.
-		s.db.Exec(ctx,
-			`WITH bal AS (
-			   UPDATE users SET total_points = total_points + $1, updated_at=now()
-			    WHERE id=$2 RETURNING total_points
-			 )
-			 INSERT INTO points_ledger (user_id, amount, reason, balance_after, expires_at)
-			 SELECT $2, $1, 'streak_bonus', total_points, $3 FROM bal`,
-			streakBonus, userID, time.Now().AddDate(0, int(cfg.PointsExpiryMonths), 0))
+	if err = jobs.Enqueue(ctx, tx, "attempt_learning", attemptID, userID, map[string]any{"user_id": userID, "quiz_id": quizID, "score_pct": scorePct}); err != nil {
+		return nil, err
 	}
 
-	// Check and award badges
-	awarded := s.checkBadges(ctx, userID, quizID, scorePct, totalCorrect, totalQuestions, attemptID)
-
-	// ── Emit in-app notifications (best-effort) ─────────────────────────────
+	// ── Persist notifications and delivery jobs with completion ─────────────────────────────
 	if s.notifSvc != nil {
 		// Badge unlocks
 		for _, bt := range awarded {
 			label, body := badgeCopy(bt)
-			s.notifSvc.Emit(ctx, userID, "badge", label, body,
+			if err = s.notifSvc.EmitTx(ctx, tx, userID, "badge", label, body,
 				notification.WithIcon("emoji_events"),
 				notification.WithColor("warning"),
-				notification.WithReference("badge:"+bt))
+				notification.WithReference("badge:"+bt)); err != nil {
+				return nil, err
+			}
 		}
 		// Streak milestone bonus
 		if streakBonus > 0 {
-			s.notifSvc.Emit(ctx, userID, "streak", "Streak milestone reached!",
+			if err = s.notifSvc.EmitTx(ctx, tx, userID, "streak", "Streak milestone reached!",
 				fmt.Sprintf("You earned +%d bonus points for keeping your streak alive.", streakBonus),
 				notification.WithIcon("local_fire_department"),
 				notification.WithColor("warning"),
-				notification.WithReference("streak_bonus"))
+				notification.WithReference("streak_bonus:"+attemptID)); err != nil {
+				return nil, err
+			}
 		}
 		// Perfect score
 		if scorePct >= 100 {
-			s.notifSvc.Emit(ctx, userID, "points", "Perfect score!",
+			if err = s.notifSvc.EmitTx(ctx, tx, userID, "points", "Perfect score!",
 				"You aced every question on that quiz.",
 				notification.WithIcon("star"),
 				notification.WithColor("success"),
-				notification.WithReference("attempt:"+attemptID))
+				notification.WithReference("attempt:"+attemptID)); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -906,7 +927,7 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		awarded = []string{}
 	}
 
-	return &CompleteResp{
+	resp := &CompleteResp{
 		AttemptID:          attemptID,
 		ScorePct:           scorePct,
 		PerformanceBadge:   badge,
@@ -919,11 +940,23 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		IsRepeatAttempt:    isRepeatAttempt,
 		QwishScore:         scoreAfter,
 		QwishScoreDelta:    scoreAfter - scoreBefore,
-	}, nil
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE quiz_attempts SET completion_response=$2 WHERE id=$1`, attemptID, raw); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return resp, nil
+
 }
 
-func (s *Service) recordAdaptiveLearning(ctx context.Context, userID, quizID string, scorePct float64) {
-	_, err := s.db.Exec(ctx, `
+func (s *Service) recordAdaptiveLearningTx(ctx context.Context, tx pgx.Tx, userID, quizID string, scorePct float64) error {
+	_, err := tx.Exec(ctx, `
 		WITH topic AS (
 		  SELECT COALESCE(NULLIF(subdomain,''), NULLIF(domain,'')) AS name
 		    FROM quizzes WHERE id=$2
@@ -952,9 +985,7 @@ func (s *Service) recordAdaptiveLearning(ctx context.Context, userID, quizID str
 		ON CONFLICT (user_id, quiz_id) DO UPDATE SET
 		  rewards = recommendation_bandit_stats.rewards + EXCLUDED.rewards,
 		  updated_at = now()`, userID, quizID, scorePct)
-	if err != nil {
-		log.Printf("adaptive learning update for attempt on quiz %s: %v", quizID, err)
-	}
+	return err
 }
 
 func (s *Service) GetResult(ctx context.Context, userID, attemptID string) (map[string]interface{}, error) {
@@ -1043,13 +1074,13 @@ func badgeCopy(bt string) (string, string) {
 }
 
 // checkBadges awards applicable badges after a quiz completion.
-func (s *Service) checkBadges(ctx context.Context, userID, quizID string, scorePct float64, correct, total int, attemptID string) []string {
+func (s *Service) checkBadgesTx(ctx context.Context, tx pgx.Tx, userID, quizID string, scorePct float64, correct, total int, attemptID string) ([]string, error) {
 	// The four badge predicates are independent aggregates, so they collapse
 	// into one SELECT instead of four sequential round trips on the completion
 	// path. NULL-safe COALESCE on the SUMs because SUM over zero rows is NULL.
 	var quizCount, typeCount, maxCombo int
 	var confTotal, confCorrect, veryConfCorrect int
-	err := s.db.QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT
 		   (SELECT COUNT(*) FROM quiz_attempts WHERE user_id=$1 AND status='completed'),
 		   (SELECT COUNT(DISTINCT q.type) FROM question_responses qr
@@ -1071,7 +1102,7 @@ func (s *Service) checkBadges(ctx context.Context, userID, quizID string, scoreP
 		userID, attemptID,
 	).Scan(&quizCount, &typeCount, &maxCombo, &confTotal, &confCorrect, &veryConfCorrect)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
 	var earned []string
@@ -1091,7 +1122,7 @@ func (s *Service) checkBadges(ctx context.Context, userID, quizID string, scoreP
 		earned = append(earned, "sharp_mind")
 	}
 	if len(earned) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// One multi-row insert instead of one per badge. RETURNING reports only the
@@ -1099,14 +1130,14 @@ func (s *Service) checkBadges(ctx context.Context, userID, quizID string, scoreP
 	// longer shows up as newly awarded — the old code appended on any Exec that
 	// did not error, which meant ON CONFLICT DO NOTHING still counted as a win
 	// and re-announced the same badge after every quiz.
-	rows, err := s.db.Query(ctx,
+	rows, err := tx.Query(ctx,
 		`INSERT INTO badges (user_id, badge_type)
 		 SELECT $1, bt FROM unnest($2::text[]) AS bt
 		 ON CONFLICT DO NOTHING
 		 RETURNING badge_type`,
 		userID, earned)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -1114,9 +1145,74 @@ func (s *Service) checkBadges(ctx context.Context, userID, quizID string, scoreP
 	for rows.Next() {
 		var bt string
 		if err := rows.Scan(&bt); err != nil {
-			return awarded
+			return nil, err
 		}
 		awarded = append(awarded, bt)
 	}
-	return awarded
+	return awarded, rows.Err()
+}
+
+// RegisterJobs installs durable, exactly-once database learning updates.
+func (s *Service) RegisterJobs(q *jobs.Queue) {
+	q.RegisterTx("attempt_learning", func(ctx context.Context, tx pgx.Tx, j jobs.Job) (any, error) {
+		var p struct {
+			UserID   string  `json:"user_id"`
+			QuizID   string  `json:"quiz_id"`
+			ScorePct float64 `json:"score_pct"`
+		}
+		if err := json.Unmarshal(j.Payload, &p); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, p.UserID); err != nil {
+			return nil, err
+		}
+		return nil, s.recordAdaptiveLearningTx(ctx, tx, p.UserID, p.QuizID, p.ScorePct)
+	})
+}
+
+// Historical completions predate response snapshots. Reconstruct their recorded
+// result once; unavailable historical badge/bonus attribution stays empty.
+func (s *Service) legacyCompletion(ctx context.Context, tx pgx.Tx, userID, attemptID, quizType string) (*CompleteResp, error) {
+	resp := &CompleteResp{AttemptID: attemptID, BadgesAwarded: []string{}, QuestionBreakdown: []QuestionBreakdownItem{}, Legacy: true}
+	err := tx.QueryRow(ctx, `SELECT COALESCE(a.score_pct,0),COALESCE(a.points_delta,0),COALESCE(a.total_correct,0),a.total_questions,
+ COALESCE(a.qwish_score_after,100),COALESCE(a.qwish_score_after,100)-COALESCE((SELECT p.qwish_score_after FROM quiz_attempts p WHERE p.user_id=a.user_id AND p.status='completed' AND (p.completed_at,p.id)<(a.completed_at,a.id) ORDER BY p.completed_at DESC,p.id DESC LIMIT 1),100),
+ ($3='knowledge_check' AND EXISTS(SELECT 1 FROM quiz_attempts p WHERE p.user_id=a.user_id AND p.quiz_id=a.quiz_id AND p.status='completed' AND (p.completed_at,p.id)<(a.completed_at,a.id)))
+ FROM quiz_attempts a WHERE a.id=$1 AND a.user_id=$2`, attemptID, userID, quizType).Scan(&resp.ScorePct, &resp.PointsDelta, &resp.TotalCorrect, &resp.TotalQuestions, &resp.QwishScore, &resp.QwishScoreDelta, &resp.IsRepeatAttempt)
+	if err != nil {
+		return nil, err
+	}
+	resp.PerformanceBadge = "needs_work"
+	if resp.ScorePct >= 75 {
+		resp.PerformanceBadge = "excellent"
+	} else if resp.ScorePct >= 50 {
+		resp.PerformanceBadge = "good"
+	}
+	rows, err := tx.Query(ctx, `SELECT aq.position,LEFT(qv.prompt,80),qr.answer,qv.correct_answer,qr.is_correct,qr.points_earned FROM question_responses qr JOIN quiz_attempt_questions aq ON aq.attempt_id=qr.attempt_id AND aq.question_id=qr.question_id JOIN question_versions qv ON qv.id=aq.question_version_id WHERE qr.attempt_id=$1 ORDER BY aq.position`, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var item QuestionBreakdownItem
+		if err = rows.Scan(&item.Position, &item.QuestionSnippet, &item.StudentAnswer, &item.CorrectAnswer, &item.IsCorrect, &item.Points); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		resp.QuestionBreakdown = append(resp.QuestionBreakdown, item)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE quiz_attempts SET completion_response=$2 WHERE id=$1`, attemptID, raw); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }

@@ -56,12 +56,29 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "sort must be recommended, popular or newest")
 		return
 	}
-	quizzes, total, err := h.svc.ListForStudentFilteredScope(r.Context(), instID, scope, q.Get("type"), q.Get("saved"), q.Get("search"), q.Get("domain"), q.Get("subdomain"), publishedAfter, publishedBefore, userID, sort, q.Get("unplayed") == "true", page, limit)
+	var quizzes []Quiz
+	var total int
+	var next string
+	var err error
+	if q.Get("pagination") == "cursor" || q.Get("cursor") != "" {
+		if sort != "" && sort != "newest" {
+			middleware.BadRequest(w, "cursor pagination requires newest sorting")
+			return
+		}
+		if _, err = decodeFeedCursor(q.Get("cursor")); err != nil {
+			middleware.BadRequest(w, err.Error())
+			return
+		}
+		quizzes, total, next, err = h.svc.ListForStudentCursor(r.Context(), instID, scope, q.Get("type"), q.Get("saved"), q.Get("search"), q.Get("domain"), q.Get("subdomain"), publishedAfter, publishedBefore, userID, q.Get("unplayed") == "true", limit, q.Get("cursor"))
+	} else {
+		quizzes, total, err = h.svc.ListForStudentFilteredScope(r.Context(), instID, scope, q.Get("type"), q.Get("saved"), q.Get("search"), q.Get("domain"), q.Get("subdomain"), publishedAfter, publishedBefore, userID, sort, q.Get("unplayed") == "true", page, limit)
+	}
+
 	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
-	middleware.JSONWithMeta(w, http.StatusOK, quizzes, &middleware.Meta{Page: page, Limit: limit, Total: total})
+	middleware.JSONWithMeta(w, http.StatusOK, quizzes, &middleware.Meta{Page: page, Limit: limit, Total: total, Cursor: next})
 }
 
 // GET /api/v1/institution/quizzes

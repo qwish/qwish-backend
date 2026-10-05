@@ -10,6 +10,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/qwish/backend/internal/jobs"
 	"io"
 	"net/http"
 	"strings"
@@ -100,6 +104,15 @@ func (h *Handler) GenerateQuestions(g *Generator) http.HandlerFunc {
 
 		concepts := []concept{}
 		if in.QuizID != "" {
+			var owned bool
+			if err := h.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM quizzes WHERE id::text=$1 AND created_by=$2 AND deleted_at IS NULL)`, in.QuizID, middleware.GetUserID(r)).Scan(&owned); err != nil {
+				middleware.InternalError(w)
+				return
+			}
+			if !owned {
+				middleware.NotFound(w, "quiz")
+				return
+			}
 			rows, err := h.db.Query(r.Context(), `SELECT c.id::text, c.code, c.title, c.learning_outcome
 				FROM quizzes q JOIN quiz_curriculum_units u ON u.quiz_id=q.id JOIN curriculum_concepts c ON c.chapter_id=u.unit_id
 				WHERE q.id::text=$1 AND q.created_by=$2 ORDER BY c.code LIMIT 80`, in.QuizID, middleware.GetUserID(r))
@@ -115,26 +128,40 @@ func (h *Handler) GenerateQuestions(g *Generator) http.HandlerFunc {
 		}
 
 		prompt := buildGeneratePrompt(in.Topic, in.Subtopics, in.Difficulty, in.Count, in.SuggestMisconceptions, concepts)
+		payload := generationPayload{prompt, concepts, in.Count, in.SuggestMisconceptions, in.QuizID, middleware.GetInstitutionID(r)}
+		if r.URL.Query().Get("async") == "true" || strings.Contains(r.Header.Get("Prefer"), "respond-async") {
+			key := uuid.NewString()
+			if supplied := r.Header.Get("Idempotency-Key"); supplied != "" {
+				if len(supplied) > 128 {
+					middleware.BadRequest(w, "idempotency key is too long")
+					return
+				}
+				key = middleware.GetUserID(r) + ":" + supplied
+			}
+			err := jobs.Enqueue(r.Context(), h.db, "question_generation", key, middleware.GetUserID(r), payload)
+			if err != nil {
+				middleware.InternalError(w)
+				return
+			}
+			var id string
+			var existingState string
+			rawPayload, _ := json.Marshal(payload)
+			if err = h.db.QueryRow(r.Context(), `SELECT id,state FROM background_jobs WHERE kind='question_generation' AND dedupe_key=$1 AND owner_id=$2 AND payload=$3::jsonb`, key, middleware.GetUserID(r), rawPayload).Scan(&id, &existingState); err != nil {
+				middleware.Error(w, http.StatusConflict, "IDEMPOTENCY_CONFLICT", "this key was used for a different generation request")
+				return
+			}
+			w.Header().Set("Location", "/api/v1/teacher/questions/generation-jobs/"+id)
+			middleware.JSON(w, http.StatusAccepted, map[string]any{"job_id": id, "status": existingState})
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 		defer cancel()
-		raw, err := g.call(ctx, prompt)
+		out, err := runGeneration(ctx, g, payload)
 		if err != nil {
 			middleware.Error(w, http.StatusBadGateway, "GENERATION_FAILED", "Question generation is unavailable right now. Try again, or use “Copy a prompt”.")
 			return
 		}
-		byCode := map[string]concept{}
-		for _, c := range concepts {
-			byCode[c.Code] = c
-		}
-		out := []map[string]any{}
-		for _, q := range raw {
-			if item, ok := normalise(q, byCode, in.SuggestMisconceptions); ok {
-				out = append(out, item)
-			}
-			if len(out) >= in.Count {
-				break
-			}
-		}
+
 		middleware.JSON(w, http.StatusOK, map[string]any{"questions": out})
 	}
 }
@@ -296,4 +323,74 @@ func contains(list []string, v string) bool {
 		}
 	}
 	return false
+}
+
+type generationPayload struct {
+	Prompt         string
+	Concepts       []concept
+	Count          int
+	Misconceptions bool
+	QuizID         string
+	InstitutionID  string
+}
+
+func runGeneration(ctx context.Context, g *Generator, p generationPayload) ([]map[string]any, error) {
+	raw, err := g.call(ctx, p.Prompt)
+	if err != nil {
+		return nil, err
+	}
+	byCode := map[string]concept{}
+	for _, c := range p.Concepts {
+		byCode[c.Code] = c
+	}
+	out := []map[string]any{}
+	for _, q := range raw {
+		if item, ok := normalise(q, byCode, p.Misconceptions); ok {
+			out = append(out, item)
+		}
+		if len(out) >= p.Count {
+			break
+		}
+	}
+	return out, nil
+}
+func (h *Handler) RegisterGenerationJobs(q *jobs.Queue, g *Generator) {
+	q.Register("question_generation", func(ctx context.Context, j jobs.Job) (any, error) {
+		var p generationPayload
+		if err := json.Unmarshal(j.Payload, &p); err != nil {
+			return nil, err
+		}
+		var allowed bool
+		err := h.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users u LEFT JOIN institutions i ON i.id=u.institution_id
+   WHERE u.id::text=$1 AND u.status='active' AND u.deleted_at IS NULL AND u.role='teacher'
+   AND COALESCE(u.institution_id::text,'')=$2 AND (i.id IS NULL OR i.status='verified')
+   AND ($3='' OR EXISTS(SELECT 1 FROM quizzes WHERE id::text=$3 AND created_by=u.id AND deleted_at IS NULL)))`, j.Owner, p.InstitutionID, p.QuizID).Scan(&allowed)
+		if err != nil {
+			return nil, err
+		}
+		if !allowed {
+			return nil, fmt.Errorf("generation access revoked")
+		}
+		out, err := runGeneration(ctx, g, p)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"questions": out}, nil
+	})
+}
+func (h *Handler) GenerationJob(w http.ResponseWriter, r *http.Request) {
+	var id, state string
+	var result json.RawMessage
+	var attempts int
+	err := h.db.QueryRow(r.Context(), `SELECT id::text,state,result,attempts FROM background_jobs WHERE id::text=$1 AND kind='question_generation' AND owner_id=$2`, chi.URLParam(r, "jobId"), middleware.GetUserID(r)).Scan(&id, &state, &result, &attempts)
+	if err == pgx.ErrNoRows {
+		middleware.NotFound(w, "generation job")
+		return
+	}
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	middleware.JSON(w, 200, map[string]any{"job_id": id, "status": state, "result": result, "attempts": attempts})
 }

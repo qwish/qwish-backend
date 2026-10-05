@@ -2,7 +2,7 @@
 
 > **Base URL:** `https://<your-domain>/api/v1`
 > **Content-Type:** `application/json` (unless noted otherwise)
-> **Request Timeout:** 30 seconds
+> **Request Timeout:** 30 seconds for ordinary routes; synchronous question generation has a 95-second route budget.
 
 ---
 
@@ -4904,3 +4904,51 @@ who joined the class later.
 ```
 `category` is `event|test|general`. `read` follows the notification that
 delivered the notice; mark it read with `PATCH /users/me/notifications/{notification_id}/read`.
+
+
+## Reliability and pagination additions
+
+### Completion retries
+
+Repeating an attempt completion returns its persisted completion response and does not replay rewards. Historical completed attempts without a saved response return `legacy: true`; unavailable historical streak bonus and badge attribution is empty.
+
+### Async question generation
+
+The existing `POST /teacher/questions/generate` body and synchronous response remain supported. Opt in using `?async=true` or `Prefer: respond-async`. An optional `Idempotency-Key` header (maximum 128 characters) is scoped to the teacher. Reusing it with a different effective generation payload returns 409.
+
+Accepted response: **202**, with `Location: /api/v1/teacher/questions/generation-jobs/<job_id>` and JSON `data` containing `job_id` and `status`. Poll `GET /teacher/questions/generation-jobs/{jobId}` with the teacher's JWT. Response `data` contains `job_id`, `status`, `attempts`, and `result`. States are `pending`, `running`, `completed`, and `failed`; completed `result` contains `questions`. Results are retained for 30 days after completion. Clients should use async mode for generation that can exceed their own request/proxy deadline.
+
+### Cursor pagination
+
+These existing endpoints accept `pagination=cursor&limit=N` for the first page and `cursor=<next_cursor>&limit=N` for subsequent pages:
+
+- `GET /quizzes` (default or `sort=newest` only)
+- `GET /users/me/notifications`
+- `GET /users/me/points/ledger`
+
+Continue using the same filters. Responses include `meta.next_cursor`; an absent or empty value indicates the end. Existing page pagination remains supported. Cursors are opaque and validated; invalid cursors return 400. Totals represent the full filtered list, not the remaining cursor suffix.
+
+### Notification streaming and delivery
+
+`GET /users/me/notifications/stream` emits notification IDs as SSE IDs. Reconnect with `Last-Event-ID`. Clients must handle `resync` by refreshing the notification list/unread count; replay is bounded. Deduplicate push notifications using `notification_id`.
+
+Ordinary email sends now acknowledge durable queue acceptance; they do not wait for provider delivery. Login OTP and email verification remain synchronous. Announcement responses include `delivery_state` (`idle`, `dispatching`, `completed`, `failed`). `status: sent` means dispatch was committed to the queue.
+
+Server response caching covers eligible scoped GET routes with 10–30 second TTLs and 300 seconds for metadata. Database changes invalidate caches across replicas. Browser caching remains disabled for cached scoped responses. Database unavailability during authentication or distributed rate limiting returns 503.
+
+Deployment configuration, delivery guarantees, operational metrics, and validation details: [Backend performance and reliability](BACKEND_PERFORMANCE.md).
+
+
+## Authorization hardening
+
+Protected routes enforce live teacher status and administrator session/passkey policy before executing handlers or accessing response caches.
+
+- Pending teachers receive **403 `PENDING_VERIFICATION`**. This applies to API access and user passkey session issuance/refresh.
+- Revoked admin sessions receive **401 `SESSION_REVOKED`** across protected API routes, including credential management. Revocation/policy lookup failures fail closed.
+- Admin sessions must have a verified `session_id`. Old sessionless tokens receive **401 `SESSION_REQUIRED`** and require a fresh login. Legacy console identities without an `admin_accounts` row receive **403 `ADMIN_IDENTITY_REQUIRED`** and need proper administrator provisioning.
+- When `require_admin_passkeys` is enabled, admins with enrolled credentials must present a passkey-authenticated session; OTP sessions receive **403 `PASSKEY_REQUIRED`**. Direct Supabase OTP tokens are subject to the same rule.
+- Admins without a credential can use an OTP session only for `POST /auth/passkey/register/begin`, `POST /auth/passkey/register/finish`, `GET /auth/passkey/credentials`, `POST /auth/logout`, and `POST /auth/sessions/revoke-all`. Other routes return **403 `PASSKEY_ENROLLMENT_REQUIRED`**. After enrollment, sign in with the new passkey.
+- Bearer tokens in URL query parameters are rejected on ordinary API routes. Use `Authorization: Bearer <access_token>`. Native EventSource compatibility permits `?token=` only on `GET /users/me/notifications/stream`; it still undergoes the same live authorization checks. Prefer authenticated fetch streaming to keep credentials out of URLs.
+- The fixed-code store-review account must be an active student; it cannot mint an administrator session.
+
+No database migration is needed for these changes; they use the existing administrator session, passkey, and policy tables.

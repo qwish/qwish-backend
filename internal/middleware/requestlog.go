@@ -27,7 +27,7 @@ func RequestLog(next http.Handler) http.Handler {
 		if ww.Status() < 400 && took < slowRequest {
 			return
 		}
-		log.Printf("%d %s %s %s (%d bytes)",
-			ww.Status(), r.Method, r.URL.Path, took.Round(time.Millisecond), ww.BytesWritten())
+		log.Printf("%d %s %s %s (%d bytes) request_id=%s",
+			ww.Status(), r.Method, r.URL.Path, took.Round(time.Millisecond), ww.BytesWritten(), ww.Header().Get("X-Request-Id"))
 	})
 }

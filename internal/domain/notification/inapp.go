@@ -4,6 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/qwish/backend/internal/db"
+	"github.com/qwish/backend/internal/jobs"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -29,101 +34,108 @@ type Notification struct {
 
 // ── Service: emit + query ────────────────────────────────────────────────────
 
-// pusherAdapter is the callback shape used by SetPusher: deliver one push to
-// the given user. Decoupled from the push package via this function type so
-// the notification package has no upstream import on push.
-type pusherAdapter func(ctx context.Context, userID, title, body string, data map[string]string)
+// Push delivery is a durable job, written atomically with the notification.
+type pusherAdapter func(context.Context, string, string, string, map[string]string) error
 
-// SetPusher registers a delivery callback for outbound mobile push. Pass a
-// closure that adapts your concrete pusher (e.g. push.Service.SendToUser).
-func (s *Service) SetPusher(fn func(ctx context.Context, userID, title, body string, data map[string]string)) {
-	s.push = pusherAdapter(fn)
-	// A fixed worker pool, not a goroutine per push: an announcement to every
-	// student used to start one goroutine per recipient, each taking pool
-	// connections for its preference/token reads and starving API requests.
-	// ponytail: in-process queue, lost on restart; push is best-effort anyway.
-	s.pushQ = make(chan pushJob, 1024)
-	for range 4 {
-		go func() {
-			for j := range s.pushQ {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				s.push(ctx, j.userID, j.title, j.body, j.data)
-				cancel()
-			}
-		}()
-	}
+func (s *Service) SetPusher(fn func(context.Context, string, string, string, map[string]string) error) {
+	s.push = fn
 }
 
 type pushJob struct {
-	userID, title, body string
-	data                map[string]string
+	UserID string            `json:"user_id"`
+	Title  string            `json:"title"`
+	Body   string            `json:"body"`
+	Data   map[string]string `json:"data"`
 }
 
-// Emit writes a single in-app notification row. Best-effort — errors are swallowed
-// so callers in the hot path (attempt complete, streak update) do not break.
-// When a pusher is registered, Emit also fans the notification out as a mobile
-// push so users see it on the lock screen even when the app is closed.
 func (s *Service) Emit(ctx context.Context, userID, kind, title, body string, opts ...EmitOpt) {
-	if s.db == nil || userID == "" {
+	if s == nil || s.db == nil || userID == "" {
 		return
 	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		log.Printf("notification begin: %v", err)
+		return
+	}
+	defer tx.Rollback(context.Background())
+	if err = s.EmitTx(ctx, tx, userID, kind, title, body, opts...); err == nil {
+		err = tx.Commit(ctx)
+	}
+	if err != nil {
+		log.Printf("notification emit: %v", err)
+	}
+}
+
+// EmitTx returns errors so authoritative callers can roll back the whole event.
+func (s *Service) EmitTx(ctx context.Context, tx pgx.Tx, userID, kind, title, body string, opts ...EmitOpt) error {
 	o := emitOpts{}
 	for _, fn := range opts {
 		fn(&o)
 	}
-
-	var notifID string
-	var createdAt time.Time
-	err := s.db.QueryRow(ctx,
-		`INSERT INTO user_notifications (user_id, kind, title, body, icon, color, reference)
-		 VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,''))
-		 ON CONFLICT DO NOTHING
-		 RETURNING id, created_at`,
-		userID, kind, title, body, o.icon, o.color, o.reference).Scan(&notifID, &createdAt)
-
-	if err == nil {
-		var iconPtr *string
-		if o.icon != "" {
-			iconPtr = &o.icon
-		}
-		var colorPtr *string
-		if o.color != "" {
-			colorPtr = &o.color
-		}
-		var refPtr *string
-		if o.reference != "" {
-			refPtr = &o.reference
-		}
-		s.Publish(userID, Notification{
-			ID:        notifID,
-			Kind:      kind,
-			Title:     title,
-			Body:      body,
-			Icon:      iconPtr,
-			Color:     colorPtr,
-			Reference: refPtr,
-			CreatedAt: createdAt,
-		})
+	var id string
+	err := tx.QueryRow(ctx, `INSERT INTO user_notifications(user_id,kind,title,body,icon,color,reference)
+ VALUES($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),NULLIF($7,'')) ON CONFLICT DO NOTHING RETURNING id`, userID, kind, title, body, o.icon, o.color, o.reference).Scan(&id)
+	if err == pgx.ErrNoRows {
+		return nil
 	}
-
-	// Push only when this call inserted the durable notification. In particular,
-	// an idempotent assignment reminder must not produce duplicate lock-screen
-	// pushes after ON CONFLICT DO NOTHING.
-	if err == nil && s.push != nil {
-		data := map[string]string{"kind": kind}
-		if o.reference != "" {
-			data["reference"] = o.reference
-		}
-		if kind == "assignment" {
-			data["deep_link"] = "qwish://assignments"
-		}
-		if id, _, ok := strings.Cut(strings.TrimPrefix(o.reference, "activity:"), ":"); kind == "activity" && ok {
-			data["deep_link"] = "qwish://activities/" + id
-		}
-		// Queued so push latency never blocks the request that triggered Emit;
-		// a full queue backpressures bulk senders like the announcement cron.
-		s.pushQ <- pushJob{userID, title, body, data}
+	if err != nil {
+		return err
 	}
+	if s.push == nil {
+		return nil
+	}
+	data := map[string]string{"kind": kind, "notification_id": id}
+	if o.reference != "" {
+		data["reference"] = o.reference
+	}
+	if kind == "assignment" {
+		data["deep_link"] = "qwish://assignments"
+	}
+	if activity, _, ok := strings.Cut(strings.TrimPrefix(o.reference, "activity:"), ":"); kind == "activity" && ok {
+		data["deep_link"] = "qwish://activities/" + activity
+	}
+	return jobs.Enqueue(ctx, tx, "push", id, userID, pushJob{userID, title, body, data})
+}
+
+func (s *Service) RegisterJobs(q *jobs.Queue) {
+	q.Register("push", func(ctx context.Context, j jobs.Job) (any, error) {
+		var p pushJob
+		if err := json.Unmarshal(j.Payload, &p); err != nil {
+			return nil, err
+		}
+		if s.push == nil {
+			return nil, fmt.Errorf("push is not configured")
+		}
+		return nil, s.push(ctx, p.UserID, p.Title, p.Body, p.Data)
+	})
+	q.Register("email", func(ctx context.Context, j jobs.Job) (any, error) {
+		var p queuedEmail
+		if err := json.Unmarshal(j.Payload, &p); err != nil {
+			return nil, err
+		}
+		if strings.HasPrefix(p.Reference, "announcement:") {
+			var active bool
+			err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM announcements WHERE id::text=$1 AND status='sent')`, strings.TrimPrefix(p.Reference, "announcement:")).Scan(&active)
+			if err != nil || !active {
+				return nil, err
+			}
+		}
+		return nil, s.deliverEmail(ctx, p.To, p.Subject, p.HTML, j.ID, p.Reference)
+	})
+}
+
+// StartBroadcast relays committed notifications to SSE clients on every replica.
+func (s *Service) StartBroadcast(ctx context.Context, pool *pgxpool.Pool) {
+	db.Listen(ctx, pool, "qwish_notifications", nil, func(ctx context.Context, id string) {
+		var userID string
+		var n Notification
+		err := pool.QueryRow(ctx, `SELECT user_id,id,kind,title,body,icon,color,reference,read_at,created_at FROM user_notifications WHERE id=$1`, id).Scan(&userID, &n.ID, &n.Kind, &n.Title, &n.Body, &n.Icon, &n.Color, &n.Reference, &n.ReadAt, &n.CreatedAt)
+		if err == nil {
+			s.Publish(userID, n)
+		} else {
+			log.Printf("notification broadcast: %v", err)
+		}
+	})
 }
 
 type emitOpts struct {
@@ -137,33 +149,61 @@ func WithColor(v string) EmitOpt     { return func(o *emitOpts) { o.color = v } 
 func WithReference(v string) EmitOpt { return func(o *emitOpts) { o.reference = v } }
 
 func (s *Service) List(ctx context.Context, userID string, page, limit int) ([]Notification, int, int, error) {
+	list, total, unread, _, err := s.ListCursor(ctx, userID, page, limit, "", false)
+	return list, total, unread, err
+}
+func (s *Service) ListCursor(ctx context.Context, userID string, page, limit int, cursor string, cursorMode bool) ([]Notification, int, int, string, error) {
 	offset := (page - 1) * limit
 	// Both counts scan the same rows, so one aggregate with a FILTER replaces
 	// two round trips and two index scans. This endpoint is polled on every app
 	// open, which makes it one of the highest-frequency reads in the API.
 	var total, unread int
-	s.db.QueryRow(ctx,
+	if err := s.db.QueryRow(ctx,
 		`SELECT COUNT(*), COUNT(*) FILTER (WHERE read_at IS NULL)
-		 FROM user_notifications WHERE user_id=$1`, userID).Scan(&total, &unread)
+		 FROM user_notifications WHERE user_id=$1`, userID).Scan(&total, &unread); err != nil {
+		return nil, 0, 0, "", err
+	}
 
-	rows, err := s.db.Query(ctx,
-		`SELECT id, kind, title, body, icon, color, reference, read_at, created_at
-		 FROM user_notifications
-		 WHERE user_id=$1
-		 ORDER BY created_at DESC
-		 LIMIT $2 OFFSET $3`, userID, limit, offset)
+	predicate := ""
+	args := []any{userID, limit + 1, offset}
+	if cursorMode {
+		args[2] = 0
+	}
+	if cursor != "" {
+		c, err := middleware.DecodeCursor(cursor)
+		if err != nil {
+			return nil, 0, 0, "", err
+		}
+		predicate = " AND (created_at,id)<($4,$5::uuid)"
+		args = append(args, c.Time, c.ID)
+	}
+	rows, err := s.db.Query(ctx, `SELECT id,kind,title,body,icon,color,reference,read_at,created_at FROM user_notifications WHERE user_id=$1`+predicate+` ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3`, args...)
+
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, "", err
 	}
 	defer rows.Close()
 
 	list := []Notification{}
 	for rows.Next() {
 		var n Notification
-		rows.Scan(&n.ID, &n.Kind, &n.Title, &n.Body, &n.Icon, &n.Color, &n.Reference, &n.ReadAt, &n.CreatedAt)
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Title, &n.Body, &n.Icon, &n.Color, &n.Reference, &n.ReadAt, &n.CreatedAt); err != nil {
+			return nil, 0, 0, "", err
+		}
 		list = append(list, n)
 	}
-	return list, total, unread, nil
+	if err := rows.Err(); err != nil {
+		return nil, 0, 0, "", err
+	}
+	next := ""
+	if len(list) > limit {
+		list = list[:limit]
+		if cursorMode {
+			last := list[len(list)-1]
+			next = middleware.EncodeCursor(last.CreatedAt, last.ID)
+		}
+	}
+	return list, total, unread, next, nil
 }
 
 func (s *Service) MarkRead(ctx context.Context, userID, notifID string) error {
@@ -204,7 +244,14 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > 100 {
 		limit = 50
 	}
-	list, total, unread, err := h.svc.List(r.Context(), userID, page, limit)
+	cursor := r.URL.Query().Get("cursor")
+	if cursor != "" {
+		if _, err := middleware.DecodeCursor(cursor); err != nil {
+			middleware.BadRequest(w, err.Error())
+			return
+		}
+	}
+	list, total, unread, next, err := h.svc.ListCursor(r.Context(), userID, page, limit, cursor, r.URL.Query().Get("pagination") == "cursor" || cursor != "")
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -212,7 +259,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	middleware.JSONWithMeta(w, http.StatusOK, map[string]interface{}{
 		"items":  list,
 		"unread": unread,
-	}, &middleware.Meta{Page: page, Limit: limit, Total: total})
+	}, &middleware.Meta{Page: page, Limit: limit, Total: total, Cursor: next})
 }
 
 // GET /api/v1/users/me/notifications/unread-count
@@ -271,7 +318,34 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(w, "event: connected\ndata: {}\n\n")
 	flusher.Flush()
-
+	if after := r.Header.Get("Last-Event-ID"); after != "" {
+		rows, err := h.svc.db.Query(r.Context(), `SELECT n.id,n.kind,n.title,n.body,n.icon,n.color,n.reference,n.read_at,n.created_at
+   FROM user_notifications n WHERE n.user_id=$1 AND (n.created_at,n.id)>(SELECT created_at,id FROM user_notifications WHERE id::text=$2 AND user_id=$1)
+   ORDER BY n.created_at,n.id LIMIT 101`, userID, after)
+		if err != nil {
+			return
+		}
+		count := 0
+		for rows.Next() {
+			var n Notification
+			if err = rows.Scan(&n.ID, &n.Kind, &n.Title, &n.Body, &n.Icon, &n.Color, &n.Reference, &n.ReadAt, &n.CreatedAt); err != nil {
+				rows.Close()
+				return
+			}
+			count++
+			if count > 100 {
+				break
+			}
+			raw, _ := json.Marshal(n)
+			if _, err = fmt.Fprintf(w, "id: %s\ndata: %s\n\n", n.ID, raw); err != nil {
+				rows.Close()
+				return
+			}
+		}
+		rows.Close()
+		fmt.Fprint(w, "event: resync\ndata: {}\n\n")
+		flusher.Flush()
+	}
 	ticker := time.NewTicker(25 * time.Second)
 	defer ticker.Stop()
 
@@ -282,11 +356,15 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 		case n := <-ch:
 			data, err := json.Marshal(n)
 			if err == nil {
-				fmt.Fprintf(w, "data: %s\n\n", string(data))
+				if _, err := fmt.Fprintf(w, "id: %s\ndata: %s\n\n", n.ID, string(data)); err != nil {
+					return
+				}
 				flusher.Flush()
 			}
 		case <-ticker.C:
-			fmt.Fprintf(w, ": ping\n\n")
+			if _, err := fmt.Fprintf(w, ": ping\nevent: resync\ndata: {}\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}

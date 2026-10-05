@@ -89,8 +89,8 @@ func TestUnrelatedSourcesGetSeparateSubqueries(t *testing.T) {
 	if !strings.Contains(sql, "FROM users u") {
 		t.Error("signups needs its own users subquery")
 	}
-	if !strings.Contains(sql, "FROM quiz_attempts qa JOIN users u") {
-		t.Error("attempts_completed needs its attempts subquery")
+	if !strings.Contains(sql, "FROM attempt_daily_metrics qa JOIN users u") {
+		t.Error("attempts_completed needs its daily rollup subquery")
 	}
 }
 

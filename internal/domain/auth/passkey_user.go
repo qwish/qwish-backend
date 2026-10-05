@@ -269,7 +269,15 @@ func (s *Service) deleteUserCredential(ctx context.Context, userID, id string) (
 // sessions. The refresh handler tries the admin path first, then this.
 func (s *Service) TryUserPasskeyRefresh(ctx context.Context, sub string, gen int) (access, refresh string, ok bool) {
 	u, err := s.getUserBySupabaseUID(ctx, sub)
-	if err != nil || u.Status == "suspended" {
+	if err != nil || u.Status == "suspended" || (u.Role == "teacher" && u.Status != "active") {
+		return "", "", false
+	}
+	// A rejected administrator refresh must never fall back to the users
+	// identity and mint a fresh session ID around an admin revocation.
+	if u.Role == "super_admin" || u.Role == "moderator" || u.Role == "support_agent" {
+		return "", "", false
+	}
+	if s.IsDemoLoginEmail(u.Email) && u.Role != "student" {
 		return "", "", false
 	}
 	// Session generation: a token minted before the last "sign out everywhere"
@@ -310,6 +318,9 @@ func (h *Handler) UserPasskeyRegisterBegin(w http.ResponseWriter, r *http.Reques
 	u, err := h.svc.getUserByID(r.Context(), userID)
 	if err != nil {
 		middleware.Forbidden(w)
+		return
+	}
+	if !middleware.AuthorizeUserStatus(w, u.Role, u.Status) {
 		return
 	}
 	// The store-review account is email+OTP only. A passkey enrolled on a
@@ -362,6 +373,9 @@ func (h *Handler) UserPasskeyRegisterFinish(w http.ResponseWriter, r *http.Reque
 	u, err := h.svc.getUserByID(r.Context(), userID)
 	if err != nil {
 		middleware.Forbidden(w)
+		return
+	}
+	if !middleware.AuthorizeUserStatus(w, u.Role, u.Status) {
 		return
 	}
 	// The store-review account is email+OTP only. A passkey enrolled on a
@@ -435,7 +449,7 @@ func (h *Handler) UserPasskeyLoginBegin(w http.ResponseWriter, r *http.Request) 
 	// the two are indistinguishable, and the ceremony fails at finish with the
 	// same PASSKEY_VERIFY_FAILED any wrong credential earns.
 	u, err := h.svc.getUserByEmail(r.Context(), email)
-	if err != nil {
+	if err != nil || u.Status == "suspended" || (u.Role == "teacher" && u.Status != "active") {
 		h.svc.respondDecoyAssertion(w)
 		return
 	}
@@ -488,8 +502,7 @@ func (h *Handler) UserPasskeyLoginFinish(w http.ResponseWriter, r *http.Request)
 		middleware.Error(w, http.StatusUnauthorized, "PASSKEY_VERIFY_FAILED", "passkey verification failed")
 		return
 	}
-	if u.Status == "suspended" {
-		middleware.Error(w, http.StatusForbidden, "ACCOUNT_SUSPENDED", "account is suspended")
+	if !middleware.AuthorizeUserStatus(w, u.Role, u.Status) {
 		return
 	}
 	creds, err := h.svc.listUserCredentials(r.Context(), u.ID)
@@ -571,8 +584,8 @@ func (h *Handler) UserPasskeyLoginFinishDiscoverable(w http.ResponseWriter, r *h
 		if err != nil {
 			return nil, err
 		}
-		if u.Status == "suspended" {
-			return nil, errors.New("account is suspended")
+		if u.Status == "suspended" || (u.Role == "teacher" && u.Status != "active") {
+			return nil, errors.New("account is not active")
 		}
 		creds, err := h.svc.listUserCredentials(r.Context(), u.ID)
 		if err != nil {
@@ -594,6 +607,9 @@ func (h *Handler) UserPasskeyLoginFinishDiscoverable(w http.ResponseWriter, r *h
 
 // writeUserPasskeySession mints a session for the verified user.
 func (h *Handler) writeUserPasskeySession(w http.ResponseWriter, r *http.Request, u *userAccount) {
+	if !middleware.AuthorizeUserStatus(w, u.Role, u.Status) {
+		return
+	}
 	if h.rejectAppLogin(w, r, u.Role, u.Email) {
 		return
 	}

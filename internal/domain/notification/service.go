@@ -176,6 +176,13 @@ func (s *Service) SendAccountInvite(ctx context.Context, to, name, roleLabel, in
 		tmplAccountInvite(name, roleLabel, instName, s.dashURL(loginURL)), reference)
 }
 
+const staffInviteSubject = "You’re invited to join the Qwish team"
+
+// SendStaffInvite invites a Qwish staff member to the admin console.
+func (s *Service) SendStaffInvite(ctx context.Context, to, name, roleLabel, loginURL, reference string) error {
+	return s.SendEmail(ctx, to, staffInviteSubject, tmplStaffInvite(name, roleLabel, s.dashURL(loginURL)), reference)
+}
+
 // SendInstitutionInvite emails a "bring Qwish to your institution" invite with a
 // link to the public application form. reference ties it back to the originating
 // contact submission (e.g. "institution_invite:<submissionID>").

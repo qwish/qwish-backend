@@ -263,6 +263,23 @@ func tmplAccountInvite(name, roleLabel, instName, loginURL string) string {
 	return emailLayout(esc(instName)+" invited you to Qwish", body)
 }
 
+// tmplStaffInvite invites Qwish's own staff (super admin, moderator, support
+// agent) to the admin console. Sign-in is email + one-time code.
+func tmplStaffInvite(name, roleLabel, loginURL string) string {
+	greeting := "Hi"
+	if name != "" {
+		greeting = "Hi " + esc(name)
+	}
+	body := heading("Welcome to the Qwish team") +
+		paragraph(greeting+",") +
+		paragraph("You’ve been added to the Qwish team as "+esc(roleLabel)+" on the admin console.") +
+		paragraph("Sign in with this email address — we’ll send you a one-time code each time you sign in.") +
+		primaryButton("Open the admin console", loginURL) +
+		fallbackLink(loginURL) +
+		mutedNote("If you weren’t expecting this, you can safely ignore this email.")
+	return emailLayout("You’re invited to join the Qwish team", body)
+}
+
 func tmplInstitutionInvite(name, applyLink string) string {
 	greeting := "Hi"
 	if name != "" {

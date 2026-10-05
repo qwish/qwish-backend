@@ -73,3 +73,22 @@ func TestEmailLayoutUsesBrandLogo(t *testing.T) {
 		}
 	}
 }
+
+// Staff invites name the Qwish team once, in the subject and the body.
+func TestStaffInviteReadsNaturally(t *testing.T) {
+	if staffInviteSubject != "You’re invited to join the Qwish team" {
+		t.Errorf("subject = %q", staffInviteSubject)
+	}
+	html := tmplStaffInvite("Kabir Rao", "a moderator", "https://admin.qwish.in")
+	if strings.Contains(html, "Qwish on Qwish") || strings.Contains(html, "to Qwish as") {
+		t.Error("staff invite repeats Qwish")
+	}
+	for _, want := range []string{"the Qwish team", "a moderator", "one-time code", "https://admin.qwish.in"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("staff invite missing %q", want)
+		}
+	}
+	if strings.Contains(strings.ToLower(html), "password") {
+		t.Error("staff invite mentions a password")
+	}
+}

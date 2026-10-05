@@ -1395,7 +1395,7 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 	var mailErr error
 	if h.notif != nil {
 		// No set-password link: staff sign in with email + one-time code.
-		mailErr = h.notif.SendAccountInvite(r.Context(), req.Email, req.Name, staffRoleLabel(req.Role), "Qwish", h.cfg.SuperAdminURL, "admin_invite:"+id)
+		mailErr = h.notif.SendStaffInvite(r.Context(), req.Email, req.Name, staffRoleLabel(req.Role), h.cfg.SuperAdminURL, "admin_invite:"+id)
 		if mailErr != nil {
 			fmt.Printf("[admin] invite email to %s failed: %v\n", req.Email, mailErr)
 		}
@@ -1575,7 +1575,7 @@ func (h *Handler) ResendAdminInvite(w http.ResponseWriter, r *http.Request) {
 
 	var mailErr error
 	if h.notif != nil {
-		mailErr = h.notif.SendAccountInvite(r.Context(), email, name, staffRoleLabel(role), "Qwish", h.cfg.SuperAdminURL, "admin_invite:"+targetID)
+		mailErr = h.notif.SendStaffInvite(r.Context(), email, name, staffRoleLabel(role), h.cfg.SuperAdminURL, "admin_invite:"+targetID)
 	}
 	newStatus := "pending"
 	if mailErr != nil {

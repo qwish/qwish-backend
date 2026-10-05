@@ -1826,7 +1826,7 @@ func (h *Handler) TeacherActivityReport(w http.ResponseWriter, r *http.Request) 
 	 LEFT JOIN quiz_attempts qa ON qa.quiz_id=q.id
 	 WHERE u.institution_id=$1 AND u.role='teacher' AND u.deleted_at IS NULL` + teacherScope + `
 	 GROUP BY u.id, u.display_name
-	 ORDER BY total_attempts DESC, u.display_name
+	 ORDER BY u.display_name, u.id
 	 LIMIT $` + strconv.Itoa(n) + ` OFFSET $` + strconv.Itoa(n+1)
 
 	rows, err := h.db.Query(r.Context(), sql, args...)

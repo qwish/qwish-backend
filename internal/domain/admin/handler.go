@@ -1,17 +1,14 @@
 package admin
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
 
 	qdb "github.com/qwish/backend/internal/db"
-	"github.com/qwish/backend/internal/httpx"
 	"strconv"
 	"strings"
 	"time"
@@ -490,73 +487,6 @@ func (h *Handler) ResetReferralCodes(w http.ResponseWriter, r *http.Request) {
 	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "reset_referral_codes", "institution", instID, "")
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"student_referral_code": sCode, "teacher_referral_code": tCode,
-	})
-}
-
-// POST /api/v1/admin/institutions/:institutionId/resend-credentials
-// Resets the institution admin's Supabase password to a fresh temporary one and
-// emails the institution's contact with the full credentials (admin login + the
-// current referral codes). The previous password stops working.
-func (h *Handler) ResendInstitutionCredentials(w http.ResponseWriter, r *http.Request) {
-	instID := chi.URLParam(r, "institutionId")
-
-	var instName, contactEmail, status, sCode, tCode string
-	err := h.db.QueryRow(r.Context(),
-		`SELECT name, contact_email, status,
-			COALESCE(student_referral_code,''), COALESCE(teacher_referral_code,'')
-		 FROM institutions WHERE id=$1 AND deleted_at IS NULL`,
-		instID,
-	).Scan(&instName, &contactEmail, &status, &sCode, &tCode)
-	if err != nil {
-		middleware.NotFound(w, "institution")
-		return
-	}
-	if status != "verified" {
-		middleware.Error(w, http.StatusUnprocessableEntity, "NOT_VERIFIED",
-			"institution must be approved (status=verified) before resending credentials")
-		return
-	}
-
-	// Locate the provisioned institution admin (holds the Supabase login we reset).
-	var adminUID, adminEmail string
-	err = h.db.QueryRow(r.Context(),
-		`SELECT supabase_uid, email FROM users
-		 WHERE institution_id=$1 AND role='institution_admin' AND deleted_at IS NULL
-		 ORDER BY created_at LIMIT 1`,
-		instID,
-	).Scan(&adminUID, &adminEmail)
-	if err != nil {
-		middleware.Error(w, http.StatusUnprocessableEntity, "NO_ADMIN",
-			"no institution admin is provisioned yet; provision an admin before resending credentials")
-		return
-	}
-
-	// Fresh temporary password (meets Supabase complexity: length + mixed chars).
-	tempPassword := "Qw" + uuid.New().String()[:8] + "#7"
-	if err := h.invite.SetPassword(r.Context(), adminUID, tempPassword); err != nil {
-		fmt.Printf("[admin] resend-credentials password reset failed for %s: %v\n", adminEmail, err)
-		middleware.Error(w, http.StatusBadGateway, "PASSWORD_RESET_FAILED",
-			"failed to reset the institution admin password; credentials were not sent")
-		return
-	}
-
-	if h.notif == nil {
-		middleware.Error(w, http.StatusServiceUnavailable, "EMAIL_UNAVAILABLE",
-			"email service is not configured")
-		return
-	}
-	if err := h.notif.SendInstitutionApproval(r.Context(), contactEmail, instName, adminEmail, tempPassword, sCode, tCode); err != nil {
-		fmt.Printf("[admin] resend-credentials email to %s failed: %v\n", contactEmail, err)
-		middleware.Error(w, http.StatusBadGateway, "EMAIL_FAILED",
-			"password was reset but the credentials email failed to send")
-		return
-	}
-
-	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "resend_institution_credentials", "institution", instID,
-		fmt.Sprintf("admin_email=%s", adminEmail))
-	middleware.JSON(w, http.StatusOK, map[string]interface{}{
-		"message":     "Credentials resent to " + contactEmail,
-		"admin_email": adminEmail,
 	})
 }
 
@@ -1464,11 +1394,8 @@ func (h *Handler) CreateAdminAccount(w http.ResponseWriter, r *http.Request) {
 	// to 'invite_failed' so the dashboard can surface it and offer a resend.
 	var mailErr error
 	if h.notif != nil {
-		if inv.ActionLink != "" {
-			mailErr = h.notif.SendAdminInvite(r.Context(), req.Email, req.Name, req.Role, inv.ActionLink)
-		} else if inv.AlreadyExisted {
-			mailErr = h.notif.SendAdminWelcome(r.Context(), req.Email, req.Name, req.Role)
-		}
+		// No set-password link: staff sign in with email + one-time code.
+		mailErr = h.notif.SendAccountInvite(r.Context(), req.Email, req.Name, staffRoleLabel(req.Role), "Qwish", h.cfg.SuperAdminURL, "admin_invite:"+id)
 		if mailErr != nil {
 			fmt.Printf("[admin] invite email to %s failed: %v\n", req.Email, mailErr)
 		}
@@ -1648,11 +1575,7 @@ func (h *Handler) ResendAdminInvite(w http.ResponseWriter, r *http.Request) {
 
 	var mailErr error
 	if h.notif != nil {
-		if inv.ActionLink != "" {
-			mailErr = h.notif.SendAdminInvite(r.Context(), email, name, role, inv.ActionLink)
-		} else if inv.AlreadyExisted {
-			mailErr = h.notif.SendAdminWelcome(r.Context(), email, name, role)
-		}
+		mailErr = h.notif.SendAccountInvite(r.Context(), email, name, staffRoleLabel(role), "Qwish", h.cfg.SuperAdminURL, "admin_invite:"+targetID)
 	}
 	newStatus := "pending"
 	if mailErr != nil {
@@ -1663,46 +1586,6 @@ func (h *Handler) ResendAdminInvite(w http.ResponseWriter, r *http.Request) {
 
 	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "resend_admin_invite", "admin", targetID, "")
 	middleware.JSON(w, http.StatusOK, map[string]string{"status": newStatus, "message": "invite resent"})
-}
-
-// POST /api/v1/admin/users/:userId/reset-password
-func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
-	userID := chi.URLParam(r, "userId")
-
-	var email, supabaseUID string
-	err := h.db.QueryRow(r.Context(),
-		`SELECT email, supabase_uid FROM users WHERE id=$1 AND deleted_at IS NULL`, userID,
-	).Scan(&email, &supabaseUID)
-	if err != nil {
-		middleware.NotFound(w, "user")
-		return
-	}
-
-	body, _ := json.Marshal(map[string]string{"type": "recovery", "email": email})
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-		h.cfg.SupabaseURL+"/auth/v1/admin/generate_link", bytes.NewReader(body))
-	if err != nil {
-		middleware.InternalError(w)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("apikey", h.cfg.SupabaseServiceKey)
-	req.Header.Set("Authorization", "Bearer "+h.cfg.SupabaseServiceKey)
-
-	resp, err := httpx.Client.Do(req)
-	if err != nil {
-		middleware.InternalError(w)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		raw, _ := io.ReadAll(resp.Body)
-		middleware.JSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("supabase error: %s", string(raw))})
-		return
-	}
-
-	logAudit(r.Context(), h.db, middleware.GetAdminID(r), "reset_password", "user", userID, "")
-	middleware.JSON(w, http.StatusOK, map[string]string{"message": "password reset email sent"})
 }
 
 // POST /api/v1/admin/quizzes/:quizId/request-edits
@@ -2373,20 +2256,10 @@ func (h *Handler) provisionInstitutionAdmin(ctx context.Context, instID, adminNa
 
 	h.db.Exec(ctx, `INSERT INTO streaks (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, userID)
 
-	// Send the login email via Resend (generate_link does not send mail itself).
-	// A fresh invite carries a set-password action link; when Supabase returns no
-	// link (email already had an account) we send the welcome so the admin always
-	// gets *something* — never a silent no-op, which was the original bug.
-	// ponytail: welcome has no set-password link; if a brand-new user ever comes
-	// back with an empty ActionLink (Supabase config), reset+SendInstitutionApproval instead.
+	// Email the invite. No password and no set-password link: the admin signs
+	// in to the institute dashboard with this email and a one-time code.
 	if h.notif != nil {
-		var mailErr error
-		if inv.ActionLink != "" {
-			mailErr = h.notif.SendAdminInvite(ctx, adminEmail, adminName, "institution_admin", inv.ActionLink)
-		} else {
-			mailErr = h.notif.SendAdminWelcome(ctx, adminEmail, adminName, "institution_admin")
-		}
-		if mailErr != nil {
+		if mailErr := h.notif.SendAccountInvite(ctx, adminEmail, adminName, "the institute admin", instName, h.cfg.InstituteURL, "institution_admin_invite:"+userID); mailErr != nil {
 			fmt.Printf("[admin] institution-admin login email to %s failed: %v\n", adminEmail, mailErr)
 		}
 	}
@@ -2570,4 +2443,17 @@ func logAudit(ctx context.Context, db *pgxpool.Pool, adminID, action, targetType
 		`INSERT INTO audit_log (admin_id, admin_name, admin_role, action_type, target_type, target_id, reason)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
 		adminID, adminName, adminRole, action, targetType, targetID, reason)
+}
+
+// staffRoleLabel reads a Qwish staff role in an invite sentence.
+func staffRoleLabel(role string) string {
+	switch role {
+	case "super_admin":
+		return "a super admin"
+	case "moderator":
+		return "a moderator"
+	case "support_agent":
+		return "a support agent"
+	}
+	return "an admin"
 }

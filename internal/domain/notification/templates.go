@@ -273,51 +273,12 @@ func tmplInstitutionInvite(name, applyLink string) string {
 	return emailLayout("Bring Qwish to your institution — apply now", body)
 }
 
-func tmplAdminInvite(name, role, inviteLink string) string {
-	greeting := "Hi"
-	if name != "" {
-		greeting = "Hi " + esc(name)
-	}
-	body := heading("You’re invited to join Qwish as an Admin") +
-		paragraph(greeting+",") +
-		paragraph("You’ve been invited to join Qwish as a <strong>"+esc(role)+"</strong>.") +
-		paragraph("Set up your account to access the Admin Dashboard.") +
-		primaryButton("Accept invitation", inviteLink) +
-		fallbackLink(inviteLink) +
-		mutedNote("If you weren’t expecting this invitation, you can safely ignore this email.")
-	return emailLayout("You’re invited to join Qwish as an Admin", body)
-}
-
-func tmplInstitutionApproval(instName, adminEmail, adminPassword, sCode, tCode, dashboardURL string) string {
-	body := heading("Welcome to Qwish! 🎉") +
-		paragraph("Your institution <strong>"+esc(instName)+"</strong> has been approved.") +
-		paragraph("Here are your admin credentials and referral codes:") +
-		credentialBox([][2]string{
-			{"Admin email", esc(adminEmail)},
-			{"Temporary password", esc(adminPassword)},
-			{"Student code", esc(sCode)},
-			{"Teacher code", esc(tCode)},
-		}) +
-		primaryButton("Go to dashboard", dashboardURL) +
-		mutedNote("For security, please change your temporary password right after your first login.")
-	return emailLayout("Your Qwish institution has been approved", body)
-}
-
 func tmplInstitutionRejection(instName, reason string) string {
 	body := heading("Application update") +
 		paragraph("We’re sorry — your application for <strong>"+esc(instName)+"</strong> wasn’t approved.") +
 		credentialBox([][2]string{{"Reason", esc(reason)}}) +
 		paragraph("You’re welcome to reapply once the above has been addressed.")
 	return emailLayout("Update on your Qwish institution application", body)
-}
-
-func tmplPasswordReset(resetLink string, expiryMinutes int) string {
-	body := heading("Reset your password") +
-		paragraph(fmt.Sprintf("Tap the button below to choose a new password. This link expires in %d minutes.", expiryMinutes)) +
-		primaryButton("Reset password", resetLink) +
-		fallbackLink(resetLink) +
-		mutedNote("If you didn’t request a password reset, you can safely ignore this email.")
-	return emailLayout("Reset your Qwish password", body)
 }
 
 func tmplWeeklyInsights(name string, pointsThisWeek int64, trend string, quizzes int, avgScore float64, streak int, domain, suggestion string) string {
@@ -339,17 +300,4 @@ func tmplWeeklyInsights(name string, pointsThisWeek int64, trend string, quizzes
 		statRows(rows) +
 		tipBox(esc(suggestion))
 	return emailLayout("Your weekly Qwish insights are ready", body)
-}
-
-func tmplAdminWelcome(name, role, dashboardURL string) string {
-	greeting := "Hi"
-	if name != "" {
-		greeting = "Hi " + esc(name)
-	}
-	body := heading("Welcome to Qwish Admins!") +
-		paragraph(greeting+",") +
-		paragraph("You’ve been granted <strong>"+esc(role)+"</strong> privileges on Qwish.") +
-		paragraph("You can now sign in with your existing credentials to access the Admin Dashboard.") +
-		primaryButton("Open dashboard", dashboardURL)
-	return emailLayout("Your Qwish admin access is ready", body)
 }

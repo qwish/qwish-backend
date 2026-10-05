@@ -2901,24 +2901,6 @@ GDPR soft-delete — anonymises name and email.
 
 ---
 
-## POST `/admin/users/{userId}/reset-password`
-**Roles:** super_admin only
-
-Triggers a password-reset email for the user via the Supabase Admin API (`generate_link` with `type=recovery`). The email is sent directly by Supabase; no password or link is returned to the caller.
-
-### Response `200`
-```json
-{ "message": "password reset email sent" }
-```
-
-### Error responses
-| Status | Condition |
-|--------|-----------|
-| `404` | User not found or soft-deleted |
-| `502` | Supabase rejected the request |
-
----
-
 ## GET `/admin/quizzes/moderation-queue`
 **Roles:** all admin
 
@@ -4897,7 +4879,10 @@ this institution and an invite email. `201 { id, email, invite_sent }`. A pendin
 link invite to the same address is revoked. `409` as above; `422 NOT_VERIFIED`
 for an unverified institution.
 
-Neither sends a password. The person signs in on their panel with their email
+Neither sends a password. Qwish has no passwords anywhere: staff, institute
+admins and teachers are all invited by email and sign in with email + one-time
+code. The old `resend-credentials` and `reset-password` endpoints are removed,
+and staff/institute-admin invites no longer carry a set-password link. The person signs in on their panel with their email
 and a one-time code; the first sign-in attaches the Supabase identity to the
 pre-created account by verified email. `invite_sent: false` means the account
 exists but the email failed — they can still sign in with email + code.

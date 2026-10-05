@@ -935,7 +935,6 @@ func main() {
 					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/suspend", adminH.SuspendInstitution)
 					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/reactivate", adminH.ReactivateInstitution)
 					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/reset-referral-codes", adminH.ResetReferralCodes)
-					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/resend-credentials", adminH.ResendInstitutionCredentials)
 					r.With(mw.RequireRole("super_admin")).Post("/institutions/{institutionId}/provision-admin", adminH.ProvisionAdmin)
 
 					// Users
@@ -947,7 +946,6 @@ func main() {
 					r.With(mw.RequireRole("super_admin")).Post("/users/{userId}/points", adminH.AdjustPoints)
 					r.Post("/users/{userId}/impersonate", adminH.Impersonate)
 					r.Post("/impersonation/{sessionId}/end", adminH.EndImpersonation)
-					r.With(mw.RequireRole("super_admin")).Post("/users/{userId}/reset-password", adminH.ResetPassword)
 
 					// Quizzes moderation
 					// /moderation-queue precedes the list so chi does not read

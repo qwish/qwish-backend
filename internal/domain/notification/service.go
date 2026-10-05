@@ -140,11 +140,6 @@ func (s *Service) SendUserWelcome(ctx context.Context, to, name, appURL string) 
 		tmplUserWelcome(name, s.dashURL(appURL)), "user_welcome")
 }
 
-func (s *Service) SendInstitutionApproval(ctx context.Context, contactEmail, instName, adminEmail, adminPassword, sCode, tCode string) error {
-	return s.SendEmail(ctx, contactEmail, "Your Qwish Institution Has Been Approved",
-		tmplInstitutionApproval(instName, adminEmail, adminPassword, sCode, tCode, s.dashURL(s.instituteURL)), "institution_approval")
-}
-
 // dashURL returns u, falling back to the public brand site when the dashboard
 // URL hasn't been configured so email buttons never point at an empty href.
 func (s *Service) dashURL(u string) string {
@@ -157,11 +152,6 @@ func (s *Service) dashURL(u string) string {
 func (s *Service) SendInstitutionRejection(ctx context.Context, contactEmail, instName, reason string) error {
 	return s.SendEmail(ctx, contactEmail, "Qwish Institution Application Update",
 		tmplInstitutionRejection(instName, reason), "institution_rejection")
-}
-
-func (s *Service) SendPasswordReset(ctx context.Context, email, resetLink string) error {
-	return s.SendEmail(ctx, email, "Qwish Password Reset",
-		tmplPasswordReset(resetLink, 15), "password_reset")
 }
 
 // SendTeacherInvite emails a teacher invite link to the given address.
@@ -194,28 +184,12 @@ func (s *Service) SendInstitutionInvite(ctx context.Context, to, name, applyLink
 		tmplInstitutionInvite(name, applyLink), reference)
 }
 
-func (s *Service) SendAdminInvite(ctx context.Context, to, name, role, inviteLink string) error {
-	return s.SendEmail(ctx, to, "You're invited to join Qwish as an Admin",
-		tmplAdminInvite(name, role, inviteLink), "admin_invite")
-}
-
 // SendWeeklyInsights emails the user their weekly score breakdown.
 func (s *Service) SendWeeklyInsights(ctx context.Context, to, name string, pointsThisWeek int64, deltaPct float64, quizzes int, avgScore float64, streak int, domain, suggestion string) error {
 	trend := fmt.Sprintf("%+.0f%% vs last week", deltaPct)
 	return s.SendEmail(ctx, to, "Your weekly Qwish insights",
 		tmplWeeklyInsights(name, pointsThisWeek, trend, quizzes, avgScore, streak, domain, suggestion),
 		"weekly_insights")
-}
-
-func (s *Service) SendAdminWelcome(ctx context.Context, to, name, role string) error {
-	// Institution admins land on the institution dashboard; internal admin roles
-	// (super_admin/moderator/support_agent) land on the super-admin console.
-	dash := s.dashURL(s.superAdminURL)
-	if role == "institution_admin" {
-		dash = s.dashURL(s.instituteURL)
-	}
-	return s.SendEmail(ctx, to, "Qwish Admin Access Granted",
-		tmplAdminWelcome(name, role, dash), "admin_welcome")
 }
 
 // SendAppLoginDenied explains a rejected, verified app login privately by email.

@@ -4862,7 +4862,8 @@ A practice group is a `groups` row with `kind: "remedial"`, made by a teacher fr
 
 ### GET `/teacher/attention?class_id=&page=1&limit=25`
 Role: teacher. Students in the teacher's active classes with an overdue support
-review, overdue assigned work, or a needs-support concept; one row per student,
+review, overdue assigned work, a needs-support concept, or a question they keep
+answering wrong (wrong in ≥2 attempts, still wrong on the latest); one row per student,
 paginated, with page-independent totals. Full contract in
 `qwish-teacher-panel/API_DOC.md`. Definitions:
 `plans/teacher-and-institute-decision-dashboards.md` §2.

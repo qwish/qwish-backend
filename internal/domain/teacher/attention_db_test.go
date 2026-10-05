@@ -17,7 +17,9 @@ import (
 //
 //	S1 two classes (A, B), overdue in both          → flagged, 2 overdue submissions
 //	S2 excused on one, extended on another,
-//	   one question answered wrong three times      → not flagged (repeat attempts ≠ variety)
+//	   one question answered wrong three times      → no learning signal (repeat attempts ≠ variety),
+//	                                                  but flagged for repeated wrong answers, listed last
+//	S1 also: a question wrong twice, then right      → no repeated-wrong reason (latest answer correct)
 //	S3 overdue support review + needs-support concept → flagged, two reasons, listed first
 //	S4 overdue in A, then transferred to C          → not flagged (no longer on the roster)
 //	S5 suspended, overdue in A                      → not flagged (roster exception)
@@ -124,10 +126,36 @@ func seedAttention(t *testing.T, pool *pgxpool.Pool) attentionSeed {
 	_, err = conn.Exec(ctx, `RESET session_replication_role`)
 	must(err)
 
+	// Quiz responses, one attempt each: S2 wrong ×3 on one question; S1 wrong, wrong, right.
+	var q1, q2 string
+	question := func(pos int, dest *string) {
+		t.Helper()
+		must(pool.QueryRow(ctx, `INSERT INTO questions (quiz_id, position, type, prompt, correct_answer)
+			VALUES ($1,$2,'multiple_choice','Which fraction equals 1/2?','"2/4"') RETURNING id`, quiz, pos).Scan(dest))
+	}
+	question(1, &q1)
+	question(2, &q2)
+	answer := func(student, q string, correct bool, ago string) {
+		t.Helper()
+		var attempt string
+		must(pool.QueryRow(ctx, `INSERT INTO quiz_attempts (quiz_id, user_id, status, started_at, completed_at)
+			VALUES ($1,$2,'completed',now()-$3::interval,now()-$3::interval) RETURNING id`, quiz, student, ago).Scan(&attempt))
+		_, err := pool.Exec(ctx, `INSERT INTO question_responses (attempt_id, question_id, answer, is_correct, submitted_at)
+			VALUES ($1,$2,'"1/3"',$3,now()-$4::interval)`, attempt, q, correct, ago)
+		must(err)
+	}
+	answer(s.S2, q1, false, "3 days")
+	answer(s.S2, q1, false, "2 days")
+	answer(s.S2, q1, false, "1 day")
+	answer(s.S1, q2, false, "3 days")
+	answer(s.S1, q2, false, "2 days")
+	answer(s.S1, q2, true, "1 day")
+
 	t.Cleanup(func() {
 		pool.Exec(ctx, `DELETE FROM learning_evidence WHERE institution_id=$1`, s.Inst)
 		pool.Exec(ctx, `DELETE FROM teacher_student_support WHERE institution_id=$1`, s.Inst)
 		pool.Exec(ctx, `DELETE FROM learning_assignments WHERE institution_id=$1`, s.Inst)
+		pool.Exec(ctx, `DELETE FROM quiz_attempts WHERE quiz_id IN (SELECT id FROM quizzes WHERE institution_id=$1)`, s.Inst)
 		pool.Exec(ctx, `DELETE FROM quizzes WHERE institution_id=$1`, s.Inst)
 		pool.Exec(ctx, `DELETE FROM group_students WHERE group_id IN (SELECT id FROM groups WHERE institution_id=$1)`, s.Inst)
 		pool.Exec(ctx, `DELETE FROM group_teachers WHERE group_id IN (SELECT id FROM groups WHERE institution_id=$1)`, s.Inst)
@@ -188,19 +216,20 @@ func TestAttentionFixtures(t *testing.T) {
 		t.Fatalf("status %d", code)
 	}
 	d := body.Data
-	want := AttentionTotals{EligibleStudents: 3, StudentsNeedingAttention: 2, SupportReviewsOverdue: 1,
-		StudentsMissingWork: 1, OverdueSubmissions: 2, StudentsNeedingSupport: 1}
+	want := AttentionTotals{EligibleStudents: 3, StudentsNeedingAttention: 3, SupportReviewsOverdue: 1,
+		StudentsMissingWork: 1, OverdueSubmissions: 2, StudentsNeedingSupport: 1,
+		StudentsRepeatingErrors: 1, RepeatedWrongQuestions: 1}
 	if d.Totals != want {
 		t.Errorf("totals = %+v, want %+v", d.Totals, want)
 	}
 	if d.Scope.State != "ok" || d.Timezone != "Asia/Kolkata" || d.DefinitionVersion == "" || d.To == "" {
 		t.Errorf("envelope = %+v", d)
 	}
-	if len(d.Students) != 2 || body.Meta.Total != 2 {
-		t.Fatalf("students = %d, meta.total = %d, want 2/2", len(d.Students), body.Meta.Total)
+	if len(d.Students) != 3 || body.Meta.Total != 3 {
+		t.Fatalf("students = %d, meta.total = %d, want 3/3", len(d.Students), body.Meta.Total)
 	}
 	// Overdue support review ranks first; one row per student lists every reason.
-	first, second := d.Students[0], d.Students[1]
+	first, second, third := d.Students[0], d.Students[1], d.Students[2]
 	if first.StudentID != s.S3 || fmt.Sprint(reasonKinds(first)) != "[support_review_overdue needs_support]" {
 		t.Errorf("first = %s %v, want S3 [support_review_overdue needs_support]", first.StudentName, reasonKinds(first))
 	}
@@ -210,10 +239,15 @@ func TestAttentionFixtures(t *testing.T) {
 	if len(second.Classes) != 2 || len(second.Reasons) == 0 || len(second.Reasons[0].Items) != 2 {
 		t.Errorf("S1 classes = %d, overdue items = %+v; want 2 classes, 2 items", len(second.Classes), second.Reasons)
 	}
+	if third.StudentID != s.S2 || fmt.Sprint(reasonKinds(third)) != "[repeated_wrong]" {
+		t.Errorf("third = %s %v, want S2 [repeated_wrong]", third.StudentName, reasonKinds(third))
+	} else if qs := third.Reasons[0].Questions; len(qs) != 1 || qs[0].WrongAttempts != 3 || qs[0].Attempts != 3 || qs[0].LatestAttemptID == "" || qs[0].Prompt == "" {
+		t.Errorf("S2 repeated questions = %+v, want one question wrong in 3 of 3 attempts", qs)
+	}
 
 	// Pagination: totals do not move, the page does.
 	_, page := getAttention(t, pool, s.Teacher, s.Inst, "?limit=1&page=2")
-	if len(page.Data.Students) != 1 || page.Data.Students[0].StudentID != s.S1 || page.Meta.Total != 2 || page.Data.Totals != want {
+	if len(page.Data.Students) != 1 || page.Data.Students[0].StudentID != s.S1 || page.Meta.Total != 3 || page.Data.Totals != want {
 		t.Errorf("page 2 = %+v meta %+v", page.Data.Students, page.Meta)
 	}
 

@@ -24,6 +24,8 @@ type AttentionTotals struct {
 	StudentsMissingWork      int `json:"students_missing_work"`
 	OverdueSubmissions       int `json:"overdue_submissions"`
 	StudentsNeedingSupport   int `json:"students_needing_support"`
+	StudentsRepeatingErrors  int `json:"students_repeating_errors"`
+	RepeatedWrongQuestions   int `json:"repeated_wrong_questions"`
 }
 
 type AttentionClass struct {
@@ -45,14 +47,28 @@ type AttentionConcept struct {
 	LatestEvidenceAt time.Time `json:"latest_evidence_at"`
 }
 
+// AttentionRepeat is one question a student keeps getting wrong: wrong in at
+// least two separate attempts, and still wrong on the latest one.
+type AttentionRepeat struct {
+	QuestionID      string    `json:"question_id"`
+	Prompt          string    `json:"prompt"`
+	QuizID          string    `json:"quiz_id"`
+	QuizTitle       string    `json:"quiz_title"`
+	WrongAttempts   int       `json:"wrong_attempts"`
+	Attempts        int       `json:"attempts"`
+	LatestAt        time.Time `json:"latest_at"`
+	LatestAttemptID string    `json:"latest_attempt_id"`
+}
+
 // AttentionReason is one reason a student is listed. Date is what the reason is
 // ordered by: the review date, the oldest due date, or the oldest evidence date.
 type AttentionReason struct {
-	Kind     string             `json:"kind"` // support_review_overdue | overdue_work | needs_support
-	Date     string             `json:"date"`
-	Status   string             `json:"status,omitempty"`
-	Items    []AttentionWork    `json:"items,omitempty"`
-	Concepts []AttentionConcept `json:"concepts,omitempty"`
+	Kind      string             `json:"kind"` // support_review_overdue | overdue_work | needs_support | repeated_wrong
+	Date      string             `json:"date"`
+	Status    string             `json:"status,omitempty"`
+	Items     []AttentionWork    `json:"items,omitempty"`
+	Concepts  []AttentionConcept `json:"concepts,omitempty"`
+	Questions []AttentionRepeat  `json:"questions,omitempty"`
 }
 
 type AttentionStudent struct {
@@ -102,24 +118,46 @@ WITH roster AS (
    GROUP BY le.user_id, le.concept_id, c.code, c.title
   HAVING COUNT(DISTINCT le.question_id) >= 2
      AND COUNT(*) FILTER (WHERE NOT le.is_correct) > COUNT(*) FILTER (WHERE le.is_correct)
+), repeats AS (
+  -- The same question answered wrong in two or more separate attempts, and
+  -- still wrong on the latest one; a later correct answer clears it. Every
+  -- question in the institution's quizzes counts, mapped to a concept or not.
+  -- One response per attempt per question (uq_response_attempt_question).
+  SELECT qa.user_id AS student_id, qr.question_id, qn.prompt, q.id AS quiz_id, q.title AS quiz_title,
+         COUNT(*) FILTER (WHERE NOT qr.is_correct) AS wrong_attempts, COUNT(*) AS attempts,
+         MAX(qr.submitted_at) AS latest_at,
+         (array_agg(qa.id ORDER BY qr.submitted_at DESC))[1] AS latest_attempt_id
+    FROM roster r
+    JOIN quiz_attempts qa ON qa.user_id=r.student_id
+    JOIN quizzes q ON q.id=qa.quiz_id AND q.institution_id=$1
+    JOIN question_responses qr ON qr.attempt_id=qa.id AND qr.is_correct IS NOT NULL
+    JOIN questions qn ON qn.id=qr.question_id
+   GROUP BY qa.user_id, qr.question_id, qn.prompt, q.id, q.title
+  HAVING COUNT(*) FILTER (WHERE NOT qr.is_correct) >= 2
+     AND NOT (array_agg(qr.is_correct ORDER BY qr.submitted_at DESC))[1]
 ), flagged AS (
-  SELECT student_id FROM support UNION SELECT student_id FROM work UNION SELECT student_id FROM learning
+  SELECT student_id FROM support UNION SELECT student_id FROM work
+  UNION SELECT student_id FROM learning UNION SELECT student_id FROM repeats
 )`
 
 const attentionTotalsSQL = attentionCTE + `
 SELECT (SELECT COUNT(*) FROM roster), (SELECT COUNT(*) FROM flagged), (SELECT COUNT(*) FROM support),
        (SELECT COUNT(DISTINCT student_id) FROM work), (SELECT COUNT(*) FROM work),
-       (SELECT COUNT(DISTINCT student_id) FROM learning)`
+       (SELECT COUNT(DISTINCT student_id) FROM learning),
+       (SELECT COUNT(DISTINCT student_id) FROM repeats), (SELECT COUNT(*) FROM repeats)`
 
-// Ordering: overdue support reviews, then overdue work, then learning signals;
+// Ordering: overdue support reviews, then overdue work, then learning signals,
+// then repeated wrong answers;
 // oldest first within each. $5 timezone, $6 limit, $7 offset.
 const attentionRowsSQL = attentionCTE + `, ranked AS (
   SELECT f.student_id, COALESCE(NULLIF(u.display_name,''), u.full_name, '') AS name,
          CASE WHEN EXISTS (SELECT 1 FROM support s WHERE s.student_id=f.student_id) THEN 1
-              WHEN EXISTS (SELECT 1 FROM work w WHERE w.student_id=f.student_id) THEN 2 ELSE 3 END AS rank,
+              WHEN EXISTS (SELECT 1 FROM work w WHERE w.student_id=f.student_id) THEN 2
+              WHEN EXISTS (SELECT 1 FROM learning l WHERE l.student_id=f.student_id) THEN 3 ELSE 4 END AS rank,
          COALESCE((SELECT s.review_on::timestamp AT TIME ZONE $5 FROM support s WHERE s.student_id=f.student_id),
                   (SELECT MIN(w.due_at) FROM work w WHERE w.student_id=f.student_id),
-                  (SELECT MIN(l.latest_evidence_at) FROM learning l WHERE l.student_id=f.student_id)) AS since
+                  (SELECT MIN(l.latest_evidence_at) FROM learning l WHERE l.student_id=f.student_id),
+                  (SELECT MIN(p.latest_at) FROM repeats p WHERE p.student_id=f.student_id)) AS since
     FROM flagged f JOIN users u ON u.id=f.student_id
 )
 SELECT r.student_id, r.name,
@@ -133,7 +171,11 @@ SELECT r.student_id, r.name,
           FROM work w WHERE w.student_id=r.student_id),
        (SELECT json_agg(json_build_object('concept_id', l.concept_id, 'code', l.code, 'title', l.title,
                'latest_evidence_at', l.latest_evidence_at) ORDER BY l.latest_evidence_at)
-          FROM learning l WHERE l.student_id=r.student_id)
+          FROM learning l WHERE l.student_id=r.student_id),
+       (SELECT json_agg(json_build_object('question_id', p.question_id, 'prompt', p.prompt, 'quiz_id', p.quiz_id,
+               'quiz_title', p.quiz_title, 'wrong_attempts', p.wrong_attempts, 'attempts', p.attempts,
+               'latest_at', p.latest_at, 'latest_attempt_id', p.latest_attempt_id) ORDER BY p.latest_at)
+          FROM repeats p WHERE p.student_id=r.student_id)
   FROM ranked r
  ORDER BY r.rank, r.since, r.name, r.student_id
  LIMIT $6 OFFSET $7`
@@ -188,7 +230,8 @@ func (h *Handler) Attention(w http.ResponseWriter, r *http.Request) {
 	var totals AttentionTotals
 	if err := h.db.QueryRow(ctx, attentionTotalsSQL, instID, classes, teacherID, today).Scan(
 		&totals.EligibleStudents, &totals.StudentsNeedingAttention, &totals.SupportReviewsOverdue,
-		&totals.StudentsMissingWork, &totals.OverdueSubmissions, &totals.StudentsNeedingSupport); err != nil {
+		&totals.StudentsMissingWork, &totals.OverdueSubmissions, &totals.StudentsNeedingSupport,
+		&totals.StudentsRepeatingErrors, &totals.RepeatedWrongQuestions); err != nil {
 		middleware.InternalError(w)
 		return
 	}
@@ -236,8 +279,8 @@ func (h *Handler) attentionRows(ctx context.Context, instID string, classes []st
 	out := []AttentionStudent{}
 	for rows.Next() {
 		var st AttentionStudent
-		var classesJSON, supportJSON, workJSON, learningJSON []byte
-		if err := rows.Scan(&st.StudentID, &st.StudentName, &classesJSON, &supportJSON, &workJSON, &learningJSON); err != nil {
+		var classesJSON, supportJSON, workJSON, learningJSON, repeatsJSON []byte
+		if err := rows.Scan(&st.StudentID, &st.StudentName, &classesJSON, &supportJSON, &workJSON, &learningJSON, &repeatsJSON); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(classesJSON, &st.Classes); err != nil {
@@ -266,6 +309,13 @@ func (h *Handler) attentionRows(ctx context.Context, instID string, classes []st
 				return nil, err
 			}
 			st.Reasons = append(st.Reasons, AttentionReason{Kind: "needs_support", Date: concepts[0].LatestEvidenceAt.Format(time.RFC3339), Concepts: concepts})
+		}
+		if repeatsJSON != nil {
+			var questions []AttentionRepeat
+			if err := json.Unmarshal(repeatsJSON, &questions); err != nil {
+				return nil, err
+			}
+			st.Reasons = append(st.Reasons, AttentionReason{Kind: "repeated_wrong", Date: questions[0].LatestAt.Format(time.RFC3339), Questions: questions})
 		}
 		out = append(out, st)
 	}

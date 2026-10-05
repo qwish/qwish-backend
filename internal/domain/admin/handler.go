@@ -579,7 +579,12 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	// One row per account: a student's enrollment shown is the active institute's.
 	from := ` FROM users u LEFT JOIN enrollments e ON e.user_id=u.id AND e.institution_id=u.institution_id AND e.status IN ('active','suspended')
 	 LEFT JOIN institutions i ON i.id=CASE WHEN u.role='student' THEN e.institution_id ELSE u.institution_id END `
-	where := `u.deleted_at IS NULL AND u.role IN ('student','teacher','parent','institution_admin')`
+	where := `u.role IN ('student','teacher','parent','institution_admin')`
+	if q.Get("status") == "deleted" {
+		where += ` AND u.deleted_at IS NOT NULL`
+	} else {
+		where += ` AND u.deleted_at IS NULL`
+	}
 	n := 1
 	if s := q.Get("search"); s != "" {
 		where += fmt.Sprintf(` AND (u.display_name ILIKE $%d OR u.email ILIKE $%d)`, n, n)

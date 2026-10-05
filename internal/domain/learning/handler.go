@@ -1,6 +1,7 @@
 package learning
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -913,8 +914,19 @@ type FollowUpOutcome struct {
 }
 
 func (h *Handler) FollowUpOutcomes(w http.ResponseWriter, r *http.Request) {
-	groupID := strings.TrimSpace(r.URL.Query().Get("class_id"))
-	rows, err := h.db.Query(r.Context(), `
+	teacherID := middleware.GetUserID(r)
+	result, err := h.followUpOutcomes(r.Context(), middleware.GetInstitutionID(r), &teacherID, strings.TrimSpace(r.URL.Query().Get("class_id")))
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, result)
+}
+
+// followUpOutcomes is the latest 100 follow-ups with their comparison gates.
+// teacherID limits them to that teacher's classes; nil is institution-wide.
+func (h *Handler) followUpOutcomes(ctx context.Context, instID string, teacherID *string, groupID string) ([]FollowUpOutcome, error) {
+	rows, err := h.db.Query(ctx, `
 		WITH scoped AS (
 		  SELECT a.*,LEAST(
 		    a.created_at+interval '90 days',
@@ -951,28 +963,26 @@ func (h *Handler) FollowUpOutcomes(w http.ResponseWriter, r *http.Request) {
 		       a.follow_up_review_status,a.follow_up_note,a.follow_up_reviewed_at
 		FROM scoped a
 		JOIN groups g ON g.id=a.group_id AND g.institution_id=a.institution_id
-		JOIN group_teachers gt ON gt.group_id=a.group_id AND gt.user_id=$1
 		JOIN quizzes q ON q.id=a.quiz_id
 		JOIN curriculum_concepts c ON c.id=a.source_concept_id
 		LEFT JOIN learning_assignment_recipients ar ON ar.assignment_id=a.id
 		LEFT JOIN evidence e ON e.assignment_id=a.id AND e.student_id=ar.student_id
 		LEFT JOIN paired p ON p.assignment_id=a.id AND p.student_id=ar.student_id
 		WHERE ($3='' OR a.group_id::text=$3)
+		  AND ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM group_teachers gt WHERE gt.group_id=a.group_id AND gt.user_id=$1::uuid))
 		GROUP BY a.id,a.quiz_id,a.group_id,a.status,a.created_at,a.due_at,a.comparison_ends_at,
 		         a.follow_up_review_status,a.follow_up_note,a.follow_up_reviewed_at,
 		         q.title,g.name,c.id,c.code,c.title
-		ORDER BY a.created_at DESC LIMIT 100`, middleware.GetUserID(r), middleware.GetInstitutionID(r), groupID)
+		ORDER BY a.created_at DESC LIMIT 100`, teacherID, instID, groupID)
 	if err != nil {
-		middleware.InternalError(w)
-		return
+		return nil, err
 	}
 	defer rows.Close()
 	result := []FollowUpOutcome{}
 	for rows.Next() {
 		var item FollowUpOutcome
 		if err := rows.Scan(&item.AssignmentID, &item.QuizID, &item.QuizTitle, &item.GroupID, &item.GroupName, &item.ConceptID, &item.ConceptCode, &item.ConceptTitle, &item.Status, &item.CreatedAt, &item.DueAt, &item.Recipients, &item.Submitted, &item.BeforeCorrect, &item.BeforeTotal, &item.BeforeStudents, &item.BeforeQuestions, &item.AfterCorrect, &item.AfterTotal, &item.AfterStudents, &item.AfterQuestions, &item.ComparableStudents, &item.ComparisonEndsAt, &item.ReviewStatus, &item.ReviewNote, &item.ReviewedAt); err != nil {
-			middleware.InternalError(w)
-			return
+			return nil, err
 		}
 		item.ComparisonStatus = "comparable"
 		if item.AfterTotal == 0 {
@@ -984,11 +994,96 @@ func (h *Handler) FollowUpOutcomes(w http.ResponseWriter, r *http.Request) {
 		}
 		result = append(result, item)
 	}
-	if rows.Err() != nil {
+	return result, rows.Err()
+}
+
+// InstitutionSupportSummary is the institute's support workload and follow-up
+// status: open plans by status, overdue and upcoming reviews, each teacher's
+// open plans (ordered by name — workload, not a ranking), and follow-ups by
+// their comparison gates. Plans count only active students in the institute.
+//
+// GET /institution/support-summary
+func (h *Handler) InstitutionSupportSummary(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	instID := middleware.GetInstitutionID(r)
+	var tz string
+	if err := h.db.QueryRow(ctx, `SELECT timezone FROM institutions WHERE id=$1`, instID).Scan(&tz); err != nil {
+		middleware.NotFound(w, "institution")
+		return
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
-	middleware.JSON(w, http.StatusOK, result)
+	today := time.Now().In(loc).Format("2006-01-02")
+	const plans = `FROM teacher_student_support s
+		JOIN users st ON st.id=s.student_id AND st.role='student' AND st.deleted_at IS NULL
+		JOIN enrollments e ON e.user_id=s.student_id AND e.institution_id=s.institution_id AND e.status='active'
+		JOIN users t ON t.id=s.teacher_id
+		WHERE s.institution_id=$1`
+	var p struct {
+		Monitoring     int `json:"monitoring"`
+		Supporting     int `json:"supporting"`
+		Overdue        int `json:"overdue_reviews"`
+		DueWithin7Days int `json:"due_within_7_days"`
+		NoReviewDate   int `json:"open_without_review_date"`
+	}
+	if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FILTER (WHERE s.status='monitoring'), COUNT(*) FILTER (WHERE s.status='supporting'),
+		COUNT(*) FILTER (WHERE s.status<>'resolved' AND s.review_on < $2::date),
+		COUNT(*) FILTER (WHERE s.status<>'resolved' AND s.review_on >= $2::date AND s.review_on < $2::date + 7),
+		COUNT(*) FILTER (WHERE s.status<>'resolved' AND s.review_on IS NULL) `+plans, instID, today).
+		Scan(&p.Monitoring, &p.Supporting, &p.Overdue, &p.DueWithin7Days, &p.NoReviewDate); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	rows, err := h.db.Query(ctx, `SELECT s.teacher_id, COALESCE(NULLIF(t.display_name,''), t.full_name, ''),
+		COUNT(*) FILTER (WHERE s.status<>'resolved'), COUNT(*) FILTER (WHERE s.status<>'resolved' AND s.review_on < $2::date)
+		`+plans+`
+		GROUP BY s.teacher_id, t.display_name, t.full_name
+		HAVING COUNT(*) FILTER (WHERE s.status<>'resolved') > 0
+		ORDER BY 2, 1`, instID, today)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	type load struct {
+		TeacherID   string `json:"teacher_id"`
+		TeacherName string `json:"teacher_name"`
+		OpenPlans   int    `json:"open_plans"`
+		Overdue     int    `json:"overdue_reviews"`
+	}
+	workload := []load{}
+	for rows.Next() {
+		var l load
+		if err := rows.Scan(&l.TeacherID, &l.TeacherName, &l.OpenPlans, &l.Overdue); err != nil {
+			rows.Close()
+			middleware.InternalError(w)
+			return
+		}
+		workload = append(workload, l)
+	}
+	rows.Close()
+	followUps, err := h.followUpOutcomes(ctx, instID, nil, "")
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	byStatus := map[string]int{"comparable": 0, "awaiting_after_evidence": 0, "insufficient_student_overlap": 0, "insufficient_question_variety": 0}
+	byReview := map[string]int{}
+	for _, f := range followUps {
+		byStatus[f.ComparisonStatus]++
+		byReview[f.ReviewStatus]++
+	}
+	items := followUps
+	if len(items) > 10 {
+		items = items[:10]
+	}
+	middleware.JSON(w, http.StatusOK, map[string]any{
+		"to": today, "timezone": tz, "generated_at": time.Now().UTC(),
+		"plans": p, "workload": workload,
+		"follow_ups": map[string]any{"total": len(followUps), "by_comparison_status": byStatus, "by_review_status": byReview, "items": items},
+	})
 }
 
 type followUpReviewInput struct {

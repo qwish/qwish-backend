@@ -810,6 +810,7 @@ func main() {
 					r.Get("/classes/{classId}/attention", institutionH.ClassStudentsAttention)
 					r.Get("/learning-summary", learningH.InstitutionSummary)
 					r.Get("/learning-summary/scoped", learningH.InstitutionScopedSummary)
+					r.Get("/support-summary", learningH.InstitutionSupportSummary)
 					r.Get("/students", institutionH.ListStudents)
 					r.Get("/students/ids", institutionH.ListStudentIDs)
 					r.Get("/students/find", institutionH.FindStudents)

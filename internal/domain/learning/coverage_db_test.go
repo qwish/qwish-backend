@@ -227,3 +227,72 @@ func TestInstitutionPriorities(t *testing.T) {
 		t.Errorf("legacy = %v", legacy)
 	}
 }
+
+// Institute support summary: plan workload by status and teacher (by name,
+// not ranked), overdue and upcoming reviews, and follow-ups by the existing
+// comparison gates — counted over active students only.
+func TestInstitutionSupportSummary(t *testing.T) {
+	pool, s := seedCoverage(t)
+	ctx := context.Background()
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`INSERT INTO teacher_student_support (teacher_id, student_id, institution_id, status, review_on) VALUES
+		($1,$2,$5,'supporting',current_date-3), ($1,$3,$5,'monitoring',current_date+3),
+		($1,$4,$5,'resolved',current_date-10), ($1,$6,$5,'supporting',current_date-3)`,
+		s.Teacher, s.S1, s.S2, s.S3, s.Inst, s.Suspended)
+	var quiz, asg string
+	if err := pool.QueryRow(ctx, `INSERT INTO quizzes (institution_id, created_by, title, type, status) VALUES ($1,$2,'Follow','knowledge_check','published') RETURNING id`, s.Inst, s.Teacher).Scan(&quiz); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO learning_assignments (institution_id, group_id, quiz_id, purpose, created_by, source_concept_id)
+		VALUES ($1,$2,$3,'follow_up',$4,$5) RETURNING id`, s.Inst, s.Class, quiz, s.Teacher, s.Concept).Scan(&asg); err != nil {
+		t.Fatal(err)
+	}
+	exec(`INSERT INTO learning_assignment_recipients (assignment_id, student_id) VALUES ($1,$2)`, asg, s.S1)
+	t.Cleanup(func() {
+		pool.Exec(ctx, `DELETE FROM teacher_student_support WHERE institution_id=$1`, s.Inst)
+		pool.Exec(ctx, `DELETE FROM learning_assignments WHERE institution_id=$1`, s.Inst)
+		pool.Exec(ctx, `DELETE FROM quizzes WHERE id=$1`, quiz)
+	})
+
+	req := httptest.NewRequest("GET", "/institution/support-summary", nil)
+	req = req.WithContext(context.WithValue(req.Context(), middleware.ContextKeyInstID, s.Inst))
+	w := httptest.NewRecorder()
+	NewHandler(pool, nil).InstitutionSupportSummary(w, req)
+	var out struct {
+		Plans struct {
+			Monitoring     int `json:"monitoring"`
+			Supporting     int `json:"supporting"`
+			Overdue        int `json:"overdue_reviews"`
+			DueWithin7Days int `json:"due_within_7_days"`
+		} `json:"plans"`
+		Workload []struct {
+			TeacherID string `json:"teacher_id"`
+			OpenPlans int    `json:"open_plans"`
+			Overdue   int    `json:"overdue_reviews"`
+		} `json:"workload"`
+		FollowUps struct {
+			Total    int            `json:"total"`
+			ByStatus map[string]int `json:"by_comparison_status"`
+			Items    []struct {
+				AssignmentID     string `json:"assignment_id"`
+				ComparisonStatus string `json:"comparison_status"`
+			} `json:"items"`
+		} `json:"follow_ups"`
+	}
+	decodeData(t, w.Body.Bytes(), &out)
+	p := out.Plans
+	if p.Monitoring != 1 || p.Supporting != 1 || p.Overdue != 1 || p.DueWithin7Days != 1 {
+		t.Errorf("plans = %+v, want 1 monitoring, 1 supporting, 1 overdue, 1 due soon (%s)", p, w.Body)
+	}
+	if len(out.Workload) != 1 || out.Workload[0].OpenPlans != 2 || out.Workload[0].Overdue != 1 {
+		t.Errorf("workload = %+v", out.Workload)
+	}
+	if out.FollowUps.Total != 1 || out.FollowUps.ByStatus["awaiting_after_evidence"] != 1 || len(out.FollowUps.Items) != 1 || out.FollowUps.Items[0].AssignmentID != asg {
+		t.Errorf("follow-ups = %+v", out.FollowUps)
+	}
+}

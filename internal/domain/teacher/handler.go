@@ -17,7 +17,7 @@ import (
 
 func (h *Handler) canSeeStudent(r *http.Request, teacherID, institutionID, studentID string) bool {
 	var allowed bool
-	err := h.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=$1 AND `+qdb.LiveMemberSQL("u.id", "$2")+` AND u.role='student' AND u.deleted_at IS NULL AND (NOT EXISTS(SELECT 1 FROM group_teachers WHERE user_id=$3) OR EXISTS(SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id WHERE gs.user_id=u.id AND gt.user_id=$3)))`, studentID, institutionID, teacherID).Scan(&allowed)
+	err := h.db.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=$1 AND `+qdb.LiveMemberSQL("u.id", "$2")+` AND u.role='student' AND u.deleted_at IS NULL AND EXISTS(SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id WHERE gs.user_id=u.id AND gt.user_id=$3))`, studentID, institutionID, teacherID).Scan(&allowed)
 	return err == nil && allowed
 }
 
@@ -34,15 +34,6 @@ func (h *Handler) SetClassEndedNotifier(fn func(ctx context.Context, classID str
 
 func NewHandler(db *pgxpool.Pool) *Handler {
 	return &Handler{db: db}
-}
-
-// hasGroupAssignments returns true if the teacher is assigned to at least one group.
-// Unassigned teachers see all institution students (per PRD §5.4).
-func (h *Handler) hasGroupAssignments(r *http.Request, teacherID string) bool {
-	var count int
-	h.db.QueryRow(r.Context(),
-		`SELECT COUNT(*) FROM group_teachers WHERE user_id=$1`, teacherID).Scan(&count)
-	return count > 0
 }
 
 // ─── Overview ────────────────────────────────────────────────────────────────
@@ -197,11 +188,9 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 // ─── Students ────────────────────────────────────────────────────────────────
 
 // scopeStudentsSQL returns extra WHERE clause + args restricting students to
-// the teacher's assigned groups (or all institution students if unassigned).
-func (h *Handler) scopeStudentsSQL(r *http.Request, teacherID string, startN int, args *[]interface{}) string {
-	if !h.hasGroupAssignments(r, teacherID) {
-		return ""
-	}
+// the teacher's assigned groups. A teacher with no class sees no students; the
+// institution roster belongs to the institution admin.
+func (h *Handler) scopeStudentsSQL(teacherID string, startN int, args *[]interface{}) string {
 	clause := fmt.Sprintf(` AND EXISTS (
 		SELECT 1 FROM group_students gs
 		JOIN group_teachers gt ON gt.group_id = gs.group_id
@@ -246,10 +235,8 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 		args = append(args, cid, teacherID)
 		n += 2
 	} else {
-		where += h.scopeStudentsSQL(r, teacherID, n, &args)
-		if h.hasGroupAssignments(r, teacherID) {
-			n++
-		}
+		where += h.scopeStudentsSQL(teacherID, n, &args)
+		n++
 	}
 
 	var total int
@@ -317,22 +304,16 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
 	studentID := chi.URLParam(r, "userId")
 
-	// Visibility check: same institution + either teacher is unassigned or shares a group with the student.
+	// Visibility check: same institution and the teacher shares a class with the student.
 	var visible int
-	if h.hasGroupAssignments(r, teacherID) {
-		h.db.QueryRow(r.Context(), `
-			SELECT 1 FROM users u
-			WHERE u.id=$1 AND `+qdb.LiveMemberSQL("u.id", "$2")+` AND u.role='student' AND u.deleted_at IS NULL
-			  AND EXISTS (
-			    SELECT 1 FROM group_students gs
-			    JOIN group_teachers gt ON gt.group_id = gs.group_id
-			    WHERE gs.user_id=u.id AND gt.user_id=$3
-			  )`, studentID, instID, teacherID).Scan(&visible)
-	} else {
-		h.db.QueryRow(r.Context(),
-			`SELECT 1 FROM users u WHERE u.id=$1 AND `+qdb.LiveMemberSQL("u.id", "$2")+` AND u.role='student' AND u.deleted_at IS NULL`,
-			studentID, instID).Scan(&visible)
-	}
+	h.db.QueryRow(r.Context(), `
+		SELECT 1 FROM users u
+		WHERE u.id=$1 AND `+qdb.LiveMemberSQL("u.id", "$2")+` AND u.role='student' AND u.deleted_at IS NULL
+		  AND EXISTS (
+		    SELECT 1 FROM group_students gs
+		    JOIN group_teachers gt ON gt.group_id = gs.group_id
+		    WHERE gs.user_id=u.id AND gt.user_id=$3
+		  )`, studentID, instID, teacherID).Scan(&visible)
 	if visible == 0 {
 		middleware.NotFound(w, "student")
 		return
@@ -751,7 +732,7 @@ func (h *Handler) StudentPerformanceReport(w http.ResponseWriter, r *http.Reques
 			AND EXISTS (SELECT 1 FROM group_teachers gt WHERE gt.group_id=$%d AND gt.user_id=$2)`, n, n)
 		args = append(args, classID)
 		n++
-	} else if h.hasGroupAssignments(r, teacherID) {
+	} else {
 		where += ` AND EXISTS (
 			SELECT 1 FROM group_students gs
 			JOIN group_teachers gt ON gt.group_id = gs.group_id

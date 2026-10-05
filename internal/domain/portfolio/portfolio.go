@@ -50,11 +50,10 @@ func (h *Handler) InstitutionRoutes(r chi.Router) {
 }
 
 // teacherScopeSQL: student $1 is visible to teacher $3 in institution $2 —
-// the same rule as the teacher student list (unassigned teachers see the
-// whole institution; assigned teachers see students sharing a class).
+// the same rule as the teacher student list: the teacher shares a class with
+// the student. A teacher with no class sees no students.
 var teacherScopeSQL = `EXISTS(SELECT 1 FROM users s WHERE s.id=$1 AND ` + qdb.LiveMemberSQL("s.id", "$2") + ` AND s.role='student' AND s.deleted_at IS NULL
-	AND (NOT EXISTS(SELECT 1 FROM group_teachers WHERE user_id=$3)
-	  OR EXISTS(SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id WHERE gs.user_id=s.id AND gt.user_id=$3)))`
+	AND EXISTS(SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id WHERE gs.user_id=s.id AND gt.user_id=$3))`
 
 // institutionScopeSQL mirrors the institution student detail: an active or
 // suspended enrollment in institution $2.
@@ -303,14 +302,13 @@ func (h *Handler) Queue(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.Query(r.Context(), `SELECT v.id, v.revision, e.id, u.id, COALESCE(NULLIF(u.display_name,''),u.full_name,''),
 		COALESCE((SELECT array_agg(g.name ORDER BY g.name) FROM group_students gs JOIN groups g ON g.id=gs.group_id
 			WHERE gs.user_id=u.id AND g.institution_id=$1 AND g.archived_at IS NULL
-			  AND (NOT EXISTS(SELECT 1 FROM group_teachers WHERE user_id=$2) OR EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id=g.id AND gt.user_id=$2))),'{}'),
+			  AND EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id=g.id AND gt.user_id=$2)),'{}'),
 		COALESCE(e.subtype, e.kind), COALESCE(v.content->>'title',''), v.submitted_at, v.revision>1
 		FROM user_profile_entries e
 		JOIN user_profile_entry_revisions v ON v.entry_id=e.id AND v.revision=e.current_revision AND v.institution_id=$1
 		JOIN users u ON u.id=e.user_id AND `+qdb.LiveMemberSQL("u.id", "$1")+` AND u.role='student' AND u.deleted_at IS NULL
 		WHERE e.status='submitted'
-		  AND (NOT EXISTS(SELECT 1 FROM group_teachers WHERE user_id=$2)
-		    OR EXISTS(SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id WHERE gs.user_id=u.id AND gt.user_id=$2))
+		  AND EXISTS(SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id WHERE gs.user_id=u.id AND gt.user_id=$2)
 		  AND ($3='' OR COALESCE(e.subtype,e.kind)=$3)
 		ORDER BY v.submitted_at, v.id LIMIT $4`, inst, teacherID, r.URL.Query().Get("category"), limit)
 	if err != nil {

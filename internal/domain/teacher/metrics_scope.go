@@ -49,9 +49,8 @@ func MetricsScopeResolver(db *pgxpool.Pool) metrics.ScopeResolver {
 	}
 }
 
-// hasGroups is the analytics counterpart of hasGroupAssignments, which takes a
-// *http.Request and swallows its error. This one reports the error, because a
-// failed lookup here must not be mistaken for "no classes".
+// hasGroups reports whether the teacher has any class. It returns the error,
+// because a failed lookup here must not be mistaken for "no classes".
 func hasGroups(ctx context.Context, db *pgxpool.Pool, teacherID string) (bool, error) {
 	var exists bool
 	err := db.QueryRow(ctx,

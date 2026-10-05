@@ -74,9 +74,5 @@ func (s *Service) EmitTeacher(ctx context.Context, userID, topic, kind, title, b
 	if s.db.QueryRow(ctx, `SELECT email FROM users WHERE id=$1 AND deleted_at IS NULL`, userID).Scan(&to) != nil || to == "" {
 		return
 	}
-	content := heading(title) + paragraph(body)
-	if link != "" {
-		content += primaryButton("Open Qwish", link)
-	}
-	_ = s.SendEmail(ctx, to, title, emailLayout(body, content), "teacher:"+userID+":"+reference)
+	_ = s.SendEmail(ctx, to, title, tmplTeacherNotice(title, body, link), "teacher:"+userID+":"+reference)
 }

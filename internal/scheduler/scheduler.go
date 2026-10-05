@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"html"
 	"log"
 	"time"
 
@@ -71,11 +70,7 @@ func (s *Scheduler) DispatchAnnouncements(ctx context.Context) error {
 				case "in_app_notification":
 					s.notifSvc.Emit(ctx, recipient.id, "announcement", a.title, a.body, notification.WithIcon("notifications"), notification.WithColor("indigo"), notification.WithReference(a.id))
 				case "email":
-					cta := ""
-					if a.ctaLabel != nil && a.ctaURL != nil {
-						cta = fmt.Sprintf(`<p><a href="%s">%s</a></p>`, html.EscapeString(*a.ctaURL), html.EscapeString(*a.ctaLabel))
-					}
-					body := fmt.Sprintf(`<h1>%s</h1><p>%s</p>%s`, html.EscapeString(a.title), html.EscapeString(a.body), cta)
+					body := notification.AnnouncementEmailHTML(a.title, a.body, a.ctaLabel, a.ctaURL)
 					if err := s.notifSvc.SendEmail(ctx, recipient.email, a.title, body, "announcement:"+a.id); err != nil {
 						log.Printf("[announcement] email %s: %v", a.id, err)
 					}

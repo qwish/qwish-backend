@@ -301,3 +301,30 @@ func tmplWeeklyInsights(name string, pointsThisWeek int64, trend string, quizzes
 		tipBox(esc(suggestion))
 	return emailLayout("Your weekly Qwish insights are ready", body)
 }
+
+// tmplTeacherNotice is the email copy of a teacher notification (overdue work,
+// topic requests, follow-up evidence, decisions).
+func tmplTeacherNotice(title, body, link string) string {
+	content := heading(title) + paragraph(body)
+	if link != "" {
+		content += primaryButton("Open Qwish", link)
+	}
+	return emailLayout(body, content)
+}
+
+// tmplAppLoginDenied is sent when a staff or teacher account tries the student
+// app. Plain markup, outside the branded layout.
+func tmplAppLoginDenied() string {
+	return "<p>Login to the Qwish app was declined.</p><p>Administrator and teacher accounts cannot log into the student app. Please use your institute dashboard, teacher panel, or admin console with this account.</p><p>If you did not attempt this login, you can ignore this email.</p>"
+}
+
+// AnnouncementEmailHTML is a scheduled announcement's email body. Plain
+// markup, outside the branded layout.
+func AnnouncementEmailHTML(title, body string, ctaLabel, ctaURL *string) string {
+	cta := ""
+	if ctaLabel != nil && ctaURL != nil {
+		cta = fmt.Sprintf(`<p><a href="%s">%s</a></p>`, esc(*ctaURL), esc(*ctaLabel))
+	}
+	return fmt.Sprintf(`<h1>%s</h1><p>%s</p>%s`, esc(title), esc(body), cta)
+}
+

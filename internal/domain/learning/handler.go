@@ -264,6 +264,10 @@ func (h *Handler) StudentSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) InstitutionSummary(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("view") == "priorities" {
+		h.institutionPriorities(w, r)
+		return
+	}
 	rows, err := h.db.Query(r.Context(), `SELECT c.id,c.code,c.title,COUNT(DISTINCT le.user_id),COUNT(*) FILTER(WHERE le.is_correct),COUNT(*) FILTER(WHERE NOT le.is_correct),COUNT(*) FILTER(WHERE le.confidence_level IS NULL),MAX(le.occurred_at)
 		FROM learning_evidence le JOIN curriculum_concepts c ON c.id=le.concept_id WHERE le.institution_id=$1 AND NOT le.timed_out GROUP BY c.id,c.code,c.title ORDER BY COUNT(*) FILTER(WHERE NOT le.is_correct) DESC LIMIT 200`, middleware.GetInstitutionID(r))
 	if err != nil {
@@ -283,6 +287,94 @@ func (h *Handler) InstitutionSummary(w http.ResponseWriter, r *http.Request) {
 		result = append(result, map[string]interface{}{"concept_id": id, "concept_code": code, "concept_title": title, "students_assessed": students, "correct_evidence": correct, "error_evidence": errors, "unknown_confidence": unknown, "latest_evidence_at": latest})
 	}
 	middleware.JSON(w, http.StatusOK, result)
+}
+
+// institutionPriorities is the institute's concept priorities: the teacher
+// queue's needs-support rule over active students, with its assessed
+// denominator, the active classes affected, evidence dates, and the count of
+// published assessments holding questions not mapped to any concept — where
+// mapping is absent no gap is inferred, so the count is shown instead.
+//
+// GET /institution/learning-summary?view=priorities&days=7|30|90
+func (h *Handler) institutionPriorities(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	instID := middleware.GetInstitutionID(r)
+	from, staleBefore, ok := learningWindow(r)
+	if !ok {
+		middleware.BadRequest(w, "days must be 7, 30 or 90 and stale_after_days 1–3650")
+		return
+	}
+	rows, err := h.db.Query(ctx, `WITH students AS (
+		SELECT e.user_id FROM enrollments e JOIN users u ON u.id=e.user_id AND u.role='student' AND u.deleted_at IS NULL
+		 WHERE e.institution_id=$1 AND e.status='active'
+	), per_student AS (
+		SELECT le.user_id, le.concept_id, COUNT(DISTINCT le.question_id) AS questions,
+		       COUNT(*) FILTER (WHERE NOT le.is_correct) AS errors, COUNT(*) FILTER (WHERE le.is_correct) AS correct,
+		       MAX(le.occurred_at) AS latest
+		  FROM learning_evidence le JOIN students s ON s.user_id=le.user_id
+		 WHERE le.institution_id=$1 AND NOT le.timed_out AND ($2::timestamptz IS NULL OR le.occurred_at >= $2)
+		 GROUP BY le.user_id, le.concept_id
+	), flagged AS (
+		SELECT user_id, concept_id FROM per_student WHERE questions >= 2 AND errors > correct
+	)
+	SELECT c.id, c.code, c.title, cv.subject, cv.grade,
+	       COUNT(*) AS assessed,
+	       COUNT(*) FILTER (WHERE p.questions >= 2 AND p.errors > p.correct) AS needing,
+	       COUNT(*) FILTER (WHERE p.latest < $3) AS stale,
+	       (SELECT COUNT(DISTINCT g.id) FROM flagged f JOIN group_students gs ON gs.user_id=f.user_id
+	          JOIN groups g ON g.id=gs.group_id AND g.institution_id=$1 AND g.archived_at IS NULL
+	         WHERE f.concept_id=c.id) AS affected_classes,
+	       MAX(p.latest)
+	  FROM per_student p
+	  JOIN curriculum_concepts c ON c.id=p.concept_id
+	  LEFT JOIN curriculum_chapters ch ON ch.id=c.chapter_id
+	  LEFT JOIN curriculum_versions cv ON cv.id=ch.version_id
+	 GROUP BY c.id, c.code, c.title, cv.subject, cv.grade
+	 ORDER BY needing DESC, assessed DESC, c.title
+	 LIMIT 200`, instID, from, staleBefore)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	defer rows.Close()
+	type priority struct {
+		ConceptID              string     `json:"concept_id"`
+		Code                   string     `json:"concept_code"`
+		Title                  string     `json:"concept_title"`
+		Subject                *string    `json:"subject"`
+		Grade                  *string    `json:"grade"`
+		StudentsAssessed       int        `json:"students_assessed"`
+		StudentsNeedingSupport int        `json:"students_needing_support"`
+		StaleStudents          int        `json:"stale_students"`
+		AffectedClasses        int        `json:"affected_classes"`
+		LatestEvidenceAt       *time.Time `json:"latest_evidence_at"`
+	}
+	concepts := []priority{}
+	for rows.Next() {
+		var p priority
+		if err := rows.Scan(&p.ConceptID, &p.Code, &p.Title, &p.Subject, &p.Grade, &p.StudentsAssessed,
+			&p.StudentsNeedingSupport, &p.StaleStudents, &p.AffectedClasses, &p.LatestEvidenceAt); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+		concepts = append(concepts, p)
+	}
+	if rows.Err() != nil {
+		middleware.InternalError(w)
+		return
+	}
+	var unmappedAssessments, unmappedQuestions int
+	if err := h.db.QueryRow(ctx, `SELECT COUNT(DISTINCT q.id), COUNT(qn.id)
+		  FROM quizzes q JOIN questions qn ON qn.quiz_id=q.id
+		 WHERE q.institution_id=$1 AND q.status='published' AND q.deleted_at IS NULL
+		   AND NOT EXISTS (SELECT 1 FROM question_concepts qc WHERE qc.question_id=qn.id)`, instID).
+		Scan(&unmappedAssessments, &unmappedQuestions); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, map[string]any{
+		"concepts": concepts, "unmapped_assessments": unmappedAssessments, "unmapped_questions": unmappedQuestions,
+	})
 }
 
 // learningWindow reads the optional evidence window (`days`: 7, 30 or 90) and

@@ -169,3 +169,61 @@ func TestLearningSummaryDenominators(t *testing.T) {
 		t.Errorf("days=30 row = %v", recent)
 	}
 }
+
+// Institute priorities: the same needs-support rule over active students,
+// with the assessed denominator, affected classes, and how many published
+// assessments have questions no one has mapped to a concept.
+func TestInstitutionPriorities(t *testing.T) {
+	pool, s := seedCoverage(t)
+	ctx := context.Background()
+	var quiz, q1, q2 string
+	if err := pool.QueryRow(ctx, `INSERT INTO quizzes (institution_id, created_by, title, type, status) VALUES ($1,$2,'Mapped half','knowledge_check','published') RETURNING id`, s.Inst, s.Teacher).Scan(&quiz); err != nil {
+		t.Fatal(err)
+	}
+	for i, dest := range []*string{&q1, &q2} {
+		if err := pool.QueryRow(ctx, `INSERT INTO questions (quiz_id, position, type, prompt, correct_answer) VALUES ($1,$2,'multiple_choice','q','"a"') RETURNING id`, quiz, i+1).Scan(dest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO question_concepts (question_id, concept_id) VALUES ($1,$2)`, q1, s.Concept); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pool.Exec(ctx, `DELETE FROM quizzes WHERE id=$1`, quiz) })
+
+	req := httptest.NewRequest("GET", "/institution/learning-summary?view=priorities", nil)
+	req = req.WithContext(context.WithValue(req.Context(), middleware.ContextKeyInstID, s.Inst))
+	w := httptest.NewRecorder()
+	NewHandler(pool, nil).InstitutionSummary(w, req)
+	var out struct {
+		Concepts []struct {
+			ConceptID              string  `json:"concept_id"`
+			Subject                *string `json:"subject"`
+			StudentsAssessed       int     `json:"students_assessed"`
+			StudentsNeedingSupport int     `json:"students_needing_support"`
+			AffectedClasses        int     `json:"affected_classes"`
+			LatestEvidenceAt       *string `json:"latest_evidence_at"`
+		} `json:"concepts"`
+		UnmappedAssessments int `json:"unmapped_assessments"`
+		UnmappedQuestions   int `json:"unmapped_questions"`
+	}
+	decodeData(t, w.Body.Bytes(), &out)
+	if len(out.Concepts) != 1 {
+		t.Fatalf("concepts = %+v (%s)", out.Concepts, w.Body)
+	}
+	c := out.Concepts[0]
+	if c.StudentsAssessed != 2 || c.StudentsNeedingSupport != 1 || c.AffectedClasses != 1 || c.LatestEvidenceAt == nil {
+		t.Errorf("concept = %+v, want 2 assessed (suspended excluded), 1 needing support in 1 class", c)
+	}
+	if out.UnmappedAssessments != 1 || out.UnmappedQuestions != 1 {
+		t.Errorf("unmapped = %d assessments, %d questions; want 1, 1", out.UnmappedAssessments, out.UnmappedQuestions)
+	}
+
+	// Without view=priorities the response keeps its old array shape.
+	w = httptest.NewRecorder()
+	NewHandler(pool, nil).InstitutionSummary(w, httptest.NewRequest("GET", "/", nil).WithContext(req.Context()))
+	var legacy []map[string]any
+	decodeData(t, w.Body.Bytes(), &legacy)
+	if len(legacy) != 1 {
+		t.Errorf("legacy = %v", legacy)
+	}
+}

@@ -21,6 +21,10 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Get("/departments/{departmentId}/summary", h.withGrants(PermReportsRead, h.DepartmentSummary))
 	r.Get("/students", h.withGrants(PermStudentsRead, h.Students))
 	r.Get("/staff", h.withGrants(PermStaffRead, h.Staff))
+	r.Get("/classes/attention", h.withGrants(PermReportsRead, h.ClassAttention))
+	r.Get("/classes/{classId}/attention", h.withGrants(PermReportsRead, h.ClassStudentsAttention))
+	r.Get("/learning-priorities", h.withGrants(PermReportsRead, h.LearningPriorities))
+	r.Get("/support-summary", h.withGrants(PermReportsRead, h.SupportSummary))
 }
 
 type scoped func(w http.ResponseWriter, r *http.Request, gs Grants)

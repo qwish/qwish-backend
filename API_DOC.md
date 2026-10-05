@@ -3950,14 +3950,14 @@ reads another teacher.
 Every analytics response carries:
 
 ```json
-"scope": { "requested": "teacher_classes", "effective": "institution",
-           "reason": "no classes assigned — showing the whole institution" }
+"scope": { "requested": "teacher_classes", "effective": "teacher_classes",
+           "reason": "no classes assigned — assign a class to see student data" }
 ```
 
-`reason` is `""` unless the server substituted a different scope. **When it is
-non-empty the client must render it.** A teacher assigned to no group is
-answered institution-wide (PRD §5.4); without that sentence on screen they read
-institution numbers as their own class's.
+`reason` is `""` unless the numbers need explaining. **When it is non-empty the
+client must render it.** A teacher assigned to no class is never answered
+institution-wide: the class scope stays in force over an empty class set, and
+the reason says why every student metric reads zero.
 
 `requested` and `effective` are `institution`, `teacher_classes`,
 `teacher_quizzes`, or `""` for an unscoped super-admin request.

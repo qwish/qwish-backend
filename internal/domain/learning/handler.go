@@ -3,6 +3,7 @@ package learning
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -298,16 +299,30 @@ func (h *Handler) InstitutionSummary(w http.ResponseWriter, r *http.Request) {
 //
 // GET /institution/learning-summary?view=priorities&days=7|30|90
 func (h *Handler) institutionPriorities(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	instID := middleware.GetInstitutionID(r)
-	from, staleBefore, ok := learningWindow(r)
+	from, staleBefore, ok := Window(r)
 	if !ok {
 		middleware.BadRequest(w, "days must be 7, 30 or 90 and stale_after_days 1–3650")
 		return
 	}
-	rows, err := h.db.Query(ctx, `WITH students AS (
+	out, err := QueryPriorities(r.Context(), h.db, middleware.GetInstitutionID(r), nil, from, staleBefore)
+	if err != nil {
+		middleware.InternalError(w)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, out)
+}
+
+// inDepartmentsSQL: student $col is in an active class of one of the
+// departments in $4 (NULL: no department filter).
+const inDepartmentsSQL = `($4::uuid[] IS NULL OR EXISTS (SELECT 1 FROM group_students dgs JOIN groups dg ON dg.id=dgs.group_id
+	WHERE dgs.user_id=%s AND dg.institution_id=$1 AND dg.archived_at IS NULL AND dg.department_id = ANY($4::uuid[])))`
+
+// QueryPriorities is the concept priorities over active students, or only
+// students in classes of departments (leadership's grant; nil is everyone).
+func QueryPriorities(ctx context.Context, db *pgxpool.Pool, instID string, departments []string, from *time.Time, staleBefore time.Time) (map[string]any, error) {
+	rows, err := db.Query(ctx, `WITH students AS (
 		SELECT e.user_id FROM enrollments e JOIN users u ON u.id=e.user_id AND u.role='student' AND u.deleted_at IS NULL
-		 WHERE e.institution_id=$1 AND e.status='active'
+		 WHERE e.institution_id=$1 AND e.status='active' AND `+fmt.Sprintf(inDepartmentsSQL, "e.user_id")+`
 	), per_student AS (
 		SELECT le.user_id, le.concept_id, COUNT(DISTINCT le.question_id) AS questions,
 		       COUNT(*) FILTER (WHERE NOT le.is_correct) AS errors, COUNT(*) FILTER (WHERE le.is_correct) AS correct,
@@ -324,6 +339,7 @@ func (h *Handler) institutionPriorities(w http.ResponseWriter, r *http.Request) 
 	       COUNT(*) FILTER (WHERE p.latest < $3) AS stale,
 	       (SELECT COUNT(DISTINCT g.id) FROM flagged f JOIN group_students gs ON gs.user_id=f.user_id
 	          JOIN groups g ON g.id=gs.group_id AND g.institution_id=$1 AND g.archived_at IS NULL
+	           AND ($4::uuid[] IS NULL OR g.department_id = ANY($4::uuid[]))
 	         WHERE f.concept_id=c.id) AS affected_classes,
 	       MAX(p.latest)
 	  FROM per_student p
@@ -332,10 +348,9 @@ func (h *Handler) institutionPriorities(w http.ResponseWriter, r *http.Request) 
 	  LEFT JOIN curriculum_versions cv ON cv.id=ch.version_id
 	 GROUP BY c.id, c.code, c.title, cv.subject, cv.grade
 	 ORDER BY needing DESC, assessed DESC, c.title
-	 LIMIT 200`, instID, from, staleBefore)
+	 LIMIT 200`, instID, from, staleBefore, departments)
 	if err != nil {
-		middleware.InternalError(w)
-		return
+		return nil, err
 	}
 	defer rows.Close()
 	type priority struct {
@@ -355,33 +370,33 @@ func (h *Handler) institutionPriorities(w http.ResponseWriter, r *http.Request) 
 		var p priority
 		if err := rows.Scan(&p.ConceptID, &p.Code, &p.Title, &p.Subject, &p.Grade, &p.StudentsAssessed,
 			&p.StudentsNeedingSupport, &p.StaleStudents, &p.AffectedClasses, &p.LatestEvidenceAt); err != nil {
-			middleware.InternalError(w)
-			return
+			return nil, err
 		}
 		concepts = append(concepts, p)
 	}
-	if rows.Err() != nil {
-		middleware.InternalError(w)
-		return
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
+	// Under a department scope, only assessments by teachers of its classes.
 	var unmappedAssessments, unmappedQuestions int
-	if err := h.db.QueryRow(ctx, `SELECT COUNT(DISTINCT q.id), COUNT(qn.id)
+	if err := db.QueryRow(ctx, `SELECT COUNT(DISTINCT q.id), COUNT(qn.id)
 		  FROM quizzes q JOIN questions qn ON qn.quiz_id=q.id
 		 WHERE q.institution_id=$1 AND q.status='published' AND q.deleted_at IS NULL
-		   AND NOT EXISTS (SELECT 1 FROM question_concepts qc WHERE qc.question_id=qn.id)`, instID).
-		Scan(&unmappedAssessments, &unmappedQuestions); err != nil {
-		middleware.InternalError(w)
-		return
+		   AND NOT EXISTS (SELECT 1 FROM question_concepts qc WHERE qc.question_id=qn.id)
+		   AND ($2::uuid[] IS NULL OR EXISTS (SELECT 1 FROM group_teachers gt JOIN groups g ON g.id=gt.group_id
+		        WHERE gt.user_id=q.created_by AND g.institution_id=$1 AND g.archived_at IS NULL AND g.department_id = ANY($2::uuid[])))`,
+		instID, departments).Scan(&unmappedAssessments, &unmappedQuestions); err != nil {
+		return nil, err
 	}
-	middleware.JSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"concepts": concepts, "unmapped_assessments": unmappedAssessments, "unmapped_questions": unmappedQuestions,
-	})
+	}, nil
 }
 
-// learningWindow reads the optional evidence window (`days`: 7, 30 or 90) and
+// Window reads the optional evidence window (`days`: 7, 30 or 90) and
 // the stale threshold (`stale_after_days`, default 90): evidence whose latest
 // date is older reads as stale, kept visible but never a current learning gap.
-func learningWindow(r *http.Request) (from *time.Time, staleBefore time.Time, ok bool) {
+func Window(r *http.Request) (from *time.Time, staleBefore time.Time, ok bool) {
 	q := r.URL.Query()
 	now := time.Now()
 	staleDays := 90
@@ -421,7 +436,7 @@ const teacherRosterSQL = `SELECT DISTINCT u.id, u.display_name
 // do not, and how many of the assessed have only stale evidence.
 func (h *Handler) TeacherClassSummary(w http.ResponseWriter, r *http.Request) {
 	classID := strings.TrimSpace(r.URL.Query().Get("class_id"))
-	from, staleBefore, ok := learningWindow(r)
+	from, staleBefore, ok := Window(r)
 	if !ok {
 		middleware.BadRequest(w, "days must be 7, 30 or 90 and stale_after_days 1–3650")
 		return
@@ -489,7 +504,7 @@ func (h *Handler) TeacherClassMatrix(w http.ResponseWriter, r *http.Request) {
 		middleware.BadRequest(w, "class_id is required")
 		return
 	}
-	_, staleBefore, ok := learningWindow(r)
+	_, staleBefore, ok := Window(r)
 	if !ok {
 		middleware.BadRequest(w, "stale_after_days must be 1–3650")
 		return
@@ -915,7 +930,7 @@ type FollowUpOutcome struct {
 
 func (h *Handler) FollowUpOutcomes(w http.ResponseWriter, r *http.Request) {
 	teacherID := middleware.GetUserID(r)
-	result, err := h.followUpOutcomes(r.Context(), middleware.GetInstitutionID(r), &teacherID, strings.TrimSpace(r.URL.Query().Get("class_id")))
+	result, err := followUpOutcomes(r.Context(), h.db, middleware.GetInstitutionID(r), &teacherID, strings.TrimSpace(r.URL.Query().Get("class_id")), nil)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -925,8 +940,8 @@ func (h *Handler) FollowUpOutcomes(w http.ResponseWriter, r *http.Request) {
 
 // followUpOutcomes is the latest 100 follow-ups with their comparison gates.
 // teacherID limits them to that teacher's classes; nil is institution-wide.
-func (h *Handler) followUpOutcomes(ctx context.Context, instID string, teacherID *string, groupID string) ([]FollowUpOutcome, error) {
-	rows, err := h.db.Query(ctx, `
+func followUpOutcomes(ctx context.Context, db *pgxpool.Pool, instID string, teacherID *string, groupID string, departments []string) ([]FollowUpOutcome, error) {
+	rows, err := db.Query(ctx, `
 		WITH scoped AS (
 		  SELECT a.*,LEAST(
 		    a.created_at+interval '90 days',
@@ -970,10 +985,11 @@ func (h *Handler) followUpOutcomes(ctx context.Context, instID string, teacherID
 		LEFT JOIN paired p ON p.assignment_id=a.id AND p.student_id=ar.student_id
 		WHERE ($3='' OR a.group_id::text=$3)
 		  AND ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM group_teachers gt WHERE gt.group_id=a.group_id AND gt.user_id=$1::uuid))
+		  AND ($4::uuid[] IS NULL OR g.department_id = ANY($4::uuid[]))
 		GROUP BY a.id,a.quiz_id,a.group_id,a.status,a.created_at,a.due_at,a.comparison_ends_at,
 		         a.follow_up_review_status,a.follow_up_note,a.follow_up_reviewed_at,
 		         q.title,g.name,c.id,c.code,c.title
-		ORDER BY a.created_at DESC LIMIT 100`, teacherID, instID, groupID)
+		ORDER BY a.created_at DESC LIMIT 100`, teacherID, instID, groupID, departments)
 	if err != nil {
 		return nil, err
 	}
@@ -1004,24 +1020,31 @@ func (h *Handler) followUpOutcomes(ctx context.Context, instID string, teacherID
 //
 // GET /institution/support-summary
 func (h *Handler) InstitutionSupportSummary(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	instID := middleware.GetInstitutionID(r)
-	var tz string
-	if err := h.db.QueryRow(ctx, `SELECT timezone FROM institutions WHERE id=$1`, instID).Scan(&tz); err != nil {
-		middleware.NotFound(w, "institution")
-		return
-	}
-	loc, err := time.LoadLocation(tz)
+	out, err := QuerySupportSummary(r.Context(), h.db, middleware.GetInstitutionID(r), nil)
 	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
+	middleware.JSON(w, http.StatusOK, out)
+}
+
+// QuerySupportSummary is the support summary over active students, or only
+// students in classes of departments (leadership's grant; nil is everyone).
+func QuerySupportSummary(ctx context.Context, db *pgxpool.Pool, instID string, departments []string) (map[string]any, error) {
+	var tz string
+	if err := db.QueryRow(ctx, `SELECT timezone FROM institutions WHERE id=$1`, instID).Scan(&tz); err != nil {
+		return nil, err
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return nil, err
+	}
 	today := time.Now().In(loc).Format("2006-01-02")
-	const plans = `FROM teacher_student_support s
+	plans := `FROM teacher_student_support s
 		JOIN users st ON st.id=s.student_id AND st.role='student' AND st.deleted_at IS NULL
 		JOIN enrollments e ON e.user_id=s.student_id AND e.institution_id=s.institution_id AND e.status='active'
 		JOIN users t ON t.id=s.teacher_id
-		WHERE s.institution_id=$1`
+		WHERE s.institution_id=$1 AND ` + fmt.Sprintf(strings.ReplaceAll(inDepartmentsSQL, "$4", "$3"), "s.student_id")
 	var p struct {
 		Monitoring     int `json:"monitoring"`
 		Supporting     int `json:"supporting"`
@@ -1029,23 +1052,21 @@ func (h *Handler) InstitutionSupportSummary(w http.ResponseWriter, r *http.Reque
 		DueWithin7Days int `json:"due_within_7_days"`
 		NoReviewDate   int `json:"open_without_review_date"`
 	}
-	if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FILTER (WHERE s.status='monitoring'), COUNT(*) FILTER (WHERE s.status='supporting'),
+	if err := db.QueryRow(ctx, `SELECT COUNT(*) FILTER (WHERE s.status='monitoring'), COUNT(*) FILTER (WHERE s.status='supporting'),
 		COUNT(*) FILTER (WHERE s.status<>'resolved' AND s.review_on < $2::date),
 		COUNT(*) FILTER (WHERE s.status<>'resolved' AND s.review_on >= $2::date AND s.review_on < $2::date + 7),
-		COUNT(*) FILTER (WHERE s.status<>'resolved' AND s.review_on IS NULL) `+plans, instID, today).
+		COUNT(*) FILTER (WHERE s.status<>'resolved' AND s.review_on IS NULL) `+plans, instID, today, departments).
 		Scan(&p.Monitoring, &p.Supporting, &p.Overdue, &p.DueWithin7Days, &p.NoReviewDate); err != nil {
-		middleware.InternalError(w)
-		return
+		return nil, err
 	}
-	rows, err := h.db.Query(ctx, `SELECT s.teacher_id, COALESCE(NULLIF(t.display_name,''), t.full_name, ''),
+	rows, err := db.Query(ctx, `SELECT s.teacher_id, COALESCE(NULLIF(t.display_name,''), t.full_name, ''),
 		COUNT(*) FILTER (WHERE s.status<>'resolved'), COUNT(*) FILTER (WHERE s.status<>'resolved' AND s.review_on < $2::date)
 		`+plans+`
 		GROUP BY s.teacher_id, t.display_name, t.full_name
 		HAVING COUNT(*) FILTER (WHERE s.status<>'resolved') > 0
-		ORDER BY 2, 1`, instID, today)
+		ORDER BY 2, 1`, instID, today, departments)
 	if err != nil {
-		middleware.InternalError(w)
-		return
+		return nil, err
 	}
 	type load struct {
 		TeacherID   string `json:"teacher_id"`
@@ -1058,16 +1079,14 @@ func (h *Handler) InstitutionSupportSummary(w http.ResponseWriter, r *http.Reque
 		var l load
 		if err := rows.Scan(&l.TeacherID, &l.TeacherName, &l.OpenPlans, &l.Overdue); err != nil {
 			rows.Close()
-			middleware.InternalError(w)
-			return
+			return nil, err
 		}
 		workload = append(workload, l)
 	}
 	rows.Close()
-	followUps, err := h.followUpOutcomes(ctx, instID, nil, "")
+	followUps, err := followUpOutcomes(ctx, db, instID, nil, "", departments)
 	if err != nil {
-		middleware.InternalError(w)
-		return
+		return nil, err
 	}
 	byStatus := map[string]int{"comparable": 0, "awaiting_after_evidence": 0, "insufficient_student_overlap": 0, "insufficient_question_variety": 0}
 	byReview := map[string]int{}
@@ -1079,11 +1098,11 @@ func (h *Handler) InstitutionSupportSummary(w http.ResponseWriter, r *http.Reque
 	if len(items) > 10 {
 		items = items[:10]
 	}
-	middleware.JSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"to": today, "timezone": tz, "generated_at": time.Now().UTC(),
 		"plans": p, "workload": workload,
 		"follow_ups": map[string]any{"total": len(followUps), "by_comparison_status": byStatus, "by_review_status": byReview, "items": items},
-	})
+	}, nil
 }
 
 type followUpReviewInput struct {
@@ -1156,7 +1175,7 @@ func (h *Handler) Review(w http.ResponseWriter, r *http.Request) {
         JOIN learning_evidence_misconceptions em ON em.evidence_id=le.id AND em.misconception_id=$2
         JOIN misconceptions m ON m.id=em.misconception_id AND m.institution_id=$3
         WHERE le.user_id=$1 AND le.institution_id=$3 AND NOT le.is_correct AND NOT le.timed_out AND
-		(NOT EXISTS(SELECT 1 FROM group_teachers WHERE user_id=$4) OR EXISTS(SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id WHERE gs.user_id=$1 AND gt.user_id=$4)))`, studentID, misconceptionID, middleware.GetInstitutionID(r), middleware.GetUserID(r)).Scan(&allowed)
+		EXISTS(SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id WHERE gs.user_id=$1 AND gt.user_id=$4))`, studentID, misconceptionID, middleware.GetInstitutionID(r), middleware.GetUserID(r)).Scan(&allowed)
 	if err != nil || !allowed {
 		middleware.NotFound(w, "insight")
 		return

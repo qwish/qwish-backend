@@ -3,11 +3,14 @@ package institution
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/qwish/backend/internal/domain/teacher"
 	"github.com/qwish/backend/internal/middleware"
 )
@@ -43,15 +46,16 @@ type PendingApprovals struct {
 // ClassAttentionTotals are institution-wide distinct counts, never sums of the
 // per-class rows: a student in two classes counts once.
 type ClassAttentionTotals struct {
-	ActiveClasses           int              `json:"active_classes"`
-	ClassesNeedingAttention int              `json:"classes_needing_attention"`
-	Coverage                Ratio            `json:"coverage"`
-	SupportReviewsOverdue   int              `json:"support_reviews_overdue"`
-	StudentsMissingWork     int              `json:"students_missing_work"`
-	OverdueSubmissions      int              `json:"overdue_submissions"`
-	StudentsNeedingSupport  int              `json:"students_needing_support"`
-	StudentsRepeatingErrors int              `json:"students_repeating_errors"`
-	PendingApprovals        PendingApprovals `json:"pending_approvals"`
+	ActiveClasses           int   `json:"active_classes"`
+	ClassesNeedingAttention int   `json:"classes_needing_attention"`
+	Coverage                Ratio `json:"coverage"`
+	SupportReviewsOverdue   int   `json:"support_reviews_overdue"`
+	StudentsMissingWork     int   `json:"students_missing_work"`
+	OverdueSubmissions      int   `json:"overdue_submissions"`
+	StudentsNeedingSupport  int   `json:"students_needing_support"`
+	StudentsRepeatingErrors int   `json:"students_repeating_errors"`
+	// Null under department scope: approvals are an institution-admin queue.
+	PendingApprovals *PendingApprovals `json:"pending_approvals"`
 }
 
 type ClassTeacher struct {
@@ -106,13 +110,15 @@ type ClassAttention struct {
 }
 
 // classAttentionCTE: $1 institution, $2 today (institution zone), $3 window
-// start. Roster and reason rules are the teacher queue's, at institution scope:
+// start, $4 department ids (NULL: every class; leadership passes its grant). Roster and reason rules are the teacher queue's, at institution scope:
 // active, claimed, non-deleted students in active classes; support reviews by
 // any teacher; overdue work attributed to the assignment's class; learning and
 // repeated-wrong signals attributed to every class the student is in.
 const classAttentionCTE = `
 WITH classes AS (
-  SELECT g.id, g.name FROM groups g WHERE g.institution_id=$1 AND g.archived_at IS NULL
+  SELECT g.id, g.name FROM groups g
+   WHERE g.institution_id=$1 AND g.archived_at IS NULL
+     AND ($4::uuid[] IS NULL OR g.department_id = ANY($4::uuid[]))
 ), members AS (
   SELECT gs.group_id, gs.user_id AS student_id
     FROM group_students gs
@@ -172,12 +178,12 @@ WITH classes AS (
 const classAttentionTotalsSQL = classAttentionCTE + `
 SELECT (SELECT COUNT(*) FROM classes), (SELECT COUNT(*) FROM flagged),
        (SELECT COUNT(*) FROM assessed), (SELECT COUNT(*) FROM students),
-       (SELECT COUNT(*) FROM support), (SELECT COUNT(DISTINCT student_id) FROM work), (SELECT COUNT(*) FROM work),
+       (SELECT COUNT(DISTINCT student_id) FROM support), (SELECT COUNT(DISTINCT student_id) FROM work), (SELECT COUNT(*) FROM work),
        (SELECT COUNT(*) FROM learning), (SELECT COUNT(*) FROM repeats)`
 
 // Classes with an overdue support review first, then overdue work, learning
 // signals, repeated wrong answers; then by affected students, then name.
-// $4 limit, $5 offset.
+// $5 limit, $6 offset.
 const classAttentionRowsSQL = classAttentionCTE + `
 SELECT f.id, f.name, f.eligible, f.assessed, f.missing_work, f.overdue_submissions, f.needs_support, f.reviews_overdue, f.repeating,
        (SELECT COALESCE(json_agg(json_build_object('id', u.id, 'name', COALESCE(NULLIF(u.display_name,''), u.full_name)) ORDER BY u.display_name), '[]')
@@ -185,89 +191,97 @@ SELECT f.id, f.name, f.eligible, f.assessed, f.missing_work, f.overdue_submissio
   FROM flagged f
  ORDER BY CASE WHEN f.reviews_overdue>0 THEN 1 WHEN f.missing_work>0 THEN 2 WHEN f.needs_support>0 THEN 3 ELSE 4 END,
           f.missing_work + f.needs_support + f.reviews_overdue + f.repeating DESC, f.name, f.id
- LIMIT $4 OFFSET $5`
+ LIMIT $5 OFFSET $6`
 
 // GET /institution/classes/attention?days=7|30|90&page=&limit=
 // Which classes need support, and the overview totals beside them. Coverage
 // uses the window; due work and reviews count every open item.
 func (h *Handler) ClassAttention(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	instID := middleware.GetInstitutionID(r)
-	q := r.URL.Query()
-	days := 30
-	if v := q.Get("days"); v != "" {
-		switch v {
-		case "7", "30", "90":
-			days, _ = strconv.Atoi(v)
-		default:
-			middleware.BadRequest(w, "days must be 7, 30 or 90")
-			return
-		}
-	}
-	page, _ := strconv.Atoi(q.Get("page"))
-	if page < 1 {
-		page = 1
-	}
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit < 1 || limit > 100 {
-		limit = 25
-	}
-
-	var tz string
-	if err := h.db.QueryRow(ctx, `SELECT timezone FROM institutions WHERE id=$1`, instID).Scan(&tz); err != nil {
-		middleware.NotFound(w, "institution")
+	days, ok := ClassAttentionDays(r)
+	if !ok {
+		middleware.BadRequest(w, "days must be 7, 30 or 90")
 		return
 	}
-	loc, err := time.LoadLocation(tz)
+	page, limit := pageParams(r)
+	out, err := QueryClassAttention(r.Context(), h.db, middleware.GetInstitutionID(r), nil, days, limit, (page-1)*limit)
 	if err != nil {
 		middleware.InternalError(w)
 		return
+	}
+	middleware.JSONWithMeta(w, http.StatusOK, out, &middleware.Meta{Page: page, Limit: limit, Total: out.Totals.ClassesNeedingAttention})
+}
+
+// ClassAttentionDays reads the coverage window: 7, 30 or 90 days, default 30.
+func ClassAttentionDays(r *http.Request) (int, bool) {
+	switch v := r.URL.Query().Get("days"); v {
+	case "":
+		return 30, true
+	case "7", "30", "90":
+		n, _ := strconv.Atoi(v)
+		return n, true
+	}
+	return 0, false
+}
+
+// PageParams reads page (≥1) and limit (1–100, default 25).
+func PageParams(r *http.Request) (page, limit int) { return pageParams(r) }
+
+// QueryClassAttention computes the overview for an institution's active
+// classes, or only those in departments (leadership's grant; nil is every
+// class). Pending approvals are included only for the whole institution.
+func QueryClassAttention(ctx context.Context, db *pgxpool.Pool, instID string, departments []string, days, limit, offset int) (ClassAttention, error) {
+	var tz string
+	if err := db.QueryRow(ctx, `SELECT timezone FROM institutions WHERE id=$1`, instID).Scan(&tz); err != nil {
+		return ClassAttention{}, err
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return ClassAttention{}, err
 	}
 	now := time.Now()
 	local := now.In(loc)
 	today := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
 	from := today.AddDate(0, 0, -(days - 1))
 	todayStr := today.Format("2006-01-02")
-
+	scope := map[string]any{"kind": "institution", "days": days}
+	if departments != nil {
+		scope = map[string]any{"kind": "departments", "department_ids": departments, "days": days}
+	}
 	out := ClassAttention{
-		Scope: map[string]any{"kind": "institution", "days": days},
-		From:  from.Format("2006-01-02"), To: todayStr, Timezone: tz, GeneratedAt: now.UTC(),
+		Scope: scope, From: from.Format("2006-01-02"), To: todayStr, Timezone: tz, GeneratedAt: now.UTC(),
 		DefinitionVersion: ClassAttentionDefinitionVersion,
 	}
 	t := &out.Totals
 	var assessed, eligible int
-	if err := h.db.QueryRow(ctx, classAttentionTotalsSQL, instID, todayStr, from).Scan(
+	if err := db.QueryRow(ctx, classAttentionTotalsSQL, instID, todayStr, from, departments).Scan(
 		&t.ActiveClasses, &t.ClassesNeedingAttention, &assessed, &eligible,
 		&t.SupportReviewsOverdue, &t.StudentsMissingWork, &t.OverdueSubmissions,
 		&t.StudentsNeedingSupport, &t.StudentsRepeatingErrors); err != nil {
-		middleware.InternalError(w)
-		return
+		return out, err
 	}
 	t.Coverage = ratio(assessed, eligible)
-	if err := h.db.QueryRow(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE submitted_for_approval_at IS NULL), MIN(submitted_for_approval_at)
-		FROM quizzes WHERE institution_id=$1 AND status='pending_approval' AND deleted_at IS NULL`, instID).Scan(
-		&t.PendingApprovals.Count, &t.PendingApprovals.AgeUnavailable, &t.PendingApprovals.OldestSubmittedAt); err != nil {
-		middleware.InternalError(w)
-		return
+	if out.Classes, err = classAttentionRows(ctx, db, instID, todayStr, from, departments, limit, offset); err != nil {
+		return out, err
 	}
-
-	if out.Classes, err = h.classAttentionRows(ctx, instID, todayStr, from, limit, (page-1)*limit); err != nil {
-		middleware.InternalError(w)
-		return
+	if out.SupportReviews, err = overdueSupportReviews(ctx, db, instID, todayStr, departments); err != nil {
+		return out, err
 	}
-	if out.Approvals, err = h.pendingApprovals(ctx, instID); err != nil {
-		middleware.InternalError(w)
-		return
+	if departments == nil {
+		t.PendingApprovals = &PendingApprovals{}
+		if err := db.QueryRow(ctx, `SELECT COUNT(*), COUNT(*) FILTER (WHERE submitted_for_approval_at IS NULL), MIN(submitted_for_approval_at)
+			FROM quizzes WHERE institution_id=$1 AND status='pending_approval' AND deleted_at IS NULL`, instID).Scan(
+			&t.PendingApprovals.Count, &t.PendingApprovals.AgeUnavailable, &t.PendingApprovals.OldestSubmittedAt); err != nil {
+			return out, err
+		}
+		if out.Approvals, err = pendingApprovals(ctx, db, instID); err != nil {
+			return out, err
+		}
 	}
-	if out.SupportReviews, err = h.overdueSupportReviews(ctx, instID, todayStr); err != nil {
-		middleware.InternalError(w)
-		return
-	}
-	middleware.JSONWithMeta(w, http.StatusOK, out, &middleware.Meta{Page: page, Limit: limit, Total: t.ClassesNeedingAttention})
+	return out, nil
 }
 
-func (h *Handler) classAttentionRows(ctx context.Context, instID, today string, from time.Time, limit, offset int) ([]ClassAttentionRow, error) {
-	rows, err := h.db.Query(ctx, classAttentionRowsSQL, instID, today, from, limit, offset)
+func classAttentionRows(ctx context.Context, db *pgxpool.Pool, instID, today string, from time.Time, departments []string, limit, offset int) ([]ClassAttentionRow, error) {
+	rows, err := db.Query(ctx, classAttentionRowsSQL, instID, today, from, departments, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -301,8 +315,8 @@ func (h *Handler) classAttentionRows(ctx context.Context, instID, today string, 
 
 // pendingApprovals is the oldest ten, by recorded submission time; quizzes
 // pending since before ages were recorded sort last and carry no age.
-func (h *Handler) pendingApprovals(ctx context.Context, instID string) ([]ApprovalItem, error) {
-	rows, err := h.db.Query(ctx, `SELECT q.id, q.title, u.id, COALESCE(NULLIF(u.display_name,''), u.full_name, ''), q.submitted_for_approval_at
+func pendingApprovals(ctx context.Context, db *pgxpool.Pool, instID string) ([]ApprovalItem, error) {
+	rows, err := db.Query(ctx, `SELECT q.id, q.title, u.id, COALESCE(NULLIF(u.display_name,''), u.full_name, ''), q.submitted_for_approval_at
 		FROM quizzes q JOIN users u ON u.id=q.created_by
 		WHERE q.institution_id=$1 AND q.status='pending_approval' AND q.deleted_at IS NULL
 		ORDER BY q.submitted_for_approval_at ASC NULLS LAST, q.created_at, q.id LIMIT 10`, instID)
@@ -322,9 +336,9 @@ func (h *Handler) pendingApprovals(ctx context.Context, instID string) ([]Approv
 }
 
 // overdueSupportReviews is the oldest ten overdue reviews with the teacher who
-// recorded the plan, over the same roster as the totals.
-func (h *Handler) overdueSupportReviews(ctx context.Context, instID, today string) ([]SupportReviewItem, error) {
-	rows, err := h.db.Query(ctx, `SELECT s.student_id, COALESCE(NULLIF(st.display_name,''), st.full_name, ''),
+// recorded the plan, over the same roster and departments as the totals.
+func overdueSupportReviews(ctx context.Context, db *pgxpool.Pool, instID, today string, departments []string) ([]SupportReviewItem, error) {
+	rows, err := db.Query(ctx, `SELECT s.student_id, COALESCE(NULLIF(st.display_name,''), st.full_name, ''),
 		       s.teacher_id, COALESCE(NULLIF(t.display_name,''), t.full_name, ''), s.status, to_char(s.review_on,'YYYY-MM-DD'), s.updated_at
 		  FROM teacher_student_support s
 		  JOIN users st ON st.id=s.student_id AND st.role='student' AND st.deleted_at IS NULL
@@ -332,8 +346,9 @@ func (h *Handler) overdueSupportReviews(ctx context.Context, instID, today strin
 		 WHERE s.institution_id=$1 AND s.status<>'resolved' AND s.review_on < $2::date
 		   AND EXISTS (SELECT 1 FROM enrollments e WHERE e.user_id=s.student_id AND e.institution_id=$1 AND e.status='active')
 		   AND EXISTS (SELECT 1 FROM group_students gs JOIN groups g ON g.id=gs.group_id
-		                WHERE gs.user_id=s.student_id AND g.institution_id=$1 AND g.archived_at IS NULL)
-		 ORDER BY s.review_on, s.student_id LIMIT 10`, instID, today)
+		                WHERE gs.user_id=s.student_id AND g.institution_id=$1 AND g.archived_at IS NULL
+		                  AND ($3::uuid[] IS NULL OR g.department_id = ANY($3::uuid[])))
+		 ORDER BY s.review_on, s.student_id LIMIT 10`, instID, today, departments)
 	if err != nil {
 		return nil, err
 	}
@@ -354,46 +369,66 @@ func (h *Handler) overdueSupportReviews(ctx context.Context, instID, today strin
 // admin scope (every teacher's support plans), for one active class of this
 // institution. Anything else is 404.
 func (h *Handler) ClassStudentsAttention(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	instID, classID := middleware.GetInstitutionID(r), chi.URLParam(r, "classId")
-	q := r.URL.Query()
-	page, _ := strconv.Atoi(q.Get("page"))
-	if page < 1 {
-		page = 1
-	}
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit < 1 || limit > 100 {
-		limit = 25
-	}
-	var name, tz string
-	var teachers []byte
-	err := h.db.QueryRow(ctx, `SELECT g.name, i.timezone,
-		(SELECT COALESCE(json_agg(json_build_object('id', u.id, 'name', COALESCE(NULLIF(u.display_name,''), u.full_name)) ORDER BY u.display_name), '[]')
-		   FROM group_teachers gt JOIN users u ON u.id=gt.user_id WHERE gt.group_id=g.id)
-		FROM groups g JOIN institutions i ON i.id=g.institution_id
-		WHERE g.id::text=$1 AND g.institution_id=$2 AND g.archived_at IS NULL`, classID, instID).Scan(&name, &tz, &teachers)
-	if err != nil {
+	page, limit := pageParams(r)
+	out, total, err := QueryClassStudentsAttention(r.Context(), h.db, middleware.GetInstitutionID(r), chi.URLParam(r, "classId"), nil, limit, (page-1)*limit)
+	if errors.Is(err, ErrClassNotFound) {
 		middleware.NotFound(w, "class")
 		return
 	}
-	var classTeachers []ClassTeacher
-	if err := json.Unmarshal(teachers, &classTeachers); err != nil {
+	if err != nil {
 		middleware.InternalError(w)
 		return
+	}
+	middleware.JSONWithMeta(w, http.StatusOK, out, &middleware.Meta{Page: page, Limit: limit, Total: total})
+}
+
+// ErrClassNotFound: no such active class in this institution and scope.
+var ErrClassNotFound = errors.New("class not found")
+
+func pageParams(r *http.Request) (page, limit int) {
+	page, _ = strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	limit, _ = strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit < 1 || limit > 100 {
+		limit = 25
+	}
+	return page, limit
+}
+
+// QueryClassStudentsAttention is the class drill-down for one active class in
+// the institution and, when departments is non-nil, in one of them.
+func QueryClassStudentsAttention(ctx context.Context, db *pgxpool.Pool, instID, classID string, departments []string, limit, offset int) (map[string]any, int, error) {
+	var name, tz string
+	var teachers []byte
+	err := db.QueryRow(ctx, `SELECT g.name, i.timezone,
+		(SELECT COALESCE(json_agg(json_build_object('id', u.id, 'name', COALESCE(NULLIF(u.display_name,''), u.full_name)) ORDER BY u.display_name), '[]')
+		   FROM group_teachers gt JOIN users u ON u.id=gt.user_id WHERE gt.group_id=g.id)
+		FROM groups g JOIN institutions i ON i.id=g.institution_id
+		WHERE g.id::text=$1 AND g.institution_id=$2 AND g.archived_at IS NULL
+		  AND ($3::uuid[] IS NULL OR g.department_id = ANY($3::uuid[]))`, classID, instID, departments).Scan(&name, &tz, &teachers)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, 0, ErrClassNotFound
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	var classTeachers []ClassTeacher
+	if err := json.Unmarshal(teachers, &classTeachers); err != nil {
+		return nil, 0, err
 	}
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
-		middleware.InternalError(w)
-		return
+		return nil, 0, err
 	}
 	now := time.Now()
 	today := now.In(loc).Format("2006-01-02")
-	totals, students, err := teacher.QueryAttention(ctx, h.db, instID, []string{classID}, nil, today, tz, limit, (page-1)*limit)
+	totals, students, err := teacher.QueryAttention(ctx, db, instID, []string{classID}, nil, today, tz, limit, offset)
 	if err != nil {
-		middleware.InternalError(w)
-		return
+		return nil, 0, err
 	}
-	middleware.JSONWithMeta(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"scope":              map[string]any{"kind": "class", "class_id": classID, "class_name": name},
 		"from":               nil,
 		"to":                 today,
@@ -403,5 +438,5 @@ func (h *Handler) ClassStudentsAttention(w http.ResponseWriter, r *http.Request)
 		"teachers":           classTeachers,
 		"totals":             totals,
 		"students":           students,
-	}, &middleware.Meta{Page: page, Limit: limit, Total: totals.StudentsNeedingAttention})
+	}, totals.StudentsNeedingAttention, nil
 }

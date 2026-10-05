@@ -3,6 +3,7 @@ package notification
 import (
 	"fmt"
 	"html"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -313,18 +314,24 @@ func tmplTeacherNotice(title, body, link string) string {
 }
 
 // tmplAppLoginDenied is sent when a staff or teacher account tries the student
-// app. Plain markup, outside the branded layout.
+// app.
 func tmplAppLoginDenied() string {
-	return "<p>Login to the Qwish app was declined.</p><p>Administrator and teacher accounts cannot log into the student app. Please use your institute dashboard, teacher panel, or admin console with this account.</p><p>If you did not attempt this login, you can ignore this email.</p>"
+	body := heading("This account can’t sign in to the Qwish app") +
+		paragraph("Someone just signed in to the Qwish student app with this email, and the sign-in was declined.") +
+		paragraph("Administrator and teacher accounts work on the web instead: use your institute dashboard, teacher panel or admin console with this same email.") +
+		mutedNote("If this wasn’t you, you can safely ignore this email — nothing on your account changed.")
+	return emailLayout("Your Qwish app sign-in was declined", body)
 }
 
-// AnnouncementEmailHTML is a scheduled announcement's email body. Plain
-// markup, outside the branded layout.
+// AnnouncementEmailHTML is a scheduled announcement's email. Title, body and
+// call to action come from a super admin, so all are escaped, and the link is
+// rendered only for an absolute http(s) URL.
 func AnnouncementEmailHTML(title, body string, ctaLabel, ctaURL *string) string {
-	cta := ""
-	if ctaLabel != nil && ctaURL != nil {
-		cta = fmt.Sprintf(`<p><a href="%s">%s</a></p>`, esc(*ctaURL), esc(*ctaLabel))
+	content := heading(esc(title)) + paragraph(strings.ReplaceAll(esc(body), "\n", "<br>"))
+	if ctaLabel != nil && ctaURL != nil && *ctaLabel != "" {
+		if u, err := url.Parse(*ctaURL); err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != "" {
+			content += primaryButton(esc(*ctaLabel), esc(*ctaURL)) + fallbackLink(esc(*ctaURL))
+		}
 	}
-	return fmt.Sprintf(`<h1>%s</h1><p>%s</p>%s`, esc(title), esc(body), cta)
+	return emailLayout(esc(title), content)
 }
-

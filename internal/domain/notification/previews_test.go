@@ -40,9 +40,9 @@ func emailPreviews() []emailPreview {
 			tmplWeeklyInsights("Aarav Shah", 1240, "+18% vs last week", 9, 76.5, 5, "Mathematics", "Try a fractions practice quiz to lock in this week’s gains.")},
 		{"Teacher notification — overdue work", "3 students have overdue work in 9A", "Teacher notification topics with email on (overdue work, follow-up evidence, decisions…)",
 			tmplTeacherNotice("3 students have overdue work in 9A", "Fractions check was due yesterday. Open the class to see who hasn’t submitted and send a reminder.", teacherURL+"/classes/detail?id=…&tab=assignments")},
-		{"App login declined", "Your Qwish app login was declined", "A staff or teacher account signs in to the student app (plain, unbranded)",
+		{"App login declined", "Your Qwish app login was declined", "A staff or teacher account signs in to the student app",
 			tmplAppLoginDenied()},
-		{"Announcement", "Exam week timetable", "Super admin schedules an announcement with the email channel (plain, unbranded)",
+		{"Announcement", "Exam week timetable", "Super admin schedules an announcement with the email channel",
 			AnnouncementEmailHTML("Exam week timetable", "Mid-term assessments run 14–18 October. Check your assigned quizzes for the schedule.", strPtr("View timetable"), strPtr("https://app.qwish.in/notices"))},
 	}
 }
@@ -83,7 +83,6 @@ func TestWriteEmailPreviews(t *testing.T) {
   .label b { font-size: 13px }
   .label span { display: block; font-size: 12px; color: #bbb; margin-top: 2px }
   iframe { width: 100%; height: 760px; border: 0; display: block; background: #fff }
-  iframe.short { height: 260px }
 </style>
 </head>
 <body>
@@ -99,12 +98,8 @@ func TestWriteEmailPreviews(t *testing.T) {
 	}
 	b.WriteString("</nav>\n")
 	for i, p := range previews {
-		class := ""
-		if !strings.Contains(p.html, "<table") { // plain, unbranded emails are short
-			class = ` class="short"`
-		}
 		b.WriteString(`<div class="wrap" id="e` + string(rune('a'+i)) + `"><div class="label"><b>` + html.EscapeString(p.name) +
-			`</b><span>Subject: ` + html.EscapeString(p.subject) + ` · ` + html.EscapeString(p.trigger) + `</span></div><iframe` + class +
+			`</b><span>Subject: ` + html.EscapeString(p.subject) + ` · ` + html.EscapeString(p.trigger) + `</span></div><iframe` +
 			` title="` + html.EscapeString(p.name) + `" srcdoc="` + html.EscapeString(p.html) + `"></iframe></div>` + "\n")
 	}
 	b.WriteString("</body>\n</html>\n")

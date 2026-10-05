@@ -33,3 +33,32 @@ func TestAccountInviteSaysEmailCodeAndEscapes(t *testing.T) {
 		t.Fatal("invite must not mention a password; sign-in is email + code")
 	}
 }
+
+// Every email uses the branded layout, including the two that used to be bare.
+func TestPlainEmailsUseBrandedLayout(t *testing.T) {
+	branded := emailLayout("x", "")
+	marker := branded[:strings.Index(branded, "<body")]
+	for name, html := range map[string]string{
+		"app login declined": tmplAppLoginDenied(),
+		"announcement":       AnnouncementEmailHTML("Exam week", "Body", strPtr("Open"), strPtr("https://app.qwish.in/notices")),
+	} {
+		if !strings.HasPrefix(html, marker) {
+			t.Errorf("%s does not use emailLayout", name)
+		}
+	}
+}
+
+func TestAnnouncementEmailEscapesAndOnlyLinksHTTP(t *testing.T) {
+	html := AnnouncementEmailHTML(`<b>T</b>`, `<i>B</i>`, strPtr(`<x>Go`), strPtr("https://qwish.in/a?b=1&c=2"))
+	if strings.Contains(html, "<b>T</b>") || strings.Contains(html, "<i>B</i>") || strings.Contains(html, "<x>Go") {
+		t.Fatal("announcement rendered unescaped input")
+	}
+	if !strings.Contains(html, "https://qwish.in/a?b=1&amp;c=2") {
+		t.Fatal("announcement link missing or unescaped")
+	}
+	for _, bad := range []string{"javascript:alert(1)", "data:text/html,x", "qwish.in/no-scheme"} {
+		if out := AnnouncementEmailHTML("T", "B", strPtr("Go"), strPtr(bad)); strings.Contains(out, bad) {
+			t.Errorf("announcement rendered a %q link", bad)
+		}
+	}
+}

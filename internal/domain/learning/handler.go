@@ -285,34 +285,76 @@ func (h *Handler) InstitutionSummary(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, result)
 }
 
+// learningWindow reads the optional evidence window (`days`: 7, 30 or 90) and
+// the stale threshold (`stale_after_days`, default 90): evidence whose latest
+// date is older reads as stale, kept visible but never a current learning gap.
+func learningWindow(r *http.Request) (from *time.Time, staleBefore time.Time, ok bool) {
+	q := r.URL.Query()
+	now := time.Now()
+	staleDays := 90
+	if v := q.Get("stale_after_days"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 3650 {
+			return nil, now, false
+		}
+		staleDays = n
+	}
+	switch q.Get("days") {
+	case "":
+	case "7", "30", "90":
+		n, _ := strconv.Atoi(q.Get("days"))
+		t := now.AddDate(0, 0, -n)
+		from = &t
+	default:
+		return nil, now, false
+	}
+	return from, now.AddDate(0, 0, -staleDays), true
+}
+
+// teacherRosterSQL is the operational roster of the teacher's classes ($2),
+// narrowed by class ($3): active, claimed, non-deleted students. Suspended and
+// pending-claim students are roster exceptions, not learning rows.
+const teacherRosterSQL = `SELECT DISTINCT u.id, u.display_name
+	  FROM group_teachers gt
+	  JOIN group_students gs ON gs.group_id=gt.group_id
+	  JOIN users u ON u.id=gs.user_id AND u.role='student' AND u.deleted_at IS NULL
+	  JOIN enrollments e ON e.user_id=u.id AND e.institution_id=$1 AND e.status='active'
+	 WHERE gt.user_id=$2 AND ($3='' OR gt.group_id::text=$3)`
+
 // TeacherClassSummary returns concept evidence only for students in classes
 // assigned to the authenticated teacher. A supplied class_id narrows that
-// scope; it never expands it.
+// scope; it never expands it. Each concept carries its denominators: eligible
+// roster students, how many have evidence (in the window, if given), how many
+// do not, and how many of the assessed have only stale evidence.
 func (h *Handler) TeacherClassSummary(w http.ResponseWriter, r *http.Request) {
 	classID := strings.TrimSpace(r.URL.Query().Get("class_id"))
-	rows, err := h.db.Query(r.Context(), `WITH per_student AS (
+	from, staleBefore, ok := learningWindow(r)
+	if !ok {
+		middleware.BadRequest(w, "days must be 7, 30 or 90 and stale_after_days 1–3650")
+		return
+	}
+	rows, err := h.db.Query(r.Context(), `WITH roster AS (`+teacherRosterSQL+`), per_student AS (
 		SELECT le.user_id,le.concept_id,c.code,c.title,
 		       COUNT(*) FILTER(WHERE le.is_correct) AS correct_count,
 		       COUNT(*) FILTER(WHERE NOT le.is_correct) AS error_count,
 		       COUNT(DISTINCT le.question_id) AS distinct_questions,
 		       MAX(le.occurred_at) AS latest_evidence_at
 		FROM learning_evidence le
+		JOIN roster r ON r.id=le.user_id
 		JOIN curriculum_concepts c ON c.id=le.concept_id
-		WHERE le.institution_id=$1 AND NOT le.timed_out
-		  AND EXISTS (
-		    SELECT 1 FROM group_students gs JOIN group_teachers gt ON gt.group_id=gs.group_id
-		    WHERE gs.user_id=le.user_id AND gt.user_id=$2 AND ($3='' OR gs.group_id::text=$3)
-		  )
+		WHERE le.institution_id=$1 AND NOT le.timed_out AND ($4::timestamptz IS NULL OR le.occurred_at >= $4)
 		GROUP BY le.user_id,le.concept_id,c.code,c.title
 	)
 	SELECT concept_id,code,title,COUNT(*) AS students_assessed,
 	       SUM(correct_count),SUM(error_count) AS error_evidence,SUM(distinct_questions),
 	       COUNT(*) FILTER(WHERE distinct_questions>=2 AND error_count>correct_count) AS students_needing_support,
-	       MAX(latest_evidence_at) AS latest_evidence
+	       MAX(latest_evidence_at) AS latest_evidence,
+	       (SELECT COUNT(*) FROM roster) AS eligible,
+	       COUNT(*) FILTER(WHERE latest_evidence_at < $5) AS stale_students
 	FROM per_student
 	GROUP BY concept_id,code,title
 	ORDER BY students_needing_support DESC,error_evidence DESC,latest_evidence DESC
-	LIMIT 100`, middleware.GetInstitutionID(r), middleware.GetUserID(r), classID)
+	LIMIT 100`, middleware.GetInstitutionID(r), middleware.GetUserID(r), classID, from, staleBefore)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -321,15 +363,16 @@ func (h *Handler) TeacherClassSummary(w http.ResponseWriter, r *http.Request) {
 	result := []map[string]interface{}{}
 	for rows.Next() {
 		var conceptID, code, title string
-		var students, correct, errors, questions, needsSupport int
+		var students, correct, errors, questions, needsSupport, eligible, stale int
 		var latest interface{}
-		if err := rows.Scan(&conceptID, &code, &title, &students, &correct, &errors, &questions, &needsSupport, &latest); err != nil {
+		if err := rows.Scan(&conceptID, &code, &title, &students, &correct, &errors, &questions, &needsSupport, &latest, &eligible, &stale); err != nil {
 			middleware.InternalError(w)
 			return
 		}
 		result = append(result, map[string]interface{}{
 			"concept_id": conceptID, "concept_code": code, "concept_title": title,
-			"students_assessed": students, "correct_evidence": correct, "error_evidence": errors,
+			"eligible_students": eligible, "students_assessed": students, "students_not_assessed": eligible - students,
+			"stale_students": stale, "correct_evidence": correct, "error_evidence": errors,
 			"distinct_questions": questions, "students_needing_support": needsSupport,
 			"latest_evidence_at": latest,
 		})
@@ -341,13 +384,39 @@ func (h *Handler) TeacherClassSummary(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, result)
 }
 
+// TeacherClassMatrix is one row per student × concept with evidence in the
+// class. include_unassessed=true adds a not_assessed row for every roster
+// student lacking evidence on a concept the class has evidence for, so missing
+// evidence is shown as missing, never as a gap. Every evidence row carries
+// stale (latest evidence older than stale_after_days, default 90).
 func (h *Handler) TeacherClassMatrix(w http.ResponseWriter, r *http.Request) {
-	classID := strings.TrimSpace(r.URL.Query().Get("class_id"))
+	q := r.URL.Query()
+	classID := strings.TrimSpace(q.Get("class_id"))
 	if classID == "" {
 		middleware.BadRequest(w, "class_id is required")
 		return
 	}
-	rows, err := h.db.Query(r.Context(), `SELECT u.id,u.display_name,c.id,c.code,c.title,COUNT(*) FILTER(WHERE le.is_correct),COUNT(*) FILTER(WHERE NOT le.is_correct),COUNT(DISTINCT le.question_id),MAX(le.occurred_at) FROM group_teachers gt JOIN group_students gs ON gs.group_id=gt.group_id JOIN users u ON u.id=gs.user_id JOIN learning_evidence le ON le.user_id=u.id AND le.institution_id=$3 AND NOT le.timed_out JOIN curriculum_concepts c ON c.id=le.concept_id WHERE gt.user_id=$1 AND gt.group_id::text=$2 GROUP BY u.id,u.display_name,c.id,c.code,c.title ORDER BY u.display_name,c.title`, middleware.GetUserID(r), classID, middleware.GetInstitutionID(r))
+	_, staleBefore, ok := learningWindow(r)
+	if !ok {
+		middleware.BadRequest(w, "stale_after_days must be 1–3650")
+		return
+	}
+	includeUnassessed := q.Get("include_unassessed") == "true" || q.Get("include_unassessed") == "1"
+	rows, err := h.db.Query(r.Context(), `WITH roster AS (`+teacherRosterSQL+`), ev AS (
+		SELECT le.user_id, le.concept_id,
+		       COUNT(*) FILTER(WHERE le.is_correct) AS correct, COUNT(*) FILTER(WHERE NOT le.is_correct) AS errors,
+		       COUNT(DISTINCT le.question_id) AS questions, MAX(le.occurred_at) AS latest
+		  FROM learning_evidence le JOIN roster r ON r.id=le.user_id
+		 WHERE le.institution_id=$1 AND NOT le.timed_out
+		 GROUP BY le.user_id, le.concept_id
+	), concepts AS (SELECT DISTINCT concept_id FROM ev)
+	SELECT r.id, r.display_name, c.id, c.code, c.title,
+	       COALESCE(ev.correct,0), COALESCE(ev.errors,0), COALESCE(ev.questions,0), ev.latest
+	  FROM roster r CROSS JOIN concepts k
+	  JOIN curriculum_concepts c ON c.id=k.concept_id
+	  LEFT JOIN ev ON ev.user_id=r.id AND ev.concept_id=k.concept_id
+	 WHERE $4 OR ev.user_id IS NOT NULL
+	 ORDER BY r.display_name, c.title`, middleware.GetInstitutionID(r), middleware.GetUserID(r), classID, includeUnassessed)
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -357,18 +426,21 @@ func (h *Handler) TeacherClassMatrix(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var studentID, name, conceptID, code, title string
 		var correct, errors, questions int
-		var latest time.Time
+		var latest *time.Time
 		if rows.Scan(&studentID, &name, &conceptID, &code, &title, &correct, &errors, &questions, &latest) != nil {
 			middleware.InternalError(w)
 			return
 		}
-		state := "insufficient_evidence"
-		if questions >= 2 && errors > correct {
-			state = "needs_support"
-		} else if questions >= 2 {
-			state = "on_track"
+		state := "not_assessed"
+		if latest != nil {
+			state = "insufficient_evidence"
+			if questions >= 2 && errors > correct {
+				state = "needs_support"
+			} else if questions >= 2 {
+				state = "on_track"
+			}
 		}
-		out = append(out, map[string]interface{}{"student_id": studentID, "student_name": name, "concept_id": conceptID, "concept_code": code, "concept_title": title, "correct_count": correct, "error_count": errors, "distinct_questions": questions, "state": state, "latest_evidence_at": latest})
+		out = append(out, map[string]interface{}{"student_id": studentID, "student_name": name, "concept_id": conceptID, "concept_code": code, "concept_title": title, "correct_count": correct, "error_count": errors, "distinct_questions": questions, "state": state, "latest_evidence_at": latest, "stale": latest != nil && latest.Before(staleBefore)})
 	}
 	middleware.JSON(w, http.StatusOK, out)
 }

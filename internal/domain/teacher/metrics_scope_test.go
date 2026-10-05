@@ -3,6 +3,7 @@ package teacher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -57,10 +58,9 @@ func TestTeacherScopeQuizzes(t *testing.T) {
 	}
 }
 
-// PRD §5.4: an unassigned teacher sees all institution students. Analytics must
-// honour that and must say so, or the teacher reads institution-wide numbers as
-// their own class's.
-func TestUnassignedTeacherFallsBackToInstitution(t *testing.T) {
+// A teacher with no classes gets an explicit no-assigned-classes state, never
+// institution-wide numbers: class scope over an empty class set matches nobody.
+func TestUnassignedTeacherGetsNoClassesState(t *testing.T) {
 	pool := openTestDB(t)
 	f := seedTeacherFixture(t, pool)
 	resolve := MetricsScopeResolver(pool)
@@ -69,17 +69,22 @@ func TestUnassignedTeacherFallsBackToInstitution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if sc.Kind != metrics.ScopeInstitution {
-		t.Errorf("kind = %q, want institution", sc.Kind)
+	if sc.Kind != metrics.ScopeClasses || sc.ID != f.LonerTeacherID {
+		t.Errorf("scope = %+v, want teacher_classes on the teacher's own id", sc)
 	}
-	if sc.ID != f.InstitutionID {
-		t.Errorf("id = %q, want the institution id", sc.ID)
+	if note.Effective != metrics.ScopeClasses || note.Reason != NoClassesReason {
+		t.Errorf("note = %+v, want the no-assigned-classes reason", note)
 	}
-	if note.Requested != metrics.ScopeClasses || note.Effective != metrics.ScopeInstitution {
-		t.Errorf("note = %+v", note)
+
+	// No student-identifiable data: the class-member set is empty even though
+	// the institution has enrolled students.
+	var members int
+	if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM (`+
+		fmt.Sprintf(metrics.ClassMembersSQL, 1)+`) m`, sc.ID).Scan(&members); err != nil {
+		t.Fatal(err)
 	}
-	if note.Reason == "" {
-		t.Error("fallback carries no reason for the UI to show")
+	if members != 0 {
+		t.Errorf("unassigned teacher's scope covers %d students, want 0", members)
 	}
 }
 

@@ -16,8 +16,8 @@ import (
 var ErrBadScopeRequest = errors.New("bad scope request")
 
 // ScopeNote reports what the caller asked for versus what was actually applied.
-// A teacher with no classes is answered institution-wide; without this field
-// they would read those numbers as their own class's.
+// Reason explains a state the numbers alone would hide, such as a teacher with
+// no classes reading zeros.
 type ScopeNote struct {
 	Requested ScopeKind `json:"requested"`
 	Effective ScopeKind `json:"effective"`

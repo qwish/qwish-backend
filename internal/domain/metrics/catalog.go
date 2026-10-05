@@ -38,7 +38,7 @@ var sources = map[string]source{
 		Where:    "qa.status = 'completed'",
 		Scopes: map[ScopeKind]string{
 			ScopeInstitution: "u.institution_id = $%d",
-			ScopeClasses:     "u.id IN (" + classMembers + ")",
+			ScopeClasses:     "u.id IN (" + ClassMembersSQL + ")",
 			ScopeQuizzes:     "qa.quiz_id IN (" + authoredQuizzes + ")",
 		},
 	},
@@ -50,7 +50,7 @@ var sources = map[string]source{
 		BucketOn: "qa.started_at",
 		Scopes: map[ScopeKind]string{
 			ScopeInstitution: "u.institution_id = $%d",
-			ScopeClasses:     "u.id IN (" + classMembers + ")",
+			ScopeClasses:     "u.id IN (" + ClassMembersSQL + ")",
 			ScopeQuizzes:     "qa.quiz_id IN (" + authoredQuizzes + ")",
 		},
 	},
@@ -60,7 +60,7 @@ var sources = map[string]source{
 		BucketOn: "qr.submitted_at",
 		Scopes: map[ScopeKind]string{
 			ScopeInstitution: "u.institution_id = $%d",
-			ScopeClasses:     "u.id IN (" + classMembers + ")",
+			ScopeClasses:     "u.id IN (" + ClassMembersSQL + ")",
 			ScopeQuizzes:     "qa.quiz_id IN (" + authoredQuizzes + ")",
 		},
 	},
@@ -72,7 +72,7 @@ var sources = map[string]source{
 		BucketOn: "ps.completed_at",
 		Scopes: map[ScopeKind]string{
 			ScopeInstitution: "u.institution_id = $%d",
-			ScopeClasses:     "u.id IN (" + classMembers + ")",
+			ScopeClasses:     "u.id IN (" + ClassMembersSQL + ")",
 		},
 	},
 	"signup": {
@@ -82,7 +82,7 @@ var sources = map[string]source{
 		Where:    "u.deleted_at IS NULL",
 		Scopes: map[ScopeKind]string{
 			ScopeInstitution: "u.institution_id = $%d",
-			ScopeClasses:     "u.id IN (" + classMembers + ")",
+			ScopeClasses:     "u.id IN (" + ClassMembersSQL + ")",
 		},
 	},
 	"inst_new": {
@@ -102,7 +102,7 @@ var sources = map[string]source{
 		BucketOn: "pl.created_at",
 		Scopes: map[ScopeKind]string{
 			ScopeInstitution: "u.institution_id = $%d",
-			ScopeClasses:     "u.id IN (" + classMembers + ")",
+			ScopeClasses:     "u.id IN (" + ClassMembersSQL + ")",
 		},
 	},
 	// Quiz-authoring sources have no class linkage. Answering a class-scoped

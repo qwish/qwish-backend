@@ -65,9 +65,9 @@ func scopePredicate(s source, kind ScopeKind, n int) string {
 	return fmt.Sprintf(tmpl, n)
 }
 
-// classMembers is the set of students taught by $n. Used by every
+// ClassMembersSQL is the set of students taught by $n. Used by every
 // student-centred source under ScopeClasses.
-const classMembers = `SELECT gs.user_id
+const ClassMembersSQL = `SELECT gs.user_id
              FROM group_students gs
              JOIN group_teachers gt ON gt.group_id = gs.group_id
             WHERE gt.user_id = $%d`

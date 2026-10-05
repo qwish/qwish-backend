@@ -686,6 +686,7 @@ func main() {
 					r.With(mw.RateLimitByUser(30, time.Hour)).Post("/notices", noticeH.Send)
 					r.Get("/notices", noticeH.List)
 					r.Get("/overview", teacherH.Overview)
+					r.Get("/attention", teacherH.Attention)
 					r.Get("/feature-onboarding", featureOnboardingH.List)
 					r.Put("/feature-onboarding/{featureKey}", featureOnboardingH.Update)
 					r.Get("/quizzes/taxonomy", quizH.GetTaxonomy)

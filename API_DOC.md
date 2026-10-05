@@ -4855,3 +4855,20 @@ A practice group is a `groups` row with `kind: "remedial"`, made by a teacher fr
   "students": [{ "student_id": "uuid", "name": "Asha", "before": { "correct": 1, "errors": 4 }, "after": { "correct": 3, "errors": 1 } }] }
 ```
 `404` unless the caller teaches the group. Membership edits and ending use the normal class routes (`POST/DELETE /teacher/classes/{classId}/students`, `POST /teacher/classes/{classId}/end`). Adding a student who isn't in the source class returns `400`. Practice groups appear in `GET /teacher/classes` with `kind: "remedial"`.
+
+---
+
+## Teacher attention queue
+
+### GET `/teacher/attention?class_id=&page=1&limit=25`
+Role: teacher. Students in the teacher's active classes with an overdue support
+review, overdue assigned work, or a needs-support concept; one row per student,
+paginated, with page-independent totals. Full contract in
+`qwish-teacher-panel/API_DOC.md`. Definitions:
+`plans/teacher-and-institute-decision-dashboards.md` §2.
+
+### `quizzes.submitted_for_approval_at`
+Set by trigger (migration 088) on every move into `pending_approval`. Null for
+quizzes pending before the migration: show "age unavailable", never an age
+derived from `created_at`.
+

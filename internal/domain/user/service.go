@@ -1134,9 +1134,18 @@ type DomainPerf struct {
 }
 
 type InsightsBreakdown struct {
-	QwishScore float64         `json:"qwish_score"` // weighted components scaled to 100–900
-	Components ScoreComponents `json:"components"`
-	Domains    []DomainPerf    `json:"domains"`
+	QwishScore  float64               `json:"qwish_score"` // conservative skill rating, 100–900
+	Components  ScoreComponents       `json:"components"`
+	Domains     []DomainPerf          `json:"domains"`
+	SkillRating *SkillRatingBreakdown `json:"skill_rating"`
+}
+
+// SkillRatingBreakdown explains the published conservative skill rating.
+// Legacy components remain diagnostics for clients that still consume them.
+type SkillRatingBreakdown struct {
+	AbilityEstimate      float64 `json:"ability_estimate"`
+	ConfidenceAdjustment float64 `json:"confidence_adjustment"`
+	EvidenceCount        int     `json:"evidence_count"`
 }
 
 const lowSampleQuestions = 10
@@ -1204,8 +1213,16 @@ func (s *Service) GetInsightsBreakdown(ctx context.Context, userID string) (*Ins
 	// The published score is the skill rating; the components above are
 	// diagnostics only and no longer feed it.
 	qwishScore := 100.0
-	if err := s.db.QueryRow(ctx, `SELECT score FROM learner_ratings WHERE user_id=$1`, userID).Scan(&qwishScore); err != nil && err != pgx.ErrNoRows {
+	var rating scoring.Rating
+	var skillRating *SkillRatingBreakdown
+	if err := s.db.QueryRow(ctx, `SELECT score, theta, sigma, n FROM learner_ratings WHERE user_id=$1`, userID).Scan(&qwishScore, &rating.Theta, &rating.Sigma, &rating.N); err != nil && err != pgx.ErrNoRows {
 		return nil, err
+	} else if err == nil {
+		skillRating = &SkillRatingBreakdown{
+			AbilityEstimate:      rating.Theta,
+			ConfidenceAdjustment: 2 * rating.Sigma,
+			EvidenceCount:        rating.N,
+		}
 	}
 
 	domains, err := s.domainPerformance(ctx, userID)
@@ -1214,9 +1231,10 @@ func (s *Service) GetInsightsBreakdown(ctx context.Context, userID string) (*Ins
 	}
 
 	return &InsightsBreakdown{
-		QwishScore: round1(qwishScore),
-		Components: c,
-		Domains:    domains,
+		QwishScore:  round1(qwishScore),
+		SkillRating: skillRating,
+		Components:  c,
+		Domains:     domains,
 	}, nil
 }
 

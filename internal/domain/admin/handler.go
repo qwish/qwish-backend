@@ -1255,6 +1255,12 @@ func (h *Handler) AuditLog(w http.ResponseWriter, r *http.Request) {
 		args = append(args, v)
 		n++
 	}
+	// Actions taken inside one institute (its admins' own audit trail).
+	if v := q.Get("institution_id"); v != "" {
+		where += fmt.Sprintf(` AND institution_id::text=$%d`, n)
+		args = append(args, v)
+		n++
+	}
 	if v := q.Get("from"); v != "" {
 		where += fmt.Sprintf(` AND timestamp >= $%d::date`, n)
 		args = append(args, v)

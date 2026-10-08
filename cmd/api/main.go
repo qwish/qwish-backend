@@ -1099,6 +1099,8 @@ func main() {
 					r.Get("/security-policy", adminH.GetSecurityPolicy)
 					r.With(mw.RequireRole("super_admin")).Put("/security-policy", adminH.PutSecurityPolicy)
 					r.Get("/institutions/{institutionId}/duplicates", adminH.InstitutionDuplicates)
+					// Read-only academic setup: departments, roles, years, programmes, curricula, classes.
+					r.Get("/institutions/{institutionId}/academics", adminH.InstitutionAcademics)
 					r.Get("/institutions/{institutionId}/point-rules", adminH.InstitutionPointRules)
 					r.With(mw.RequireRole("super_admin")).Put("/institutions/{institutionId}/multiplier", adminH.SetInstitutionMultiplier)
 					r.Get("/students/{userId}/profile", adminH.StudentProfile)

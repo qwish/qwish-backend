@@ -975,6 +975,17 @@ func nullableString(s string) *string {
 // GET /api/v1/institution/groups
 func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
+	// Optional college filters; each is a UUID or absent.
+	var filters [4]*string
+	for i, key := range []string{"department_id", "programme_id", "cohort_id", "term_id"} {
+		if v := r.URL.Query().Get(key); v != "" {
+			if _, err := uuid.Parse(v); err != nil {
+				middleware.BadRequest(w, key+" must be a UUID")
+				return
+			}
+			filters[i] = &v
+		}
+	}
 	rows, err := h.db.Query(r.Context(),
 		`SELECT g.id, g.name, g.description, g.invite_code, g.archived_at, g.created_at,
 		        (SELECT COUNT(*) FROM group_students gs WHERE gs.group_id=g.id),
@@ -1000,8 +1011,17 @@ func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		           JOIN academic_years y ON y.id=cc.academic_year_id
 		          WHERE cc.group_id=g.id AND cc.ended_at IS NULL AND g.archived_at IS NULL AND (now() AT TIME ZONE (SELECT timezone FROM institutions WHERE id=y.institution_id))::date BETWEEN y.starts_on AND y.ends_on
 		          ), '[]'::json),
-		        g.department_id::text, g.grade, g.section, g.kind, g.joining_enabled
-		   FROM groups g WHERE g.institution_id=$1 ORDER BY g.name`, instID)
+		        g.department_id::text, g.grade, g.section, g.kind, g.joining_enabled,
+		        g.cohort_id::text, g.term_id::text,
+		        (SELECT json_build_object('programme_id', p.id, 'programme_code', p.code, 'programme_name', p.name,
+		                                  'admission_year', c.admission_year, 'completion_year', c.completion_year)
+		           FROM cohorts c JOIN programmes p ON p.id=c.programme_id WHERE c.id=g.cohort_id),
+		        (SELECT t.name FROM academic_terms t WHERE t.id=g.term_id)
+		   FROM groups g LEFT JOIN cohorts gc ON gc.id=g.cohort_id
+		  WHERE g.institution_id=$1
+		    AND ($2::uuid IS NULL OR g.department_id=$2) AND ($3::uuid IS NULL OR gc.programme_id=$3)
+		    AND ($4::uuid IS NULL OR g.cohort_id=$4) AND ($5::uuid IS NULL OR g.term_id=$5)
+		  ORDER BY g.name`, instID, filters[0], filters[1], filters[2], filters[3])
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -1027,13 +1047,17 @@ func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		Section                *string                  `json:"section"`
 		Kind                   string                   `json:"kind"`
 		JoiningEnabled         bool                     `json:"joining_enabled"`
+		CohortID               *string                  `json:"cohort_id"`
+		TermID                 *string                  `json:"term_id"`
+		Cohort                 map[string]interface{}   `json:"cohort"`
+		TermName               *string                  `json:"term_name"`
 	}
 	var groups []groupRow
 	for rows.Next() {
 		var g groupRow
 		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.InviteCode, &g.ArchivedAt, &g.CreatedAt,
 			&g.StudentCount, &g.TeacherCount, &g.TeacherNames, &g.AverageScore30d, &g.Attempts30d, &g.CurrentCurric, &g.CurrentCurricula, &g.DepartmentID,
-			&g.Grade, &g.Section, &g.Kind, &g.JoiningEnabled); err != nil {
+			&g.Grade, &g.Section, &g.Kind, &g.JoiningEnabled, &g.CohortID, &g.TermID, &g.Cohort, &g.TermName); err != nil {
 			middleware.InternalError(w)
 			return
 		}
@@ -1094,11 +1118,11 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 	var groupKind string
 	var archivedAt *time.Time
 	var description *string
-	var departmentID *string
+	var departmentID, cohortID, termID *string
 	var curriculumCount, invitationCount int
 	if err := h.db.QueryRow(r.Context(),
-		`SELECT name, description, invite_code, joining_enabled, grade, section, kind, archived_at,department_id::text,(SELECT count(*) FROM class_curricula cc WHERE cc.group_id=groups.id AND cc.ended_at IS NULL),(SELECT count(*) FROM student_invites si WHERE si.group_id=groups.id AND si.status IN ('pending','accepted')) FROM groups WHERE id=$1 AND institution_id=$2`,
-		groupID, instID).Scan(&name, &description, &inviteCode, &joiningEnabled, &groupGrade, &groupSection, &groupKind, &archivedAt, &departmentID, &curriculumCount, &invitationCount); err != nil {
+		`SELECT name, description, invite_code, joining_enabled, grade, section, kind, archived_at,department_id::text,cohort_id::text,term_id::text,(SELECT count(*) FROM class_curricula cc WHERE cc.group_id=groups.id AND cc.ended_at IS NULL),(SELECT count(*) FROM student_invites si WHERE si.group_id=groups.id AND si.status IN ('pending','accepted')) FROM groups WHERE id=$1 AND institution_id=$2`,
+		groupID, instID).Scan(&name, &description, &inviteCode, &joiningEnabled, &groupGrade, &groupSection, &groupKind, &archivedAt, &departmentID, &cohortID, &termID, &curriculumCount, &invitationCount); err != nil {
 		middleware.NotFound(w, "group not found")
 		return
 	}
@@ -1195,7 +1219,7 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 		"id": groupID, "name": name, "description": description, "invite_code": inviteCode, "joining_enabled": joiningEnabled,
 		"grade": groupGrade, "section": groupSection, "kind": groupKind, "archived_at": archivedAt,
 		"student_count": studentCount, "average_score": avgScore, "attempt_count_30d": attempts30d, "average_score_window_days": 30,
-		"students": students, "teachers": teachers, "department_id": departmentID, "curriculum_count": curriculumCount, "invitation_count": invitationCount,
+		"students": students, "teachers": teachers, "department_id": departmentID, "cohort_id": cohortID, "term_id": termID, "curriculum_count": curriculumCount, "invitation_count": invitationCount,
 	})
 }
 

@@ -204,18 +204,19 @@ func (h *Handler) ArchiveDepartment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var classes, roles int
+	var classes, roles, programmes int
 	err = tx.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM groups g WHERE g.department_id=d.id AND g.archived_at IS NULL),
-		(SELECT count(*) FROM staff_role_assignments a WHERE a.department_id=d.id AND a.revoked_at IS NULL AND (a.ends_at IS NULL OR a.ends_at>now()))
+		(SELECT count(*) FROM staff_role_assignments a WHERE a.department_id=d.id AND a.revoked_at IS NULL AND (a.ends_at IS NULL OR a.ends_at>now())),
+		(SELECT count(*) FROM programmes p WHERE p.department_id=d.id AND p.archived_at IS NULL)
 		FROM departments d WHERE d.id::text=$1 AND d.institution_id=$2 AND d.archived_at IS NULL FOR UPDATE OF d`,
-		id, middleware.GetInstitutionID(r)).Scan(&classes, &roles)
+		id, middleware.GetInstitutionID(r)).Scan(&classes, &roles, &programmes)
 	if err != nil {
 		middleware.NotFound(w, "department")
 		return
 	}
-	if classes > 0 || roles > 0 {
-		middleware.Error(w, http.StatusConflict, "CONFLICT", "move this department's classes and end its role assignments before archiving it")
+	if classes > 0 || roles > 0 || programmes > 0 {
+		middleware.Error(w, http.StatusConflict, "CONFLICT", "move this department's classes and programmes and end its role assignments before archiving it")
 		return
 	}
 	_, err = tx.Exec(ctx, `UPDATE departments SET archived_at=now() WHERE id=$1`, id)

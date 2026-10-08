@@ -24,6 +24,7 @@ import (
 	"github.com/qwish/backend/internal/domain/attempt"
 	"github.com/qwish/backend/internal/domain/auth"
 	"github.com/qwish/backend/internal/domain/avatar"
+	"github.com/qwish/backend/internal/domain/college"
 	"github.com/qwish/backend/internal/domain/contact"
 	"github.com/qwish/backend/internal/domain/curriculum"
 	"github.com/qwish/backend/internal/domain/demo"
@@ -163,6 +164,7 @@ func main() {
 	surveyH := survey.NewHandler(pool)
 	activityH := activity.NewHandler(pool, notifSvc)
 	leadershipH := leadership.NewHandler(pool)
+	collegeH := college.NewHandler(pool)
 	noticeH := notice.NewHandler(notice.NewService(pool, func(ctx context.Context, userID, title, body, ref string) {
 		notifSvc.Emit(ctx, userID, "notice", title, body,
 			notification.WithIcon("campaign"), notification.WithColor("indigo"), notification.WithReference(ref))
@@ -864,6 +866,8 @@ func main() {
 					activityH.OrganiserRoutes(r)
 					// Departments and leadership role assignments.
 					leadershipH.AdminRoutes(r)
+					// Programmes, cohorts, terms and course offerings (migration 097).
+					collegeH.InstitutionRoutes(r)
 					r.Get("/notices/audiences", noticeH.Audiences)
 					r.With(mw.RateLimitByUser(30, time.Hour)).Post("/notices", noticeH.Send)
 					r.Get("/notices", noticeH.List)

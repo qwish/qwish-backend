@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -534,6 +535,15 @@ func (s *Service) UpdateYear(ctx context.Context, actor Actor, id string, in Yea
 	}
 	if err = approveYear(review, in); err != nil {
 		return err
+	}
+	// Terms (migration 097) must stay inside their year.
+	var outside bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM academic_terms WHERE academic_year_id=$1
+		AND (starts_on < $2::text::date OR ends_on > $3::text::date))`, id, in.StartsOn, in.EndsOn).Scan(&outside); err != nil {
+		return err
+	}
+	if outside {
+		return fmt.Errorf("%w: a term falls outside the new dates; adjust its dates first", ErrConflict)
 	}
 
 	tag, err := tx.Exec(ctx, `UPDATE academic_years SET name=$3,starts_on=$4::text::date,ends_on=$5::text::date

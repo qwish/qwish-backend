@@ -199,6 +199,11 @@ func (h *Handler) ArchiveDepartment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT id FROM institutions WHERE id=$1 FOR UPDATE`, middleware.GetInstitutionID(r)); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+
 	var classes, roles int
 	err = tx.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM groups g WHERE g.department_id=d.id AND g.archived_at IS NULL),
@@ -241,6 +246,11 @@ func (h *Handler) SetGroupDepartment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT id FROM institutions WHERE id=$1 FOR UPDATE`, middleware.GetInstitutionID(r)); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+
 	var old *string
 	if err := tx.QueryRow(ctx, `SELECT department_id::text FROM groups WHERE id::text=$1 AND institution_id=$2 AND archived_at IS NULL FOR UPDATE`,
 		groupID, inst).Scan(&old); err != nil {
@@ -377,6 +387,11 @@ func (h *Handler) CreateAssignment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT id FROM institutions WHERE id=$1 FOR UPDATE`, inst); err != nil {
+		middleware.InternalError(w)
+		return
+	}
+
 	// The holder must be active staff of this institution; students never hold roles.
 	var staff bool
 	tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE id::text=$1 AND institution_id=$2 AND role IN ('teacher','institution_admin')

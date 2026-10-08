@@ -57,13 +57,22 @@ func insightTestDB(t *testing.T, through string) *pgxpool.Pool {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
+	applyMigrations(t, pool, schema, "", through)
+	return pool
+}
+
+// applyMigrations runs migrations numbered after `after` and up to `through`
+// ("" = unbounded) into schema.
+func applyMigrations(t *testing.T, pool *pgxpool.Pool, schema, after, through string) {
+	t.Helper()
 	_, file, _, _ := runtime.Caller(0)
 	paths, err := filepath.Glob(filepath.Join(filepath.Dir(file), "../../../migrations/*.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range paths {
-		if through != "" && filepath.Base(path)[:3] > through {
+		n := filepath.Base(path)[:3]
+		if (after != "" && n <= after) || (through != "" && n > through) {
 			continue
 		}
 		raw, err := os.ReadFile(path)
@@ -71,11 +80,10 @@ func insightTestDB(t *testing.T, through string) *pgxpool.Pool {
 			t.Fatal(err)
 		}
 		sql := strings.NewReplacer("public.", schema+".", "search_path = public", "search_path = "+schema, "search_path=public", "search_path="+schema).Replace(string(raw))
-		if _, err = pool.Exec(ctx, sql); err != nil {
+		if _, err = pool.Exec(context.Background(), sql); err != nil {
 			t.Fatalf("migration %s: %v", filepath.Base(path), err)
 		}
 	}
-	return pool
 }
 
 type insightFixture struct {
@@ -378,7 +386,14 @@ func TestMisconceptionMigrationPreservesAndRepairsLegacyEvidence(t *testing.T) {
 	f := newInsightFixture(t, db)
 	q, qs := f.quiz(2)
 	f.exec(`UPDATE questions SET time_limit_seconds=1 WHERE quiz_id=$1`, q)
-	st := f.start(q)
+	// Legacy rows are written in the 074 shape: today's attempt service
+	// targets the current schema, which this database doesn't have yet.
+	f.exec(`UPDATE quizzes SET status='published',published_at=now() WHERE id=$1`, q)
+	st := &attempt.StartAttemptResp{AttemptID: f.id(`INSERT INTO quiz_attempts(quiz_id,user_id,status,total_questions,last_answer_at)
+   VALUES($1,$2,'in_progress',2,now()) RETURNING id`, q, f.student)}
+	f.exec(`INSERT INTO quiz_attempt_questions(attempt_id,question_id,position,question_revision,question_version_id)
+   SELECT $1,q.id,q.position,q.revision,(SELECT qv.id FROM question_versions qv WHERE qv.question_id=q.id AND qv.revision=q.revision)
+   FROM questions q WHERE q.quiz_id=$2`, st.AttemptID, q)
 	for i, answer := range []string{`"A"`, `"B"`} {
 		elapsed := 100
 		if i == 0 {
@@ -413,6 +428,12 @@ func TestMisconceptionMigrationPreservesAndRepairsLegacyEvidence(t *testing.T) {
 	if err = db.QueryRow(context.Background(), `SELECT EXISTS(SELECT 1 FROM quiz_attempt_questions WHERE attempt_id=$1 AND learning_map<>'[]'::jsonb)`, st.AttemptID).Scan(&guessed); err != nil || guessed {
 		t.Fatalf("migration invented mapping history: %v %v", guessed, err)
 	}
+	// Today's insights code reads the current schema.
+	var schema string
+	if err = db.QueryRow(context.Background(), `SELECT current_schema()`).Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
+	applyMigrations(t, db, schema, "075", "")
 	row := diagnostic(t, f.insights(q, ""), f.m1)
 	if row["error_count"] != float64(1) {
 		t.Fatalf("backfilled insight %+v", row)

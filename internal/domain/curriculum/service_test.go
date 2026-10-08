@@ -54,11 +54,11 @@ func testService(t *testing.T) (*Service, Actor, string, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	_, err = pool.Exec(ctx, `CREATE TABLE institutions(id UUID PRIMARY KEY);
+	_, err = pool.Exec(ctx, `CREATE TABLE institutions(id UUID PRIMARY KEY,timezone TEXT NOT NULL DEFAULT 'Asia/Kolkata');
 		CREATE TABLE users(id UUID PRIMARY KEY,display_name TEXT);
 		CREATE TABLE groups(id UUID PRIMARY KEY,institution_id UUID REFERENCES institutions(id),archived_at TIMESTAMPTZ,name TEXT NOT NULL DEFAULT '');
 		CREATE TABLE group_teachers(group_id UUID REFERENCES groups(id),user_id UUID REFERENCES users(id),PRIMARY KEY(group_id,user_id));
-		CREATE TABLE audit_log(admin_id UUID NOT NULL,admin_name TEXT NOT NULL,admin_role TEXT NOT NULL,action_type TEXT NOT NULL,target_type TEXT NOT NULL,target_id UUID,institution_id UUID REFERENCES institutions(id));`)
+		CREATE TABLE audit_log(admin_id UUID NOT NULL,admin_name TEXT NOT NULL,admin_role TEXT NOT NULL,action_type TEXT NOT NULL,target_type TEXT NOT NULL,target_id UUID,institution_id UUID REFERENCES institutions(id),reason TEXT);`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func testService(t *testing.T) (*Service, Actor, string, string) {
 	a := Actor{InstitutionID: uuid.NewString(), ID: uuid.NewString()}
 	group := uuid.NewString()
 	teacher := uuid.NewString()
-	if _, err = pool.Exec(ctx, `INSERT INTO institutions VALUES($1)`, a.InstitutionID); err != nil {
+	if _, err = pool.Exec(ctx, `INSERT INTO institutions(id) VALUES($1)`, a.InstitutionID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `INSERT INTO users VALUES($1,'Admin'),($2,'Teacher')`, a.ID, teacher); err != nil {
@@ -270,7 +270,7 @@ func TestAssignmentRejectsCrossInstitutionReferences(t *testing.T) {
 	s, a, group, _ := testService(t)
 	ctx := context.Background()
 	other := Actor{InstitutionID: uuid.NewString(), ID: a.ID}
-	if _, err := s.db.Exec(ctx, `INSERT INTO institutions VALUES($1)`, other.InstitutionID); err != nil {
+	if _, err := s.db.Exec(ctx, `INSERT INTO institutions(id) VALUES($1)`, other.InstitutionID); err != nil {
 		t.Fatal(err)
 	}
 	year, err := s.CreateYear(ctx, other, YearInput{Name: "Other year", StartsOn: "2026-01-01", EndsOn: "2026-12-31"})

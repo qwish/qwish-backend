@@ -23,6 +23,7 @@ func (h *Handler) InstitutionRoutes(r chi.Router) {
 		r.Use(academicScope("institution_admin"))
 		r.Get("/academic-years", h.ListYears)
 		r.Post("/academic-years", h.CreateYear)
+		r.Post("/academic-years/preview", h.PreviewYear)
 		r.Patch("/academic-years/{yearId}", h.UpdateYear)
 		r.Get("/curricula", h.ListVersions)
 		r.Get("/curricula/facets", h.Facets)
@@ -93,6 +94,8 @@ func decode(w http.ResponseWriter, r *http.Request, target any) bool {
 
 func replyError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, ErrYearReview):
+		middleware.Error(w, http.StatusConflict, "YEAR_REVIEW_REQUIRED", err.Error())
 	case errors.Is(err, ErrNotFound):
 		middleware.NotFound(w, "academic resource")
 	case errors.Is(err, ErrPublished):
@@ -161,7 +164,7 @@ func (h *Handler) ListVersions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data, total, err := h.svc.ListVersions(r.Context(), middleware.GetInstitutionID(r), page, limit,
-		ListFilter{Subject: q.Get("subject"), Grade: q.Get("grade"), Status: status})
+		ListFilter{Search: q.Get("search"), Subject: q.Get("subject"), Grade: q.Get("grade"), Status: status})
 	if err != nil {
 		replyError(w, err)
 		return
@@ -373,4 +376,28 @@ func (h *Handler) UpdateYear(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	middleware.JSON(w, http.StatusOK, map[string]string{"id": id})
+}
+
+func (h *Handler) PreviewYear(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		YearInput
+		ID string `json:"id"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if in.ID != "" && !validID(in.ID) {
+		middleware.BadRequest(w, "invalid year id")
+		return
+	}
+	if err := in.YearInput.Validate(); err != nil {
+		middleware.BadRequest(w, err.Error())
+		return
+	}
+	out, err := h.svc.PreviewYear(r.Context(), actor(r), in.ID, in.YearInput)
+	if err != nil {
+		replyError(w, err)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, out)
 }

@@ -23,13 +23,18 @@ type PublishBlockedError struct{ Issues []string }
 func (e *PublishBlockedError) Error() string { return strings.Join(e.Issues, "; ") }
 
 type YearInput struct {
-	Name     string `json:"name"`
-	StartsOn string `json:"starts_on"`
-	EndsOn   string `json:"ends_on"`
+	ReviewToken  string `json:"review_token,omitempty"`
+	ReviewReason string `json:"review_reason,omitempty"`
+	Name         string `json:"name"`
+	StartsOn     string `json:"starts_on"`
+	EndsOn       string `json:"ends_on"`
 }
 
 type Year struct {
-	ID string `json:"id"`
+	Today         string   `json:"today"`
+	TemporalState string   `json:"temporal_state"`
+	Overlaps      []string `json:"overlaps"`
+	ID            string   `json:"id"`
 	YearInput
 	Stats *YearStats `json:"stats,omitempty"`
 }
@@ -198,6 +203,8 @@ type AssignmentInput struct {
 }
 
 type Assignment struct {
+	EndedAt          *time.Time     `json:"ended_at"`
+	TemporalState    string         `json:"temporal_state"`
 	ID               string         `json:"id"`
 	GroupID          string         `json:"group_id"`
 	AcademicYearID   string         `json:"academic_year_id"`
@@ -217,6 +224,9 @@ func validText(value *string, field string, max int) error {
 }
 
 func (in *YearInput) Validate() error {
+	if len(in.ReviewToken) > 64 || utf8.RuneCountInString(in.ReviewReason) > 1000 || strings.ContainsRune(in.ReviewReason, '\x00') {
+		return errors.New("invalid review token or reason (maximum 1000 characters)")
+	}
 	if err := validText(&in.Name, "name", 120); err != nil {
 		return err
 	}

@@ -15,6 +15,7 @@ supabase_otp_email.html
 docs/*
 !docs/ADMISSIONS.md
 !docs/CURRICULUM_FOUNDATION.md
+!docs/institute-academic-fixes.md
 !docs/QWISH_INSTITUTE_IMPLEMENTATION_PLAN.md
 !docs/AWS_LIGHTSAIL_S3_MIGRATION_PLAN.md
 !docs/AWS_LIGHTSAIL_DEPLOYMENT.md

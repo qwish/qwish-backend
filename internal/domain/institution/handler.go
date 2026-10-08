@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	qdb "github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/domain/auth"
@@ -278,7 +279,7 @@ func (h *Handler) listStudents(w http.ResponseWriter, r *http.Request, instID st
 	// student's previous school's attempts out of this institution's numbers.
 	rows, err := h.db.Query(r.Context(),
 		`SELECT e.id, e.user_id, COALESCE(NULLIF(u.full_name,''), NULLIF(u.display_name,''), e.full_name), COALESCE(u.email, e.email, ''),
-		        e.grade, e.section, e.status,
+		        e.grade, e.section, e.class_label_state, e.status,
 		        COALESCE(u.total_points,0), COALESCE(u.current_streak,0), u.last_active_at,
 		        `+avgScoreExpr+` AS avg_score,
 		        `+attemptsExpr+` AS attempts_count,
@@ -299,17 +300,18 @@ func (h *Handler) listStudents(w http.ResponseWriter, r *http.Request, instID st
 		Name string `json:"name"`
 	}
 	type studentRow struct {
-		EnrollmentID  string     `json:"enrollment_id"`
-		ID            *string    `json:"id"` // null until the roster row is claimed
-		DisplayName   string     `json:"display_name"`
-		Email         string     `json:"email"`
-		Grade         *string    `json:"grade,omitempty"`
-		Section       *string    `json:"section,omitempty"`
-		Status        string     `json:"status"`
-		TotalPoints   int64      `json:"total_points"`
-		CurrentStreak int        `json:"current_streak"`
-		LastActiveAt  *time.Time `json:"last_active_at,omitempty"`
-		AverageScore  float64    `json:"average_score"`
+		EnrollmentID    string     `json:"enrollment_id"`
+		ID              *string    `json:"id"` // null until the roster row is claimed
+		DisplayName     string     `json:"display_name"`
+		Email           string     `json:"email"`
+		Grade           *string    `json:"grade,omitempty"`
+		Section         *string    `json:"section,omitempty"`
+		ClassLabelState string     `json:"class_label_state"`
+		Status          string     `json:"status"`
+		TotalPoints     int64      `json:"total_points"`
+		CurrentStreak   int        `json:"current_streak"`
+		LastActiveAt    *time.Time `json:"last_active_at,omitempty"`
+		AverageScore    float64    `json:"average_score"`
 		// Completed attempts behind average_score; 0 means "no attempts", not 0%.
 		AttemptsCount int        `json:"attempts_count"`
 		Groups        []groupRef `json:"groups"`
@@ -318,7 +320,7 @@ func (h *Handler) listStudents(w http.ResponseWriter, r *http.Request, instID st
 	for rows.Next() {
 		var s studentRow
 		if err := rows.Scan(&s.EnrollmentID, &s.ID, &s.DisplayName, &s.Email, &s.Grade,
-			&s.Section, &s.Status, &s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.AverageScore,
+			&s.Section, &s.ClassLabelState, &s.Status, &s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.AverageScore,
 			&s.AttemptsCount, &s.Groups); err != nil {
 			middleware.InternalError(w)
 			return
@@ -476,12 +478,12 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The live enrollment, so the page can change its status.
-	var enrollmentID, enrollmentStatus string
+	var enrollmentID, enrollmentStatus, classLabelState string
 	var grade, section *string
 	h.db.QueryRow(r.Context(),
-		`SELECT id, status, grade, section FROM enrollments
+		`SELECT id, status, grade, section, class_label_state FROM enrollments
 		  WHERE user_id=$1 AND institution_id=$2 AND status IN ('active','suspended')`,
-		studentID, instID).Scan(&enrollmentID, &enrollmentStatus, &grade, &section)
+		studentID, instID).Scan(&enrollmentID, &enrollmentStatus, &grade, &section, &classLabelState)
 
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"id": studentID, "display_name": displayName, "email": email, "status": status,
@@ -490,7 +492,7 @@ func (h *Handler) GetStudent(w http.ResponseWriter, r *http.Request) {
 		"quiz_history": attempts, "history_limit": histLimit, "history_offset": histOffset,
 		"points_ledger": ledger, "groups": groups,
 		"enrollment_id": enrollmentID, "enrollment_status": enrollmentStatus,
-		"grade": grade, "section": section,
+		"grade": grade, "section": section, "class_label_state": classLabelState,
 	})
 }
 
@@ -541,7 +543,9 @@ func (h *Handler) UpdateStudentStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/v1/institution/teachers
-func (h *Handler) ListTeachers(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) ListTeachers(w http.ResponseWriter, r *http.Request) { h.listStaff(w, r, false) }
+func (h *Handler) ListStaff(w http.ResponseWriter, r *http.Request)    { h.listStaff(w, r, true) }
+func (h *Handler) listStaff(w http.ResponseWriter, r *http.Request, leadership bool) {
 	instID := middleware.GetInstitutionID(r)
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))
@@ -555,6 +559,9 @@ func (h *Handler) ListTeachers(w http.ResponseWriter, r *http.Request) {
 	offset := (page - 1) * limit
 
 	where := `u.institution_id=$1 AND u.role='teacher' AND u.deleted_at IS NULL`
+	if leadership {
+		where = `u.institution_id=$1 AND u.role IN ('teacher','institution_admin') AND u.status='active' AND u.deleted_at IS NULL`
+	}
 	args := []interface{}{instID}
 	switch status := q.Get("status"); status {
 	case "":
@@ -968,8 +975,6 @@ func nullableString(s string) *string {
 // GET /api/v1/institution/groups
 func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
-	// The 30-day average covers attempts by the class's current students on
-	// any of this institution's quizzes; null when there are none.
 	rows, err := h.db.Query(r.Context(),
 		`SELECT g.id, g.name, g.description, g.invite_code, g.archived_at, g.created_at,
 		        (SELECT COUNT(*) FROM group_students gs WHERE gs.group_id=g.id),
@@ -977,18 +982,24 @@ func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 		        COALESCE((SELECT array_agg(COALESCE(NULLIF(t.display_name,''), t.full_name) ORDER BY t.display_name)
 		                    FROM group_teachers gt JOIN users t ON t.id=gt.user_id
 		                   WHERE gt.group_id=g.id AND t.deleted_at IS NULL), '{}'),
-		        (SELECT AVG(qa.score_pct) FROM quiz_attempts qa
-		           JOIN group_students gs ON gs.user_id=qa.user_id AND gs.group_id=g.id
-		           JOIN quizzes q ON q.id=qa.quiz_id AND q.institution_id=g.institution_id
-		          WHERE qa.status='completed' AND qa.completed_at >= CURRENT_DATE - 30),
-		        (SELECT json_build_object('version_id', v.id, 'name', c.name, 'label', v.label,
+		        (SELECT AVG(qa.score_pct) FROM quiz_attempts qa WHERE `+qdb.ClassAttemptSQL("g.id", "g.institution_id")+`),
+            (SELECT COUNT(*) FROM quiz_attempts qa WHERE `+qdb.ClassAttemptSQL("g.id", "g.institution_id")+`),
+            (SELECT json_build_object('version_id', v.id, 'name', c.name, 'label', v.label,
 		                                  'subject', v.subject, 'grade', v.grade, 'revision', v.revision,
 		                                  'academic_year_name', y.name)
 		           FROM class_curricula cc
 		           JOIN curriculum_versions v ON v.id=cc.version_id JOIN curricula c ON c.id=v.curriculum_id
 		           JOIN academic_years y ON y.id=cc.academic_year_id
-		          WHERE cc.group_id=g.id AND cc.ended_at IS NULL AND CURRENT_DATE BETWEEN y.starts_on AND y.ends_on
+		          WHERE cc.group_id=g.id AND cc.ended_at IS NULL AND g.archived_at IS NULL AND (now() AT TIME ZONE (SELECT timezone FROM institutions WHERE id=y.institution_id))::date BETWEEN y.starts_on AND y.ends_on
 		          ORDER BY cc.assigned_at DESC LIMIT 1),
+            COALESCE((SELECT json_agg(json_build_object('assignment_id',cc.id,'version_id', v.id, 'name', c.name, 'label', v.label,
+		                                  'subject', v.subject, 'grade', v.grade, 'revision', v.revision,
+		                                  'academic_year_name', y.name) ORDER BY v.subject,c.name,v.id,cc.id)
+		           FROM class_curricula cc
+		           JOIN curriculum_versions v ON v.id=cc.version_id JOIN curricula c ON c.id=v.curriculum_id
+		           JOIN academic_years y ON y.id=cc.academic_year_id
+		          WHERE cc.group_id=g.id AND cc.ended_at IS NULL AND g.archived_at IS NULL AND (now() AT TIME ZONE (SELECT timezone FROM institutions WHERE id=y.institution_id))::date BETWEEN y.starts_on AND y.ends_on
+		          ), '[]'::json),
 		        g.department_id::text, g.grade, g.section, g.kind, g.joining_enabled
 		   FROM groups g WHERE g.institution_id=$1 ORDER BY g.name`, instID)
 	if err != nil {
@@ -997,29 +1008,36 @@ func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	type groupRow struct {
-		ID              string                 `json:"id"`
-		Name            string                 `json:"name"`
-		Description     *string                `json:"description"`
-		InviteCode      string                 `json:"invite_code"`
-		ArchivedAt      *time.Time             `json:"archived_at"`
-		CreatedAt       time.Time              `json:"created_at"`
-		StudentCount    int                    `json:"student_count"`
-		TeacherCount    int                    `json:"teacher_count"`
-		TeacherNames    []string               `json:"teacher_names"`
-		AverageScore30d *float64               `json:"average_score_30d"`
-		CurrentCurric   map[string]interface{} `json:"current_curriculum"`
-		DepartmentID    *string                `json:"department_id"`
-		Grade           *string                `json:"grade"`
-		Section         *string                `json:"section"`
-		Kind            string                 `json:"kind"`
-		JoiningEnabled  bool                   `json:"joining_enabled"`
+		ID                     string                   `json:"id"`
+		Name                   string                   `json:"name"`
+		Description            *string                  `json:"description"`
+		InviteCode             string                   `json:"invite_code"`
+		ArchivedAt             *time.Time               `json:"archived_at"`
+		CreatedAt              time.Time                `json:"created_at"`
+		StudentCount           int                      `json:"student_count"`
+		TeacherCount           int                      `json:"teacher_count"`
+		TeacherNames           []string                 `json:"teacher_names"`
+		Attempts30d            int                      `json:"attempt_count_30d"`
+		AverageScore30d        *float64                 `json:"average_score_30d"`
+		CurrentCurricula       []map[string]interface{} `json:"current_curricula"`
+		CurrentCurriculumCount int                      `json:"current_curriculum_count"`
+		CurrentCurric          map[string]interface{}   `json:"current_curriculum"`
+		DepartmentID           *string                  `json:"department_id"`
+		Grade                  *string                  `json:"grade"`
+		Section                *string                  `json:"section"`
+		Kind                   string                   `json:"kind"`
+		JoiningEnabled         bool                     `json:"joining_enabled"`
 	}
 	var groups []groupRow
 	for rows.Next() {
 		var g groupRow
-		rows.Scan(&g.ID, &g.Name, &g.Description, &g.InviteCode, &g.ArchivedAt, &g.CreatedAt,
-			&g.StudentCount, &g.TeacherCount, &g.TeacherNames, &g.AverageScore30d, &g.CurrentCurric, &g.DepartmentID,
-			&g.Grade, &g.Section, &g.Kind, &g.JoiningEnabled)
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.InviteCode, &g.ArchivedAt, &g.CreatedAt,
+			&g.StudentCount, &g.TeacherCount, &g.TeacherNames, &g.AverageScore30d, &g.Attempts30d, &g.CurrentCurric, &g.CurrentCurricula, &g.DepartmentID,
+			&g.Grade, &g.Section, &g.Kind, &g.JoiningEnabled); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+		g.CurrentCurriculumCount = len(g.CurrentCurricula)
 		groups = append(groups, g)
 	}
 	if groups == nil {
@@ -1076,22 +1094,24 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 	var groupKind string
 	var archivedAt *time.Time
 	var description *string
+	var departmentID *string
+	var curriculumCount, invitationCount int
 	if err := h.db.QueryRow(r.Context(),
-		`SELECT name, description, invite_code, joining_enabled, grade, section, kind, archived_at FROM groups WHERE id=$1 AND institution_id=$2`,
-		groupID, instID).Scan(&name, &description, &inviteCode, &joiningEnabled, &groupGrade, &groupSection, &groupKind, &archivedAt); err != nil {
+		`SELECT name, description, invite_code, joining_enabled, grade, section, kind, archived_at,department_id::text,(SELECT count(*) FROM class_curricula cc WHERE cc.group_id=groups.id AND cc.ended_at IS NULL),(SELECT count(*) FROM student_invites si WHERE si.group_id=groups.id AND si.status IN ('pending','accepted')) FROM groups WHERE id=$1 AND institution_id=$2`,
+		groupID, instID).Scan(&name, &description, &inviteCode, &joiningEnabled, &groupGrade, &groupSection, &groupKind, &archivedAt, &departmentID, &curriculumCount, &invitationCount); err != nil {
 		middleware.NotFound(w, "group not found")
 		return
 	}
 
 	var studentCount int
-	var avgScore float64
+	var avgScore *float64
+	var attempts30d int
 	h.db.QueryRow(r.Context(),
 		`SELECT COUNT(*) FROM group_students WHERE group_id=$1`, groupID).Scan(&studentCount)
-	h.db.QueryRow(r.Context(),
-		`SELECT COALESCE(AVG(qa.score_pct),0) FROM quiz_attempts qa
-		 JOIN group_students gs ON gs.user_id=qa.user_id
-		 JOIN quizzes q ON q.id=qa.quiz_id AND (q.institution_id=$2 OR q.visibility='public')
-		 WHERE gs.group_id=$1 AND qa.status='completed'`, groupID, instID).Scan(&avgScore)
+	if err := h.db.QueryRow(r.Context(), `SELECT AVG(qa.score_pct),COUNT(*) FROM quiz_attempts qa WHERE `+qdb.ClassAttemptSQL("$1", "$2"), groupID, instID).Scan(&avgScore, &attempts30d); err != nil {
+		middleware.InternalError(w)
+		return
+	}
 
 	type studentRow struct {
 		EnrollmentID  *string    `json:"enrollment_id"`
@@ -1112,19 +1132,24 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 	students := []studentRow{}
 	srows, err := h.db.Query(r.Context(),
 		`SELECT e.id, u.id, COALESCE(u.display_name, ''), COALESCE(u.email, ''),
-		        COALESCE(e.status, 'active'),
+		        COALESCE(e.status, 'unavailable'),
 		        COALESCE(u.total_points,0), COALESCE(u.current_streak,0), u.last_active_at,
 		        COALESCE((SELECT AVG(qa.score_pct) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
 		                   WHERE qa.user_id=u.id AND qa.status='completed'
 		                     AND (q.institution_id=$2 OR q.visibility='public')),0),
-		        (SELECT AVG(qa.score_pct) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
-		          WHERE qa.user_id=u.id AND qa.status='completed' AND q.group_id=gs.group_id),
-		        (SELECT COUNT(*) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
-		          WHERE qa.user_id=u.id AND qa.status='completed' AND q.group_id=gs.group_id),
-		        gs.joined_at
+		        (SELECT AVG(qa.score_pct) FROM quiz_attempts qa WHERE qa.user_id=u.id AND `+qdb.ClassAttemptSQL("gs.group_id", "$2")+`),
+            (SELECT COUNT(*) FROM quiz_attempts qa WHERE qa.user_id=u.id AND `+qdb.ClassAttemptSQL("gs.group_id", "$2")+`),
+            gs.joined_at
 		   FROM group_students gs
 		   JOIN users u ON u.id = gs.user_id
-		   LEFT JOIN enrollments e ON e.user_id = u.id AND e.institution_id = $2
+		   LEFT JOIN LATERAL (
+ SELECT e.id,e.status FROM enrollments e JOIN groups g ON g.id=gs.group_id
+ WHERE e.user_id=u.id AND e.institution_id=$2
+ AND ((g.archived_at IS NULL AND e.status IN ('active','suspended'))
+ OR (g.archived_at IS NOT NULL AND COALESCE(e.joined_at,e.created_at)<=g.archived_at
+ AND (e.ended_at IS NULL OR e.ended_at>=gs.joined_at)))
+ ORDER BY e.created_at DESC,e.id LIMIT 1
+ ) e ON true
 		  WHERE gs.group_id=$1
 		  ORDER BY u.display_name`, groupID, instID)
 	if err != nil {
@@ -1133,9 +1158,13 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	for srows.Next() {
 		var s studentRow
-		srows.Scan(&s.EnrollmentID, &s.ID, &s.DisplayName, &s.Email, &s.Status,
+		if err := srows.Scan(&s.EnrollmentID, &s.ID, &s.DisplayName, &s.Email, &s.Status,
 			&s.TotalPoints, &s.CurrentStreak, &s.LastActiveAt, &s.AverageScore,
-			&s.ClassAverageScore, &s.ClassAttempts, &s.JoinedAt)
+			&s.ClassAverageScore, &s.ClassAttempts, &s.JoinedAt); err != nil {
+			srows.Close()
+			middleware.InternalError(w)
+			return
+		}
 		students = append(students, s)
 	}
 	srows.Close()
@@ -1165,81 +1194,116 @@ func (h *Handler) GetGroup(w http.ResponseWriter, r *http.Request) {
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
 		"id": groupID, "name": name, "description": description, "invite_code": inviteCode, "joining_enabled": joiningEnabled,
 		"grade": groupGrade, "section": groupSection, "kind": groupKind, "archived_at": archivedAt,
-		"student_count": studentCount, "average_score": avgScore,
-		"students": students, "teachers": teachers,
+		"student_count": studentCount, "average_score": avgScore, "attempt_count_30d": attempts30d, "average_score_window_days": 30,
+		"students": students, "teachers": teachers, "department_id": departmentID, "curriculum_count": curriculumCount, "invitation_count": invitationCount,
 	})
 }
 
-// POST /api/v1/institution/groups/:groupId/students
+// Membership writes share the authenticated scope and a class row lock with
+// archival. Audit records are committed only when a relationship actually changes.
 func (h *Handler) AddStudentToGroup(w http.ResponseWriter, r *http.Request) {
-	groupID := chi.URLParam(r, "groupId")
-	var req struct {
-		UserID string `json:"user_id"`
+	h.mutateMembership(w, r, "student", true)
+}
+func (h *Handler) RemoveStudentFromGroup(w http.ResponseWriter, r *http.Request) {
+	h.mutateMembership(w, r, "student", false)
+}
+func (h *Handler) AddTeacherToGroup(w http.ResponseWriter, r *http.Request) {
+	h.mutateMembership(w, r, "teacher", true)
+}
+func (h *Handler) RemoveTeacherFromGroup(w http.ResponseWriter, r *http.Request) {
+	h.mutateMembership(w, r, "teacher", false)
+}
+
+func (h *Handler) mutateMembership(w http.ResponseWriter, r *http.Request, role string, add bool) {
+	ctx := r.Context()
+	groupID, instID, userID := chi.URLParam(r, "groupId"), middleware.GetInstitutionID(r), chi.URLParam(r, "userId")
+	if add {
+		var req struct {
+			UserID string `json:"user_id"`
+		}
+		if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
+			middleware.BadRequest(w, "invalid request body")
+			return
+		}
+		userID = req.UserID
 	}
-	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
-		middleware.BadRequest(w, "user_id is required")
+	if _, err := uuid.Parse(groupID); err != nil {
+		middleware.NotFound(w, "group not found")
 		return
 	}
-	if _, err := uuid.Parse(req.UserID); err != nil {
+	if _, err := uuid.Parse(userID); err != nil {
 		middleware.BadRequest(w, "invalid user_id")
 		return
 	}
-	tag, err := h.db.Exec(r.Context(), `INSERT INTO group_students(group_id,user_id)
- SELECT g.id,u.id FROM groups g JOIN enrollments e ON e.institution_id=g.institution_id
- JOIN users u ON u.id=e.user_id
- WHERE g.id=$1 AND u.id=$2 AND g.institution_id=$3 AND g.archived_at IS NULL
- AND e.status='active' AND u.role='student' AND u.status='active' AND u.deleted_at IS NULL
- ON CONFLICT(group_id,user_id) DO UPDATE SET user_id=EXCLUDED.user_id`, groupID, req.UserID, middleware.GetInstitutionID(r))
+	tx, err := h.db.Begin(ctx)
 	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		middleware.BadRequest(w, "Choose an active student enrolled in this institute and an active class.")
+	defer tx.Rollback(ctx)
+	var ended bool
+	err = tx.QueryRow(ctx, `SELECT archived_at IS NOT NULL FROM groups WHERE id=$1 AND institution_id=$2 FOR UPDATE`, groupID, instID).Scan(&ended)
+	if err == pgx.ErrNoRows {
+		middleware.NotFound(w, "group not found")
 		return
 	}
-	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), "add_student_to_group", "group", groupID, req.UserID)
-	middleware.JSON(w, http.StatusOK, map[string]string{"message": "student added to group"})
-}
-
-// DELETE /api/v1/institution/groups/:groupId/students/:userId
-func (h *Handler) RemoveStudentFromGroup(w http.ResponseWriter, r *http.Request) {
-	groupID, userID := chi.URLParam(r, "groupId"), chi.URLParam(r, "userId")
-	if _, err := h.db.Exec(r.Context(),
-		`DELETE FROM group_students WHERE group_id=$1 AND user_id=$2`, groupID, userID); err != nil {
+	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
-	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), "remove_student_from_group", "group", groupID, userID)
-	middleware.JSON(w, http.StatusOK, map[string]string{"message": "student removed from group"})
-}
-
-// POST /api/v1/institution/groups/:groupId/teachers
-func (h *Handler) AddTeacherToGroup(w http.ResponseWriter, r *http.Request) {
-	groupID := chi.URLParam(r, "groupId")
-	var req struct {
-		UserID string `json:"user_id"`
+	if add && ended {
+		middleware.Error(w, http.StatusConflict, "CLASS_ENDED", "Reopen this class before adding members.")
+		return
 	}
-	jsonx.NewDecoder(r.Body).Decode(&req)
-	if _, err := h.db.Exec(r.Context(),
-		`INSERT INTO group_teachers (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, groupID, req.UserID); err != nil {
+	table := "group_students"
+	if role == "teacher" {
+		table = "group_teachers"
+	}
+	action := "remove_" + role + "_from_group"
+	query := `DELETE FROM ` + table + ` m USING groups g WHERE m.group_id=g.id AND g.id=$1 AND m.user_id=$2 AND g.institution_id=$3`
+	if add {
+		var eligible string
+		eligibility := `u.institution_id=$2`
+		if role == "student" {
+			eligibility = `EXISTS(SELECT 1 FROM enrollments e WHERE e.user_id=u.id AND e.institution_id=$2 AND e.status='active')`
+		}
+		err = tx.QueryRow(ctx, `SELECT u.id FROM users u WHERE u.id=$1 AND `+eligibility+` AND u.role=$3 AND u.status='active' AND u.deleted_at IS NULL FOR UPDATE OF u`, userID, instID, role).Scan(&eligible)
+		if err == pgx.ErrNoRows {
+			middleware.BadRequest(w, "Choose an active "+role+" belonging to this institute.")
+			return
+		}
+		if err != nil {
+			middleware.InternalError(w)
+			return
+		}
+		query = `INSERT INTO ` + table + `(group_id,user_id) SELECT id,$2 FROM groups WHERE id=$1 AND institution_id=$3 AND archived_at IS NULL ON CONFLICT DO NOTHING`
+		action = "add_" + role + "_to_group"
+	}
+	if !add {
+		// Lifecycle transitions lock account before enrollment/membership rows.
+		if _, err = tx.Exec(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, userID); err != nil {
+			middleware.InternalError(w)
+			return
+		}
+	}
+	tag, err := tx.Exec(ctx, query, groupID, userID, instID)
+	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
-	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), "add_teacher_to_group", "group", groupID, req.UserID)
-	middleware.JSON(w, http.StatusOK, map[string]string{"message": "teacher assigned to group"})
-}
-
-// DELETE /api/v1/institution/groups/:groupId/teachers/:userId
-func (h *Handler) RemoveTeacherFromGroup(w http.ResponseWriter, r *http.Request) {
-	groupID, userID := chi.URLParam(r, "groupId"), chi.URLParam(r, "userId")
-	if _, err := h.db.Exec(r.Context(),
-		`DELETE FROM group_teachers WHERE group_id=$1 AND user_id=$2`, groupID, userID); err != nil {
+	if tag.RowsAffected() > 0 {
+		auditTag, auditErr := tx.Exec(ctx, `INSERT INTO audit_log(admin_id,admin_name,admin_role,action_type,target_type,target_id,reason,institution_id)
+   SELECT id,COALESCE(display_name,''),role,$2,'group',$3,$4,$5 FROM users WHERE id=$1`, middleware.GetUserID(r), action, groupID, userID, instID)
+		if auditErr != nil || auditTag.RowsAffected() != 1 {
+			middleware.InternalError(w)
+			return
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
 		middleware.InternalError(w)
 		return
 	}
-	logAuditInst(r.Context(), h.db, middleware.GetUserID(r), middleware.GetInstitutionID(r), "remove_teacher_from_group", "group", groupID, userID)
-	middleware.JSON(w, http.StatusOK, map[string]string{"message": "teacher removed from group"})
+	middleware.JSON(w, http.StatusOK, map[string]any{"message": "membership saved", "changed": tag.RowsAffected() > 0})
 }
 
 // PATCH /api/v1/institution/groups/:groupId — omitted fields are unchanged;
@@ -1314,6 +1378,7 @@ func (h *Handler) ReopenGroup(w http.ResponseWriter, r *http.Request) {
 var reopenMessages = map[string]string{
 	"NOT_FOUND":            "Class not found.",
 	"CLASS_REOPEN_EXPIRED": "This class ended more than 90 days ago. Create a new class instead.",
+	"DEPARTMENT_ARCHIVED":  "Restore the archived department before reopening this class.",
 	"INTERNAL":             "Something went wrong.",
 }
 

@@ -267,10 +267,10 @@ func (s *Service) Start(ctx context.Context, userID, quizID, assignmentID string
 	// Create attempt
 	var attemptID string
 	err = tx.QueryRow(ctx,
-		`INSERT INTO quiz_attempts (quiz_id, user_id, status, total_questions, point_config_snapshot, last_answer_at)
-		 VALUES ($1,$2,'in_progress',$3,$4, now())
+		`INSERT INTO quiz_attempts (quiz_id, user_id, status, total_questions, point_config_snapshot, last_answer_at, assignment_id)
+		 VALUES ($1,$2,'in_progress',$3,$4, now(),NULLIF($5,'')::uuid)
 		 RETURNING id`,
-		quizID, userID, len(questions), cfgJSON,
+		quizID, userID, len(questions), cfgJSON, assignmentID,
 	).Scan(&attemptID)
 	if err != nil {
 		return nil, err
@@ -287,22 +287,21 @@ func (s *Service) Start(ctx context.Context, userID, quizID, assignmentID string
 	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
 	if assignmentID != "" {
-		result, linkErr := s.db.Exec(ctx, `UPDATE learning_assignment_recipients
+		result, linkErr := tx.Exec(ctx, `UPDATE learning_assignment_recipients
 			SET status='started',attempt_id=$1,attempts_started=attempts_started+1
 			WHERE assignment_id=$2 AND student_id=$3
 			  AND status IN ('assigned','overdue') AND attempt_id IS NULL
 			  AND attempts_started < (SELECT attempt_limit FROM learning_assignments WHERE id=$2)`,
 			attemptID, assignmentID, userID)
 		if linkErr != nil || result.RowsAffected() != 1 {
-			// The attempt is unusable without the requested assignment link. Mark it
-			// abandoned rather than letting it become an unattributed live attempt.
-			s.db.Exec(ctx, `UPDATE quiz_attempts SET status='abandoned' WHERE id=$1 AND user_id=$2`, attemptID, userID)
+			// Roll back the attempt if its recipient cannot be claimed.
 			return nil, fmt.Errorf("assignment changed; refresh and try again")
 		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
 	}
 
 	// Update last_active_at after the attempt transaction has committed.

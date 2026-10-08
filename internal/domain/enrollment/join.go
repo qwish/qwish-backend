@@ -99,17 +99,18 @@ func (s *Service) ConfirmJoin(ctx context.Context, userID, code, targetID string
 	}
 	defer tx.Rollback(ctx)
 
+	var locked string
+	if err = tx.QueryRow(ctx, `SELECT id::text FROM groups WHERE id=$1 AND invite_code=$2 AND archived_at IS NULL FOR SHARE`,
+		targetID, code).Scan(&locked); err != nil {
+		return JoinResult{}, ErrJoinChanged
+	}
+
 	var role string
 	if err = tx.QueryRow(ctx, `SELECT role FROM users WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, userID).Scan(&role); err != nil {
 		return JoinResult{}, err
 	}
 	if role != "student" {
 		return JoinResult{}, ErrJoinRole
-	}
-	var locked string
-	if err = tx.QueryRow(ctx, `SELECT id::text FROM groups WHERE id=$1 AND invite_code=$2 AND archived_at IS NULL FOR SHARE`,
-		targetID, code).Scan(&locked); err != nil {
-		return JoinResult{}, ErrJoinChanged
 	}
 	p, err := resolveJoin(ctx, tx, userID, code)
 	if err != nil {

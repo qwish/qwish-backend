@@ -19,17 +19,46 @@ func ReopenClass(ctx context.Context, pool *pgxpool.Pool, groupID, scope string,
 		return http.StatusNotFound, "NOT_FOUND"
 	}
 	args := append([]any{groupID}, scopeArgs...)
-	tag, err := pool.Exec(ctx, `UPDATE groups SET archived_at=NULL WHERE id=$1 AND `+scope+`
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return http.StatusInternalServerError, "INTERNAL"
+	}
+	defer tx.Rollback(ctx)
+	// Shared lock order: institution, then class/department. All department
+	// archive, placement and role-grant paths acquire this same institution lock.
+	var inst string
+	err = tx.QueryRow(ctx, `SELECT institution_id FROM groups WHERE id=$1 AND `+scope, args...).Scan(&inst)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return http.StatusNotFound, "NOT_FOUND"
+	}
+	if err != nil {
+		return http.StatusInternalServerError, "INTERNAL"
+	}
+	if _, err = tx.Exec(ctx, `SELECT id FROM institutions WHERE id=$1 FOR UPDATE`, inst); err != nil {
+		return http.StatusInternalServerError, "INTERNAL"
+	}
+	var blocked bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM departments d WHERE d.id=g.department_id AND d.archived_at IS NOT NULL) FROM groups g WHERE g.id=$1 FOR UPDATE OF g`, groupID).Scan(&blocked)
+	if err != nil {
+		return http.StatusInternalServerError, "INTERNAL"
+	}
+	if blocked {
+		return http.StatusConflict, "DEPARTMENT_ARCHIVED"
+	}
+	tag, err := tx.Exec(ctx, `UPDATE groups SET archived_at=NULL WHERE id=$1 AND `+scope+`
 		AND archived_at > now() - interval '90 days'`, args...)
 	if err != nil {
 		return http.StatusInternalServerError, "INTERNAL"
 	}
 	if tag.RowsAffected() == 1 {
+		if err = tx.Commit(ctx); err != nil {
+			return http.StatusInternalServerError, "INTERNAL"
+		}
 		return http.StatusOK, ""
 	}
 	// Nothing reopened: missing, already live, or past the window.
 	var archived bool
-	err = pool.QueryRow(ctx, `SELECT archived_at IS NOT NULL FROM groups WHERE id=$1 AND `+scope, args...).Scan(&archived)
+	err = tx.QueryRow(ctx, `SELECT archived_at IS NOT NULL FROM groups WHERE id=$1 AND `+scope, args...).Scan(&archived)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return http.StatusNotFound, "NOT_FOUND"

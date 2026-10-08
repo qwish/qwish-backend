@@ -166,6 +166,18 @@ func (s *Service) SetStatus(ctx context.Context, instID, enrollmentID, status st
 		return err
 	}
 	defer tx.Rollback(ctx)
+	// Lock account before enrollment, matching membership validation and joins.
+	var account *string
+	if err = tx.QueryRow(ctx, `SELECT user_id FROM enrollments WHERE id=$1 AND institution_id=$2`, enrollmentID, instID).Scan(&account); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	if account != nil {
+		if _, err = tx.Exec(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, *account); err != nil {
+			return err
+		}
+	}
 	var userID *string
 	err = tx.QueryRow(ctx,
 		`UPDATE enrollments
@@ -205,20 +217,22 @@ func (s *Service) TeacherOwnsClass(ctx context.Context, teacherID, groupID strin
 }
 
 func (s *Service) AddStudentToClass(ctx context.Context, teacherID, groupID, studentID string) error {
-	ok, err := s.TeacherOwnsClass(ctx, teacherID, groupID)
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	if !ok {
+	defer tx.Rollback(ctx)
+	var active string
+	if err = tx.QueryRow(ctx, `SELECT g.id FROM groups g JOIN users u ON u.id=$2 AND u.institution_id=g.institution_id AND u.role='teacher' AND u.status='active' AND u.deleted_at IS NULL JOIN group_teachers gt ON gt.group_id=g.id AND gt.user_id=u.id WHERE g.id=$1 AND g.archived_at IS NULL FOR UPDATE OF g`, groupID, teacherID).Scan(&active); err != nil {
 		return ErrNotYourClass
 	}
 
 	// The student must hold a live enrollment at the same institution as the class.
 	var n int
-	if err := s.db.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT COUNT(*) FROM enrollments e
 		   JOIN groups g ON g.institution_id = e.institution_id
-		  WHERE e.user_id=$1 AND g.id=$2 AND e.status IN ('active','suspended')`,
+		  WHERE e.user_id=$1 AND g.id=$2 AND e.status='active'`,
 		studentID, groupID).Scan(&n); err != nil {
 		return err
 	}
@@ -228,7 +242,7 @@ func (s *Service) AddStudentToClass(ctx context.Context, teacherID, groupID, stu
 
 	// A practice group draws only from the class it was made from.
 	var outsider bool
-	if err := s.db.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT g.kind='remedial' AND NOT EXISTS (SELECT 1 FROM group_students gs WHERE gs.group_id=g.source_group_id AND gs.user_id=$2)
 		   FROM groups g WHERE g.id=$1`, groupID, studentID).Scan(&outsider); err != nil {
 		return err
@@ -237,10 +251,13 @@ func (s *Service) AddStudentToClass(ctx context.Context, teacherID, groupID, stu
 		return ErrNotInSourceClass
 	}
 
-	_, err = s.db.Exec(ctx,
+	_, err = tx.Exec(ctx,
 		`INSERT INTO group_students (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
 		groupID, studentID)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Service) RemoveStudentFromClass(ctx context.Context, teacherID, groupID, studentID string) error {
@@ -259,7 +276,7 @@ func (s *Service) RemoveStudentFromClass(ctx context.Context, teacherID, groupID
 // SetJoining turns class-code joining on or off for one class. With joining
 // off, only invited students and verified institute emails get in.
 func (s *Service) SetJoining(ctx context.Context, instID, groupID string, enabled bool) error {
-	tag, err := s.db.Exec(ctx, `UPDATE groups SET joining_enabled=$3 WHERE id=$1 AND institution_id=$2`, groupID, instID, enabled)
+	tag, err := s.db.Exec(ctx, `UPDATE groups SET joining_enabled=$3 WHERE id=$1 AND institution_id=$2 AND archived_at IS NULL`, groupID, instID, enabled)
 	if err == nil && tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}

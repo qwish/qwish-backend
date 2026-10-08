@@ -39,6 +39,9 @@ func (h *Handler) ReopenClass(w http.ResponseWriter, r *http.Request) {
 		middleware.GetUserID(r), middleware.GetInstitutionID(r))
 	if status != http.StatusOK {
 		msg := "This class can't be reopened."
+		if code == "DEPARTMENT_ARCHIVED" {
+			msg = "Ask your institute to restore this class’s archived department before reopening."
+		}
 		if code == "CLASS_REOPEN_EXPIRED" {
 			msg = "This class ended more than 90 days ago. Ask your institute to create a new class."
 		}

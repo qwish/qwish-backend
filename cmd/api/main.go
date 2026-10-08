@@ -887,6 +887,7 @@ func main() {
 					r.Get("/students/{userId}", institutionH.GetStudent)
 					r.Patch("/students/{userId}/status", institutionH.UpdateStudentStatus)
 					r.Get("/teachers", institutionH.ListTeachers)
+					r.Get("/staff", institutionH.ListStaff)
 					r.Get("/teachers/counts", institutionH.TeacherCounts)
 					r.Get("/teachers/invites", institutionH.ListTeacherInvites)
 					r.Post("/teachers/invites/{inviteId}/resend", institutionH.ResendTeacherInvite)

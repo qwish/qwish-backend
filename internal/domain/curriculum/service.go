@@ -45,12 +45,20 @@ func (s *Service) CreateYear(ctx context.Context, actor Actor, in YearInput) (Ye
 		return result, err
 	}
 	defer tx.Rollback(ctx)
+	review, err := reviewYear(ctx, tx, actor.InstitutionID, "", in)
+	if err != nil {
+		return result, err
+	}
+	if err = approveYear(review, in); err != nil {
+		return result, err
+	}
+
 	err = tx.QueryRow(ctx, `INSERT INTO academic_years(institution_id,name,starts_on,ends_on)
 		VALUES($1,$2,$3::text::date,$4::text::date) RETURNING id`, actor.InstitutionID, in.Name, in.StartsOn, in.EndsOn).Scan(&result.ID)
 	if err != nil {
 		return result, dbError(err)
 	}
-	if err = audit(ctx, tx, actor, "create_academic_year", result.ID); err != nil {
+	if err = auditYear(ctx, tx, actor, result.ID, "create_academic_year", review, in); err != nil {
 		return result, err
 	}
 	return result, tx.Commit(ctx)
@@ -58,6 +66,9 @@ func (s *Service) CreateYear(ctx context.Context, actor Actor, in YearInput) (Ye
 
 func (s *Service) ListYears(ctx context.Context, institutionID string) ([]Year, error) {
 	rows, err := s.db.Query(ctx, `SELECT y.id,y.name,y.starts_on::text,y.ends_on::text,
+ (now() AT TIME ZONE (SELECT timezone FROM institutions WHERE id=y.institution_id))::date::text,
+ CASE WHEN (now() AT TIME ZONE (SELECT timezone FROM institutions WHERE id=y.institution_id))::date<y.starts_on THEN 'upcoming' WHEN (now() AT TIME ZONE (SELECT timezone FROM institutions WHERE id=y.institution_id))::date>y.ends_on THEN 'past' ELSE 'current' END,
+ ARRAY(SELECT other.name FROM academic_years other WHERE other.institution_id=y.institution_id AND other.id<>y.id AND other.starts_on<=y.ends_on AND other.ends_on>=y.starts_on ORDER BY other.id),
 		(SELECT count(*) FROM class_curricula cc WHERE cc.academic_year_id=y.id AND cc.ended_at IS NULL),
 		(SELECT count(DISTINCT cc.group_id) FROM class_curricula cc JOIN groups g ON g.id=cc.group_id
 		  WHERE cc.academic_year_id=y.id AND cc.ended_at IS NULL AND g.archived_at IS NULL),
@@ -71,7 +82,7 @@ func (s *Service) ListYears(ctx context.Context, institutionID string) ([]Year, 
 	for rows.Next() {
 		var y Year
 		var st YearStats
-		if err = rows.Scan(&y.ID, &y.Name, &y.StartsOn, &y.EndsOn, &st.Assignments, &st.ClassesCovered, &st.ActiveClasses); err != nil {
+		if err = rows.Scan(&y.ID, &y.Name, &y.StartsOn, &y.EndsOn, &y.Today, &y.TemporalState, &y.Overlaps, &st.Assignments, &st.ClassesCovered, &st.ActiveClasses); err != nil {
 			return nil, err
 		}
 		y.Stats = &st
@@ -161,7 +172,7 @@ func recordRevision(ctx context.Context, tx pgx.Tx, actor Actor, versionID strin
 }
 
 // ListFilter narrows the curriculum list. Empty fields don't filter.
-type ListFilter struct{ Subject, Grade, Status string }
+type ListFilter struct{ Subject, Grade, Status, Search string }
 
 func (s *Service) ListVersions(ctx context.Context, institutionID string, page, limit int, f ListFilter) ([]VersionSummary, int, error) {
 	// One statement supplies the total with the same snapshot as the page.
@@ -171,13 +182,13 @@ func (s *Service) ListVersions(ctx context.Context, institutionID string, page, 
 		COALESCE((SELECT json_agg(json_build_object('group_id',g.id,'name',g.name,'academic_year_name',y.name) ORDER BY g.name)
 		   FROM class_curricula cc JOIN groups g ON g.id=cc.group_id JOIN academic_years y ON y.id=cc.academic_year_id
 		  WHERE cc.version_id=v.id AND cc.ended_at IS NULL AND g.archived_at IS NULL
-		    AND CURRENT_DATE BETWEEN y.starts_on AND y.ends_on), '[]'::json),
+		    AND (now() AT TIME ZONE (SELECT timezone FROM institutions WHERE id=y.institution_id))::date BETWEEN y.starts_on AND y.ends_on), '[]'::json),
 		count(*) OVER()
 		FROM curriculum_versions v JOIN curricula c ON c.id=v.curriculum_id
 		WHERE v.institution_id=$1
-		  AND ($4='' OR v.subject ILIKE $4) AND ($5='' OR v.grade=$5) AND ($6='' OR v.status=$6)
+		  AND ($4='' OR v.subject ILIKE $4) AND ($5='' OR v.grade=$5) AND ($6='' OR v.status=$6) AND ($7='' OR c.name ILIKE '%'||$7||'%' OR v.label ILIKE '%'||$7||'%')
 		ORDER BY v.created_at DESC,v.id LIMIT $2 OFFSET $3`,
-		institutionID, limit, (page-1)*limit, f.Subject, f.Grade, f.Status)
+		institutionID, limit, (page-1)*limit, f.Subject, f.Grade, f.Status, f.Search)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -201,9 +212,9 @@ func (s *Service) ListVersions(ctx context.Context, institutionID string, page, 
 	// to work with one-connection pools as well.
 	rows.Close()
 	if len(result) == 0 {
-		err = s.db.QueryRow(ctx, `SELECT count(*) FROM curriculum_versions v WHERE v.institution_id=$1
-			AND ($2='' OR v.subject ILIKE $2) AND ($3='' OR v.grade=$3) AND ($4='' OR v.status=$4)`,
-			institutionID, f.Subject, f.Grade, f.Status).Scan(&total)
+		err = s.db.QueryRow(ctx, `SELECT count(*) FROM curriculum_versions v JOIN curricula c ON c.id=v.curriculum_id WHERE v.institution_id=$1
+			AND ($2='' OR v.subject ILIKE $2) AND ($3='' OR v.grade=$3) AND ($4='' OR v.status=$4) AND ($5='' OR c.name ILIKE '%'||$5||'%' OR v.label ILIKE '%'||$5||'%')`,
+			institutionID, f.Subject, f.Grade, f.Status, f.Search).Scan(&total)
 	}
 	return result, total, err
 }
@@ -380,6 +391,10 @@ func (s *Service) Assign(ctx context.Context, actor Actor, groupID string, in As
 		return "", err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT id FROM institutions WHERE id=$1 FOR UPDATE`, actor.InstitutionID); err != nil {
+		return "", err
+	}
+
 	// Lock the group so archiving cannot race with this new assignment.
 	var found string
 	err = tx.QueryRow(ctx, `SELECT id FROM groups WHERE id=$1 AND institution_id=$2 AND archived_at IS NULL FOR UPDATE`, groupID, actor.InstitutionID).Scan(&found)
@@ -402,16 +417,16 @@ func (s *Service) Assign(ctx context.Context, actor Actor, groupID string, in As
 
 func (s *Service) ListAssignments(ctx context.Context, institutionID, groupID, teacherID string) ([]Assignment, error) {
 	var found string
-	err := s.db.QueryRow(ctx, `SELECT g.id FROM groups g WHERE g.id=$1 AND g.institution_id=$2 AND g.archived_at IS NULL
+	err := s.db.QueryRow(ctx, `SELECT g.id FROM groups g WHERE g.id=$1 AND g.institution_id=$2 AND ($3::text='' OR g.archived_at IS NULL)
 		AND ($3::text='' OR EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id=g.id AND gt.user_id=NULLIF($3::text,'')::uuid))`, groupID, institutionID, teacherID).Scan(&found)
 	if err != nil {
 		return nil, dbError(err)
 	}
-	rows, err := s.db.Query(ctx, `SELECT cc.id,cc.group_id,y.id,y.name,`+versionColumns+`
+	rows, err := s.db.Query(ctx, `SELECT cc.id,cc.group_id,y.id,y.name,cc.ended_at,CASE WHEN (now() AT TIME ZONE (SELECT timezone FROM institutions WHERE id=y.institution_id))::date<y.starts_on THEN 'upcoming' WHEN (now() AT TIME ZONE (SELECT timezone FROM institutions WHERE id=y.institution_id))::date>y.ends_on THEN 'past' ELSE 'current' END,`+versionColumns+`
 		FROM class_curricula cc JOIN academic_years y ON y.id=cc.academic_year_id
 		JOIN curriculum_versions v ON v.id=cc.version_id JOIN curricula c ON c.id=v.curriculum_id
 		JOIN groups g ON g.id=cc.group_id
-		WHERE cc.group_id=$1 AND cc.institution_id=$2 AND cc.ended_at IS NULL AND g.archived_at IS NULL
+		WHERE cc.group_id=$1 AND cc.institution_id=$2 AND ($3::text='' OR (cc.ended_at IS NULL AND g.archived_at IS NULL))
 		AND ($3::text='' OR EXISTS(SELECT 1 FROM group_teachers gt WHERE gt.group_id=g.id AND gt.user_id=NULLIF($3::text,'')::uuid))
 		ORDER BY y.starts_on DESC,c.name,v.id`, groupID, institutionID, teacherID)
 	if err != nil {
@@ -422,7 +437,7 @@ func (s *Service) ListAssignments(ctx context.Context, institutionID, groupID, t
 	for rows.Next() {
 		var a Assignment
 		v := &a.Version
-		if err = rows.Scan(&a.ID, &a.GroupID, &a.AcademicYearID, &a.AcademicYearName, &v.ID, &v.CurriculumID, &v.Name, &v.Label, &v.Subject, &v.Grade, &v.Status, &v.Revision, &v.PublishedAt, &v.UpdatedAt); err != nil {
+		if err = rows.Scan(&a.ID, &a.GroupID, &a.AcademicYearID, &a.AcademicYearName, &a.EndedAt, &a.TemporalState, &v.ID, &v.CurriculumID, &v.Name, &v.Label, &v.Subject, &v.Grade, &v.Status, &v.Revision, &v.PublishedAt, &v.UpdatedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, a)
@@ -436,7 +451,15 @@ func (s *Service) EndAssignment(ctx context.Context, actor Actor, groupID, id st
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT id FROM institutions WHERE id=$1 FOR UPDATE`, actor.InstitutionID); err != nil {
+		return err
+	}
+
 	var found string
+	if err = tx.QueryRow(ctx, `SELECT id FROM groups WHERE id=$1 AND institution_id=$2 AND archived_at IS NULL FOR UPDATE`, groupID, actor.InstitutionID).Scan(&found); err != nil {
+		return dbError(err)
+	}
+
 	err = tx.QueryRow(ctx, `UPDATE class_curricula SET ended_at=now() WHERE id=$1 AND group_id=$2
 		AND institution_id=$3 AND ended_at IS NULL RETURNING id`, id, groupID, actor.InstitutionID).Scan(&found)
 	if err != nil {
@@ -505,6 +528,14 @@ func (s *Service) UpdateYear(ctx context.Context, actor Actor, id string, in Yea
 		return err
 	}
 	defer tx.Rollback(ctx)
+	review, err := reviewYear(ctx, tx, actor.InstitutionID, id, in)
+	if err != nil {
+		return err
+	}
+	if err = approveYear(review, in); err != nil {
+		return err
+	}
+
 	tag, err := tx.Exec(ctx, `UPDATE academic_years SET name=$3,starts_on=$4::text::date,ends_on=$5::text::date
 		WHERE id=$1 AND institution_id=$2`, id, actor.InstitutionID, in.Name, in.StartsOn, in.EndsOn)
 	if err != nil {
@@ -513,7 +544,7 @@ func (s *Service) UpdateYear(ctx context.Context, actor Actor, id string, in Yea
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
-	if err = audit(ctx, tx, actor, "update_academic_year", id); err != nil {
+	if err = auditYear(ctx, tx, actor, id, "update_academic_year", review, in); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

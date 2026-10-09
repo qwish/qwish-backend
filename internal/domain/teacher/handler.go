@@ -41,7 +41,6 @@ func NewHandler(db *pgxpool.Pool) *Handler {
 // GET /api/v1/teacher/overview
 func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 	teacherID := middleware.GetUserID(r)
-	instID := middleware.GetInstitutionID(r)
 
 	var drafts, pending, published, totalAttempts int
 	var avgScore float64
@@ -161,22 +160,16 @@ func (h *Handler) Overview(w http.ResponseWriter, r *http.Request) {
 		(SELECT COUNT(*) FROM quizzes WHERE created_by=$1 AND published_at >= date_trunc('week',now()) AND deleted_at IS NULL)`, teacherID,
 	).Scan(&weeklyAssignments, &weeklyCompletions, &weeklyPublished)
 
-	var openTopicRequests int
-	h.db.QueryRow(r.Context(),
-		`SELECT COUNT(*) FROM topic_requests WHERE institution_id=$1 AND status='pending' AND (assigned_to=$2 OR assigned_to IS NULL)`,
-		instID, teacherID).Scan(&openTopicRequests)
-
 	middleware.JSON(w, http.StatusOK, map[string]interface{}{
-		"drafts":              drafts,
-		"pending_review":      pending,
-		"published":           published,
-		"total_attempts":      totalAttempts,
-		"average_score":       avgScore,
-		"open_topic_requests": openTopicRequests,
-		"recent_attempts":     recent,
-		"recent_quizzes":      recentQuizzes,
-		"student_activity":    studentActivity,
-		"teacher_activity":    teacherActivity,
+		"drafts":           drafts,
+		"pending_review":   pending,
+		"published":        published,
+		"total_attempts":   totalAttempts,
+		"average_score":    avgScore,
+		"recent_attempts":  recent,
+		"recent_quizzes":   recentQuizzes,
+		"student_activity": studentActivity,
+		"teacher_activity": teacherActivity,
 		"weekly_progress": map[string]int{
 			"assignments_created":   weeklyAssignments,
 			"student_completions":   weeklyCompletions,
@@ -239,10 +232,15 @@ func (h *Handler) ListStudents(w http.ResponseWriter, r *http.Request) {
 		n++
 	}
 
+	where += qdb.StudentDiscoverySQL(q, &args)
+	n = len(args) + 1
 	var total int
-	h.db.QueryRow(r.Context(),
+	if err := h.db.QueryRow(r.Context(),
 		`SELECT COUNT(*) FROM enrollments e JOIN users u ON u.id = e.user_id WHERE `+where,
-		args...).Scan(&total)
+		args...).Scan(&total); err != nil {
+		middleware.InternalError(w)
+		return
+	}
 
 	sortCol := "u.display_name"
 	switch q.Get("sort") {

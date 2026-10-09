@@ -2,8 +2,6 @@ package leaderboard
 
 import (
 	"context"
-	"fmt"
-	"golang.org/x/sync/singleflight"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	qdb "github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/middleware"
+	"golang.org/x/sync/singleflight"
 )
 
 const quizzesRequiredToUnlock = 5
@@ -20,22 +19,16 @@ const quizzesRequiredToUnlock = 5
 // pageTTL bounds how stale a shared leaderboard page can be.
 const pageTTL = 30 * time.Second
 
-type cachedPage struct {
-	entries []Entry
-	total   int
-	expires time.Time
-}
-
 type Handler struct {
-	db     *pgxpool.Pool
-	mu     sync.Mutex
-	cache  map[string]cachedPage
-	flight singleflight.Group
-	epoch  uint64
+	db        *pgxpool.Pool
+	mu        sync.Mutex
+	snapshots map[string]*rankSnapshot
+	flight    singleflight.Group
+	epoch     uint64
 }
 
 func NewHandler(db *pgxpool.Pool) *Handler {
-	return &Handler{db: db, cache: map[string]cachedPage{}}
+	return &Handler{db: db, snapshots: make(map[string]*rankSnapshot)}
 }
 
 type Entry struct {
@@ -47,23 +40,6 @@ type Entry struct {
 	TotalPoints     int64   `json:"total_points"`
 	CurrentStreak   int     `json:"current_streak"`
 }
-
-// leaderboardScoreCTE is the server-authoritative score used for ranking.
-// It mirrors the lifetime Insights formula: confidence-adjusted accuracy,
-// difficulty, smooth consistency/activity, and response speed. Keeping the
-// calculation in SQL means clients cannot submit or alter a ranking score.
-const leaderboardScoreCTE = `WITH scored AS (
-	SELECT u.id, u.display_name, i.name AS institution_name, u.institution_id,
-	       COALESCE(u.total_points, 0) AS total_points,
-	       COALESCE(u.current_streak, 0) AS current_streak,
-	       COALESCE(ls.qwish_score,100)::float8 AS qwish_score,
-	       COALESCE(ls.completed_quizzes,0) AS completed_quizzes
-	  FROM users u
-	  LEFT JOIN institutions i ON i.id=u.institution_id
-	  LEFT JOIN leaderboard_scores ls ON ls.user_id=u.id
-	 WHERE u.status='active' AND u.role='student'
-)
-`
 
 // GET /api/v1/leaderboard?scope=institution|global&domain=<optional>
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +60,11 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > 100 {
 		limit = 50
 	}
+	// Bound page arithmetic before multiplying untrusted input.
+	cutoff := rankCutoff(scope)
+	if page > (cutoff+limit-1)/limit {
+		page = (cutoff+limit-1)/limit + 1
+	}
 	offset := (page - 1) * limit
 
 	userID := middleware.GetUserID(r)
@@ -99,14 +80,26 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The mobile lock is presentation only; enforce the same eligibility at the
-	// data boundary so a direct HTTP request cannot bypass it.
+	domain := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("domain")))
+	var myRank int
+	var myTopPercent *int
+	var myPoints int64
+	var myQwishScore float64
+	var myInstitutionName *string
+	var matches bool
 	if role == "student" {
 		var completed int
-		if err := h.db.QueryRow(r.Context(),
-			`SELECT COALESCE((SELECT completed_quizzes FROM leaderboard_scores WHERE user_id=$1),0)`,
-			userID,
-		).Scan(&completed); err != nil {
+		// Eligibility, account status and scope membership remain live. No population
+		// scan is involved: this lookup uses the caller's primary key.
+		err := h.db.QueryRow(r.Context(), `SELECT COALESCE(ls.completed_quizzes,0),
+   COALESCE(ls.qwish_score,100), u.total_points, i.name,
+   u.status='active' AND u.deleted_at IS NULL AND u.role='student'
+   AND ($2='' OR COALESCE(lower(u.domain)=$2,false))
+   AND ($3='global' OR `+qdb.LiveMemberSQL("u.id", "$4")+`)
+   FROM users u LEFT JOIN leaderboard_scores ls ON ls.user_id=u.id
+   LEFT JOIN institutions i ON i.id=u.institution_id WHERE u.id=$1`,
+			userID, domain, scope, nullableInstitution(instID)).Scan(&completed, &myQwishScore, &myPoints, &myInstitutionName, &matches)
+		if err != nil {
 			middleware.InternalError(w)
 			return
 		}
@@ -115,189 +108,44 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-
-	domain := r.URL.Query().Get("domain")
-	entries, total, err := h.page(r.Context(), scope, instID, domain, limit, offset)
+	snapshot, err := h.snapshot(r.Context(), scope, instID, domain)
 	if err != nil {
 		middleware.InternalError(w)
 		return
 	}
-
-	var myRank int
-	var myPoints int64
-	var myQwishScore float64
-	var myInstitutionName *string
-	if role == "student" {
-		var err error
-		if scope == "institution" {
-			err = h.db.QueryRow(r.Context(), leaderboardScoreCTE+`
-			SELECT CASE WHEN EXISTS(
-				SELECT 1 FROM scored me JOIN users mu ON mu.id=me.id
-				 WHERE me.id=$2 AND `+qdb.LiveMemberSQL("me.id", "$1")+` AND ($3='' OR LOWER(mu.domain)=LOWER($3))
-			) THEN (
-				SELECT COUNT(*)+1 FROM scored s JOIN users u ON u.id=s.id
-				 WHERE `+qdb.LiveMemberSQL("s.id", "$1")+`
-				   AND s.completed_quizzes >= 5
-				   AND ($3='' OR LOWER(u.domain)=LOWER($3))
-				   AND s.qwish_score>(SELECT qwish_score FROM scored WHERE id=$2)
-			) ELSE 0 END,
-			COALESCE((SELECT qwish_score FROM scored WHERE id=$2),100),
-			COALESCE((SELECT total_points FROM scored WHERE id=$2),0),
-			(SELECT institution_name FROM scored WHERE id=$2)`, instID, userID, domain).Scan(&myRank, &myQwishScore, &myPoints, &myInstitutionName)
-		} else {
-			err = h.db.QueryRow(r.Context(), leaderboardScoreCTE+`
-			SELECT CASE WHEN EXISTS(
-				SELECT 1 FROM scored me JOIN users mu ON mu.id=me.id
-				 WHERE me.id=$1 AND ($2='' OR LOWER(mu.domain)=LOWER($2))
-			) THEN (
-				SELECT COUNT(*)+1 FROM scored s JOIN users u ON u.id=s.id
-				 WHERE s.completed_quizzes >= 5
-				   AND ($2='' OR LOWER(u.domain)=LOWER($2))
-				   AND s.qwish_score>(SELECT qwish_score FROM scored WHERE id=$1)
-			) ELSE 0 END,
-			COALESCE((SELECT qwish_score FROM scored WHERE id=$1),100),
-			COALESCE((SELECT total_points FROM scored WHERE id=$1),0),
-			(SELECT institution_name FROM scored WHERE id=$1)`, userID, domain).Scan(&myRank, &myQwishScore, &myPoints, &myInstitutionName)
-		}
-		if err != nil {
-			middleware.InternalError(w)
-			return
-		}
+	entries := snapshot.page(limit, offset)
+	if role == "student" && matches {
+		myRank, myTopPercent = snapshot.position(myQwishScore, cutoff)
 	}
 
 	middleware.JSONWithMeta(w, http.StatusOK, map[string]interface{}{
 		"scope":               scope,
 		"domain":              domain,
 		"my_rank":             myRank,
+		"my_top_percent":      myTopPercent,
+		"rank_cutoff":         cutoff,
+		"ranking_updated_at":  snapshot.updatedAt,
 		"my_qwish_score":      myQwishScore,
 		"my_institution_name": myInstitutionName,
 		"my_points":           myPoints,
 		"entries":             entries,
-	}, &middleware.Meta{Page: page, Limit: limit, Total: total})
+	}, &middleware.Meta{Page: page, Limit: limit, Total: snapshot.total})
 }
 
-// page loads one ranked page plus the total. It is identical for every caller
-// with the same key and each miss scans every active student twice, so it is
-// shared through a short-lived cache; my_rank stays live per request.
-func (h *Handler) page(ctx context.Context, scope, instID, domain string, limit, offset int) ([]Entry, int, error) {
-	key := fmt.Sprintf("%s|%s|%s|%d|%d", scope, instID, strings.ToLower(domain), limit, offset)
-	h.mu.Lock()
-	if c, ok := h.cache[key]; ok && time.Now().Before(c.expires) {
-		h.mu.Unlock()
-		return c.entries, c.total, nil
-	}
-	h.mu.Unlock()
-
-	h.mu.Lock()
-	epoch := h.epoch
-	h.mu.Unlock()
-	ch := h.flight.DoChan(fmt.Sprintf("%d:%s", epoch, key), func() (any, error) {
-		entries, total, err := h.loadPage(ctx, scope, instID, domain, limit, offset)
-		if err != nil {
-			return nil, err
-		}
-		c := cachedPage{entries, total, time.Now().Add(pageTTL)}
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		if h.epoch == epoch {
-			for k, v := range h.cache {
-				if time.Now().After(v.expires) {
-					delete(h.cache, k)
-				}
-			}
-			if len(h.cache) >= 256 {
-				for k := range h.cache {
-					delete(h.cache, k)
-					break
-				}
-			}
-			h.cache[key] = c
-		}
-		return c, nil
-	})
-	select {
-	case <-ctx.Done():
-		return nil, 0, ctx.Err()
-	case result := <-ch:
-		if result.Err != nil {
-			return nil, 0, result.Err
-		}
-		c := result.Val.(cachedPage)
-		return c.entries, c.total, nil
-	}
-}
+// ClearCache is reserved for membership/institution changes and listener reconnects.
+// Score changes expire through the 30-second TTL instead of flushing every scope.
 func (h *Handler) ClearCache() {
 	h.mu.Lock()
 	h.epoch++
-	h.cache = map[string]cachedPage{}
+	h.snapshots = make(map[string]*rankSnapshot)
 	h.mu.Unlock()
 }
 
+// Retained for callers/tests that load an uncached page.
 func (h *Handler) loadPage(ctx context.Context, scope, instID, domain string, limit, offset int) ([]Entry, int, error) {
-	total := 0
-	entries := []Entry{}
-
-	if scope == "institution" {
-		if err := h.db.QueryRow(ctx, `
-			`+leaderboardScoreCTE+`SELECT COUNT(*) FROM scored s
-			 JOIN users u ON u.id=s.id
-			 WHERE `+qdb.LiveMemberSQL("s.id", "$1")+`
-			   AND s.completed_quizzes >= 5
-			   AND ($2='' OR LOWER(u.domain)=LOWER($2))`, instID, domain).Scan(&total); err != nil {
-			return nil, 0, err
-		}
-
-		rows, err := h.db.Query(ctx, leaderboardScoreCTE+`
-			SELECT s.id, s.display_name, s.institution_name, s.qwish_score, s.total_points, s.current_streak,
-			       RANK() OVER (ORDER BY s.qwish_score DESC) AS rank
-			  FROM scored s JOIN users u ON u.id=s.id
-			 WHERE `+qdb.LiveMemberSQL("s.id", "$1")+`
-			   AND s.completed_quizzes >= 5
-			   AND ($2='' OR LOWER(u.domain)=LOWER($2))
-			 ORDER BY s.qwish_score DESC, s.id LIMIT $3 OFFSET $4`, instID, domain, limit, offset)
-		if err != nil {
-			return nil, 0, err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var e Entry
-			if err := rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.QwishScore, &e.TotalPoints, &e.CurrentStreak, &e.Rank); err != nil {
-				return nil, 0, err
-			}
-			entries = append(entries, e)
-		}
-		if err := rows.Err(); err != nil {
-			return nil, 0, err
-		}
-	} else {
-		if err := h.db.QueryRow(ctx, leaderboardScoreCTE+`
-			SELECT COUNT(*) FROM scored s JOIN users u ON u.id=s.id
-			 WHERE s.completed_quizzes >= 5
-			   AND ($1='' OR LOWER(u.domain)=LOWER($1))`, domain).Scan(&total); err != nil {
-			return nil, 0, err
-		}
-
-		rows, err := h.db.Query(ctx, leaderboardScoreCTE+`
-			SELECT s.id, s.display_name, s.institution_name, s.qwish_score, s.total_points, s.current_streak,
-			       RANK() OVER (ORDER BY s.qwish_score DESC) AS rank
-			  FROM scored s JOIN users u ON u.id=s.id
-			 WHERE s.completed_quizzes >= 5
-			   AND ($1='' OR LOWER(u.domain)=LOWER($1))
-			 ORDER BY s.qwish_score DESC, s.id LIMIT $2 OFFSET $3`, domain, limit, offset)
-		if err != nil {
-			return nil, 0, err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var e Entry
-			if err := rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.QwishScore, &e.TotalPoints, &e.CurrentStreak, &e.Rank); err != nil {
-				return nil, 0, err
-			}
-			entries = append(entries, e)
-		}
-		if err := rows.Err(); err != nil {
-			return nil, 0, err
-		}
+	s, err := h.loadSnapshot(ctx, scope, instID, strings.ToLower(domain))
+	if err != nil {
+		return nil, 0, err
 	}
-	return entries, total, nil
+	return s.page(limit, offset), s.total, nil
 }

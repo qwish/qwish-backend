@@ -10,7 +10,6 @@ import (
 // Teacher notification topics (R7). Keep in sync with teacher.NotificationTopics.
 const (
 	TopicOverdueWork         = "overdue_work"
-	TopicTopicRequests       = "topic_requests"
 	TopicFollowUpEvidence    = "follow_up_evidence"
 	TopicSuggestionDecisions = "suggestion_decisions"
 	TopicAssessmentDecisions = "assessment_decisions"
@@ -18,7 +17,6 @@ const (
 
 var teacherDefaults = map[string][2]bool{
 	TopicOverdueWork:         {true, true},
-	TopicTopicRequests:       {true, false},
 	TopicFollowUpEvidence:    {true, true},
 	TopicSuggestionDecisions: {true, false},
 	TopicAssessmentDecisions: {true, true},

@@ -51,7 +51,6 @@ import (
 	"github.com/qwish/backend/internal/domain/studygroup"
 	"github.com/qwish/backend/internal/domain/survey"
 	"github.com/qwish/backend/internal/domain/teacher"
-	"github.com/qwish/backend/internal/domain/topicrequest"
 	"github.com/qwish/backend/internal/domain/upload"
 	"github.com/qwish/backend/internal/domain/user"
 	"github.com/qwish/backend/internal/domain/useremail"
@@ -134,8 +133,6 @@ func main() {
 	streakH := streak.NewHandler(streakSvc)
 	leaderboardH := leaderboard.NewHandler(pool)
 	parentH := parent.NewHandler(pool)
-	topicH := topicrequest.NewHandler(pool)
-	topicH.SetNotifier(notifSvc, cfg.TeacherURL)
 	uploadH := upload.NewHandler(s3Client)
 	enrollmentSvc := enrollment.NewService(pool)
 	enrollmentSvc.SetMailer(func(ctx context.Context, to, subject, body string) error {
@@ -206,7 +203,9 @@ func main() {
 	}, func(_ context.Context, table string) {
 		responseCache.Invalidate(table)
 		switch table {
-		case "users", "institutions", "leaderboard_scores", "enrollments", "group_students":
+		// Scores and display metadata expire through the leaderboard TTL.
+		// Clearing on every answer/user update would defeat shared snapshots.
+		case "institutions", "enrollments", "group_students":
 			leaderboardH.ClearCache()
 		}
 		switch table {
@@ -704,6 +703,8 @@ func main() {
 				r.Get("/quizzes/featured", responseCache.Wrap(30*time.Second, userH.GetFeaturedQuizzes))
 				r.Get("/quizzes", responseCache.Wrap(10*time.Second, quizH.List))
 				r.Get("/quizzes/{quizId}", quizH.Get)
+				r.With(mw.RequireUserRecord(), mw.RequireRole("student")).Get("/quizzes/{quizId}/rating", quizH.GetRating)
+				r.With(mw.RequireUserRecord(), mw.RequireRole("student"), mw.RateLimitByUser(60, time.Minute)).Put("/quizzes/{quizId}/rating", quizH.PutRating)
 				r.Post("/quizzes/{quizId}/save", quizH.Save)
 				r.Delete("/quizzes/{quizId}/save", quizH.Unsave)
 				r.Get("/quizzes/{quizId}/share", quizH.Share)
@@ -722,14 +723,11 @@ func main() {
 					r.Post("/attempts/{attemptId}/complete", attemptH.Complete)
 				})
 				r.Get("/attempts/{attemptId}", attemptH.GetResult)
+				r.Get("/attempts/{attemptId}/progress", attemptH.GetProgress)
 				r.Get("/attempts/{attemptId}/session", attemptH.Resume)
 
 				// Leaderboard
 				r.With(mw.RateLimitByUser(120, time.Minute)).Get("/leaderboard", leaderboardH.Get)
-
-				// Topic requests (student)
-				r.Post("/topic-requests", topicH.Create)
-				r.Get("/topic-requests/mine", topicH.ListMine)
 
 				// Parent
 				r.Post("/parent/link-invite", parentH.GenerateInvite)
@@ -820,8 +818,6 @@ func main() {
 					r.Post("/classes/{classId}/reopen", teacherH.ReopenClass)
 					r.Get("/reports/quiz-analytics", responseCache.Wrap(30*time.Second, teacherH.QuizAnalyticsReport))
 					r.Get("/reports/student-performance", responseCache.Wrap(30*time.Second, teacherH.StudentPerformanceReport))
-					r.Get("/topic-requests", topicH.TeacherList)
-					r.Patch("/topic-requests/{requestId}", topicH.TeacherUpdate)
 
 					// Analytics. `scope` selects classes or quizzes; the id it
 					// filters on always comes from the token.
@@ -916,9 +912,6 @@ func main() {
 					r.Delete("/groups/{groupId}/teachers/{userId}", institutionH.RemoveTeacherFromGroup)
 					r.Get("/quizzes", responseCache.Wrap(10*time.Second, quizH.InstitutionList))
 					r.Get("/quizzes/{quizId}", quizH.Get)
-					r.Get("/topic-requests", topicH.TeacherList)
-					r.Patch("/topic-requests/{requestId}", topicH.InstitutionUpdate)
-					r.Get("/topic-requests/counts", topicH.Counts)
 					r.Get("/reports/student-performance", responseCache.Wrap(30*time.Second, institutionH.StudentPerformanceReport))
 					r.Get("/reports/teacher-activity", responseCache.Wrap(30*time.Second, institutionH.TeacherActivityReport))
 					r.Get("/reports/quiz-analytics", responseCache.Wrap(30*time.Second, institutionH.QuizAnalyticsReport))
@@ -1032,6 +1025,7 @@ func main() {
 					r.With(mw.RequireRole("super_admin")).Get("/surveys/{surveyId}/results", surveyH.Results)
 					r.With(mw.RequireRole("super_admin")).Patch("/surveys/{surveyId}/status", surveyH.SetStatus)
 					r.With(mw.RequireRole("super_admin")).Get("/quizzes/{quizId}", quizH.AdminGet)
+					r.With(mw.RequireRole("super_admin")).Get("/quizzes/{quizId}/ratings", quizH.AdminRatings)
 					r.With(mw.RequireRole("super_admin")).Patch("/quizzes/{quizId}", quizH.AdminUpdate)
 					r.With(mw.RequireRole("super_admin", "moderator")).Get("/quizzes/{quizId}/behavior", attemptH.BehaviorSummary)
 					r.With(mw.RequireRole("super_admin", "moderator")).Post("/quizzes/{quizId}/approve", adminH.ApproveQuiz)

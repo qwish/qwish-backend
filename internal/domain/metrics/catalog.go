@@ -148,14 +148,6 @@ var sources = map[string]source{
 			ScopeQuizzes:     "q.created_by = $%d",
 		},
 	},
-	"topicreq": {
-		Key:      "tr",
-		From:     "topic_requests tr",
-		BucketOn: "tr.created_at",
-		Scopes: map[ScopeKind]string{
-			ScopeInstitution: "tr.institution_id = $%d",
-		},
-	},
 	"report_new": {
 		Key:      "rn",
 		From:     "reports r",
@@ -328,9 +320,6 @@ var catalog = []MetricDef{
 	{ID: "questions_authored", Label: "Questions authored", Group: "Content", Unit: "count",
 		Kind: KindAdditive, Source: "question_new", Expr: "COUNT(*)",
 		Hint: "Questions on quizzes created in the bucket."},
-	{ID: "topic_requests", Label: "Topic requests", Group: "Content", Unit: "count",
-		Kind: KindAdditive, Source: "topicreq", Expr: "COUNT(*)",
-		Hint: "Topic requests raised by institutions."},
 
 	// ── Moderation & ops — none are institution-scopable ────────────────────
 	{ID: "reports_opened", Label: "Reports opened", Group: "Moderation", Unit: "count",

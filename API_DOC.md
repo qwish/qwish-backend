@@ -508,7 +508,11 @@ Returns all badge types with earned status.
     "score_pct":    85.0,
     "points_delta": 120,
     "status":       "completed",
-    "completed_at": "2024-03-01T14:22:00Z"
+    "completed_at": "2024-03-01T14:22:00Z",
+    "quiz_type":    "knowledge_check",
+    "subject":      "Cell Biology",
+    "total_correct":   12,
+    "total_questions": 15
   }
 ]
 ```
@@ -1276,6 +1280,37 @@ Returns the result of a completed attempt.
 
 # 5. Leaderboard
 
+
+## GET `/attempts/{attemptId}/progress`
+**Auth required:** Yes (attempt owner only; others get `404`)
+
+Places a completed attempt among the learner's earlier completed attempts in
+the same quiz domain. Never includes answers. `domain` is `null` and
+`previous` empty when the quiz has no domain.
+
+### Response `200`
+```json
+{
+  "domain":       "computer_science",
+  "domain_label": "Computer Science",
+  "previous": [
+    {
+      "attempt_id":      "uuid",
+      "quiz_title":      "DBMS Basics",
+      "score_pct":       62.5,
+      "total_correct":   10,
+      "total_questions": 16,
+      "completed_at":    "2026-09-28T10:12:00Z"
+    }
+  ],
+  "previous_total": 7
+}
+```
+`previous` is newest first, only attempts completed before this one, capped at
+12. `previous_total` is the uncapped count.
+
+---
+
 ## GET `/leaderboard`
 **Auth required:** Yes
 
@@ -1286,18 +1321,37 @@ Returns the result of a completed attempt.
 | `domain` | Optional domain slug; filters either scope | — |
 | `page`, `limit` | — | page=1, limit=50 |
 
-Rankings are live and ordered by the server-calculated `qwish_score`; cumulative
+Rankings use shared snapshots cached for up to 30 seconds and are ordered by the server-calculated `qwish_score`; cumulative
 `total_points` is retained as supporting data. Student accounts must complete
 five different quizzes first; otherwise the endpoint returns
 `403 LEADERBOARD_LOCKED`. Students appear in rankings after the same five-quiz
 threshold. Teachers and other non-student accounts never appear in rankings.
 Institution names are included for global and institution-scoped entries.
 
+Exact ranks are shown through campus (`institution`) rank 100 and national
+(`global`) rank 10,000, within the selected domain if supplied. Equal scores
+share a rank, including ties at the cutoff. List entries are capped at 100 or
+10,000 students; pages beyond the cap return an empty list. `meta.total` remains
+the full eligible population, not the list cap.
+
+Below the cutoff, `my_rank` is `0` and `my_top_percent` is an integer from 1 to
+100; render it as **Top XX%**. It is a conservative estimate from ten-point score
+buckets, not an exact percentile. Within the cutoff, `my_top_percent` is `null`.
+Non-students and students outside the selected scope/domain receive `my_rank: 0`
+and `my_top_percent: null`. Eligibility and caller membership are checked live;
+caller score/points are live, while rank placement uses the cached distribution.
+`ranking_updated_at` identifies the snapshot time. Scores/display metadata expire
+through the TTL; membership changes and listener reconnects invalidate snapshots.
+
+
 ### Response `200` (paginated)
 ```json
 {
   "scope":     "institution",
   "my_rank":   3,
+  "my_top_percent": null,
+  "rank_cutoff": 100,
+  "ranking_updated_at": "2026-10-09T10:00:00Z",
   "my_qwish_score": 712.5,
   "my_institution_name": "Qwish Academy",
   "my_points": 1250,
@@ -1314,45 +1368,6 @@ Institution names are included for global and institution-scoped entries.
   ]
 }
 ```
-
----
-
-# 6. Topic Requests
-
-## POST `/topic-requests`
-**Auth required:** Yes (student)
-
-### Request Body
-```json
-{
-  "topic":       "Photosynthesis",
-  "subject":     "Biology",
-  "description": "I'd like more questions on the Calvin cycle"
-}
-```
-
-`topic` is required.
-
-### Response `201`
-```json
-{
-  "id":          "uuid",
-  "student_id":  "uuid",
-  "topic":       "Photosynthesis",
-  "subject":     "Biology",
-  "description": "I'd like more questions on the Calvin cycle",
-  "status":      "pending",
-  "created_at":  "2024-03-01T00:00:00Z"
-}
-```
-
----
-
-## GET `/topic-requests/mine`
-**Auth required:** Yes (student)
-
-### Response `200`
-Array of topic requests (same shape as above).
 
 ---
 
@@ -1686,32 +1701,7 @@ Aggregated attempt results for the quiz.
 
 ---
 
-## GET `/teacher/topic-requests`
-**Auth required:** Yes (teacher)
 
-### Query Params
-`status`, `page`, `limit`
-
-### Response `200` (paginated)
-Array of topic requests from students in the same institution.
-
----
-
-## PATCH `/teacher/topic-requests/{requestId}`
-**Auth required:** Yes (teacher)
-
-### Request Body
-```json
-{
-  "status":      "in_progress",
-  "assigned_to": "teacher-uuid"
-}
-```
-
-### Response `200`
-{ "message": "updated" }
-
----
 
 ## GET `/teacher/overview`
 **Auth required:** Yes (teacher)
@@ -1726,7 +1716,6 @@ Returns a summary overview for the teacher dashboard.
   "published": 5,
   "total_attempts": 42,
   "average_score": 78.5,
-  "open_topic_requests": 2,
   "recent_attempts": [
     {
       "attempt_id": "uuid",
@@ -2175,7 +2164,7 @@ unchanged, so the first email's link keeps working.
 ```
 - `average_score` is weighted by completions across the teacher's quizzes, and is `null` with no completions.
 - `quizzes` lists up to 100, newest first.
-- `recent_activity` holds the last five quiz publications and topic-request pickups.
+- `recent_activity` holds the last five quiz publications.
 
 ---
 
@@ -2597,46 +2586,8 @@ Same as `GET /quizzes/{quizId}`.
 
 ---
 
-## GET `/institution/topic-requests`
-Shared with `GET /teacher/topic-requests`.
 
-### Query Params
-| Param | Description |
-|-------|-------------|
-| `status` | `pending`, `in_progress`, `done`, or `open` (pending + in progress) |
-| `assigned` | `none` — only unassigned requests |
-| `search` | Topic, subject, description, or the student's name |
-| `page`, `limit` | Pagination (max `limit` 100) |
 
-Open states are ordered oldest first; otherwise newest first.
-
-### Response `200` (paginated)
-```json
-[
-  {
-    "id": "uuid", "student_id": "uuid", "student_name": "Kabir Mehta",
-    "topic": "Rotational motion worked examples", "subject": "Physics", "description": "…",
-    "status": "pending", "assigned_to": null, "assigned_to_name": null,
-    "created_at": "2026-09-21T05:00:00Z",
-    "requester_count": 7, "other_requesters": ["Sneha Gaikwad", "Omkar Bhosale", "Priya Nair"]
-  }
-]
-```
-`requester_count` is how many open requests ask for the same topic and subject
-(case-insensitive, this one included). `other_requesters` names up to three
-of the others.
-
-## GET `/institution/topic-requests/counts`
-```json
-{ "open": 14, "unassigned": 5, "done": 22 }
-```
-
----
-
-## PATCH `/institution/topic-requests/{requestId}`
-Same as `PATCH /teacher/topic-requests/{requestId}`.
-
----
 
 # 11. Super Admin
 
@@ -4601,7 +4552,6 @@ Everything waiting on the institution in one queue, oldest first.
 
 The item types are:
 - `teacher_verification`;
-- `topic_request`: open for more than 5 days.
 
 ```json
 {
@@ -4978,3 +4928,13 @@ Protected routes enforce live teacher status and administrator session/passkey p
 - The fixed-code store-review account must be an active student; it cannot mint an administrator session.
 
 No database migration is needed for these changes; they use the existing administrator session, passkey, and policy tables.
+
+## Optional quiz star ratings
+
+- `GET /quizzes/{quizId}/rating` — student only; returns `{ "stars": null }` or their own saved integer rating. Requires a completed attempt on this quiz.
+- `PUT /quizzes/{quizId}/rating` — student only; accepts only `{ "stars": 1 }` through `{ "stars": 5 }`. Requires a completed attempt. One row per student/quiz; retries or later ratings update that row. No written review is accepted.
+- `GET /admin/quizzes/{quizId}/ratings` — **super_admin only**, excluding moderators, teachers and institution admins. Returns total, average (null when unrated), and counts keyed by stars 1–5.
+
+Ratings are optional feedback, independent of quiz scores and learner ability ratings. Shared quiz details, teacher reports, institution reports and student discovery do not include rating aggregates. API response data uses the standard `data` envelope.
+
+Topic request endpoints have been removed. Deploy migration `099_quiz_ratings.sql` before the new backend, then deploy dashboards and the student app. Legacy topic-request records are retained without application access.

@@ -129,12 +129,12 @@ func TestRoadmapEndpoints(t *testing.T) {
 
 	// R7 — defaults, then a saved override.
 	code, obj, _ = asTeacher(t, f, f.TeacherID, "GET", "/n", "/n", "", h.GetNotificationPrefs)
-	if code != 200 || obj["topic_requests"].(map[string]any)["email"] != false {
+	if code != 200 || obj["suggestion_decisions"].(map[string]any)["email"] != false {
 		t.Fatalf("notif defaults: %v", obj)
 	}
-	code, obj, _ = asTeacher(t, f, f.TeacherID, "PUT", "/n", "/n", `{"topic_requests":{"in_app":false,"email":true}}`, h.PutNotificationPrefs)
+	code, obj, _ = asTeacher(t, f, f.TeacherID, "PUT", "/n", "/n", `{"suggestion_decisions":{"in_app":false,"email":true}}`, h.PutNotificationPrefs)
 	t.Cleanup(func() { pool.Exec(ctx, `DELETE FROM teacher_notification_preferences WHERE user_id=$1`, f.TeacherID) })
-	if code != 200 || obj["topic_requests"].(map[string]any)["in_app"] != false || obj["overdue_work"].(map[string]any)["in_app"] != true {
+	if code != 200 || obj["suggestion_decisions"].(map[string]any)["in_app"] != false || obj["overdue_work"].(map[string]any)["in_app"] != true {
 		t.Fatalf("notif save: %v", obj)
 	}
 }

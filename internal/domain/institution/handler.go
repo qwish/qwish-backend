@@ -765,12 +765,10 @@ func (h *Handler) GetTeacher(w http.ResponseWriter, r *http.Request) {
 		groups = append(groups, g)
 	}
 
-	// Recent activity: what they published and which topic requests they took on.
+	// Recent activity: published assessments.
 	arows, _ := h.db.Query(r.Context(),
 		`(SELECT 'Published “' || title || '”', published_at FROM quizzes
 		   WHERE created_by=$1 AND deleted_at IS NULL AND published_at IS NOT NULL)
-		 UNION ALL
-		 (SELECT 'Picked up topic request “' || topic || '”', created_at FROM topic_requests WHERE assigned_to=$1)
 		 ORDER BY 2 DESC LIMIT 5`, teacherID)
 	defer arows.Close()
 	type activity struct {

@@ -458,7 +458,6 @@ func (h *Handler) PutPreferences(w http.ResponseWriter, r *http.Request) {
 // NotificationTopics lists the channels a teacher controls, with defaults.
 var NotificationTopics = map[string]struct{ InApp, Email bool }{
 	"overdue_work":         {true, true},
-	"topic_requests":       {true, false},
 	"follow_up_evidence":   {true, true},
 	"suggestion_decisions": {true, false},
 	"assessment_decisions": {true, true},

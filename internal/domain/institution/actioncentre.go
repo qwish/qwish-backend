@@ -18,19 +18,13 @@ const staleAfterDays = 7
 // client to link, and a fixed owner label when someone outside the institution
 // holds it.
 //
-// $1 institution. Each branch is an ordinary query over its own table; the
-// union is sorted and paged by the caller.
+// $1 institution. The caller sorts and pages pending teacher verifications.
 const actionItemsSQL = `
 SELECT 'teacher_verification' AS item_type, u.id::text AS item_id, COALESCE(NULLIF(u.display_name,''), u.full_name) AS title,
        'Joined ' || to_char(u.created_at, 'DD Mon') || ' · ' || u.email AS subtitle, u.created_at AS waiting_since,
        u.id::text AS link_id, NULL::text AS fixed_owner
   FROM users u
- WHERE u.institution_id=$1 AND u.role='teacher' AND u.status='pending' AND u.deleted_at IS NULL
-UNION ALL
-SELECT 'topic_request', tr.id::text, '“' || tr.topic || '”',
-       'Topic request' || COALESCE(' · ' || tr.subject, ''), tr.created_at, tr.id::text, NULL
-  FROM topic_requests tr
- WHERE tr.institution_id=$1 AND tr.status IN ('pending','in_progress') AND tr.created_at < now() - INTERVAL '5 days'`
+ WHERE u.institution_id=$1 AND u.role='teacher' AND u.status='pending' AND u.deleted_at IS NULL`
 
 // GET /institution/action-centre?filter=all|mine|unowned|stale&page=&limit=
 func (h *Handler) ActionCentre(w http.ResponseWriter, r *http.Request) {
@@ -127,9 +121,9 @@ func (h *Handler) ActionCentre(w http.ResponseWriter, r *http.Request) {
 	queues := []queue{}
 	qrows, err := h.db.Query(r.Context(), `WITH i AS (`+actionItemsSQL+`)
 		SELECT t.type, COUNT(i.item_id), MIN(i.waiting_since)
-		  FROM unnest(ARRAY['teacher_verification','topic_request']) t(type)
+		  FROM unnest(ARRAY['teacher_verification']) t(type)
 		  LEFT JOIN i ON i.item_type=t.type
-		 GROUP BY t.type ORDER BY array_position(ARRAY['teacher_verification','topic_request'], t.type)`,
+		 GROUP BY t.type ORDER BY array_position(ARRAY['teacher_verification'], t.type)`,
 		instID)
 	if err == nil {
 		defer qrows.Close()

@@ -324,7 +324,7 @@ func tmplWeeklyInsights(name string, pointsThisWeek int64, trend string, quizzes
 }
 
 // tmplTeacherNotice is the email copy of a teacher notification (overdue work,
-// topic requests, follow-up evidence, decisions).
+// follow-up evidence and decisions).
 func tmplTeacherNotice(title, body, link string) string {
 	content := heading(title) + paragraph(body)
 	if link != "" {

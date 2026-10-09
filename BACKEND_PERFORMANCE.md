@@ -78,3 +78,18 @@ Completed jobs are removed in batches after 30 days; failed jobs remain for insp
 All migrations were applied to an isolated local PostgreSQL 18 database. The full Go suite passed against that database. The race detector passed for cache, middleware, durable jobs, attempts, quiz feeds, streaks, notifications, and fresh-schema migration/learning checks. Regression coverage includes cache isolation/invalidation/coalescing, distributed rate-limit concurrency, outbox rollback/retry, atomic milestone credit, completion while the shared quiz row is locked, duplicate completion responses, and feed cursor traversal including NULL publication dates.
 
 No production load benchmark was performed. Establish a baseline and compare endpoint p95/p99, lock waiters, pool acquisition time, and queue lag under representative traffic before claiming a specific speedup. Provider delivery and proxy streaming behavior still require environment-specific integration checks.
+
+## Leaderboard rank snapshots
+
+Leaderboard requests reuse a bounded per-scope/domain snapshot for 30 seconds.
+It contains the top 100 campus or top 10,000 national entries plus an 82-bucket
+score histogram and eligible total. Below the exact-rank cutoff the API returns
+`my_rank: 0` and a conservative integer `my_top_percent`. Ties retain SQL RANK
+semantics. Every student request checks eligibility and membership live with one
+primary-key lookup; personal placement uses the cached score distribution.
+Snapshot misses read the histogram and top list in one repeatable-read transaction.
+Concurrent refreshes coalesce; at most 16 snapshots are retained per replica.
+Score/user changes age out through the TTL, while institution/enrollment changes
+and listener reconnects clear snapshots. List pagination stops at the cutoff;
+`meta.total` still reports the full eligible population. No production latency
+benchmark has been performed.

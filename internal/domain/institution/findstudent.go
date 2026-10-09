@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	qdb "github.com/qwish/backend/internal/db"
 	"github.com/qwish/backend/internal/middleware"
 )
 
@@ -23,25 +24,35 @@ import (
 func (h *Handler) FindStudents(w http.ResponseWriter, r *http.Request) {
 	instID := middleware.GetInstitutionID(r)
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	if len([]rune(q)) < 2 {
-		middleware.BadRequest(w, "type at least 2 characters")
-		return
+	args := []interface{}{instID, "%" + q + "%"}
+	filters := qdb.StudentDiscoverySQL(r.URL.Query(), &args)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit < 1 || limit > 50 {
+		limit = 25
 	}
-	like := "%" + q + "%"
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	args = append(args, limit+1, (page-1)*limit)
 	rows, err := h.db.Query(r.Context(), `
-		WITH people AS (
-			SELECT e.user_id, e.id AS enrollment_id,
-			       COALESCE(NULLIF(u.display_name,''), u.full_name, e.full_name) AS name,
-			       COALESCE(u.email, e.email, '') AS email, e.status AS state, e.updated_at AS touched
-			  FROM enrollments e LEFT JOIN users u ON u.id=e.user_id
-			 WHERE e.institution_id=$1
-		)
-		SELECT DISTINCT ON (COALESCE(user_id::text, enrollment_id::text))
-		       user_id, enrollment_id, name, email, state
-		  FROM people
-		 WHERE name ILIKE $2 OR email ILIKE $2
-		 ORDER BY COALESCE(user_id::text, enrollment_id::text), touched DESC
-		 LIMIT 20`, instID, like)
+  WITH people AS (
+   SELECT e.user_id, e.id AS enrollment_id,
+    COALESCE(NULLIF(u.display_name,''), u.full_name, e.full_name) AS name,
+    COALESCE(u.email,e.email,'') AS email, e.status AS state,
+    COALESCE(e.grade,'') AS grade, COALESCE(e.section,'') AS section,
+    e.updated_at AS touched
+   FROM enrollments e LEFT JOIN users u ON u.id=e.user_id AND u.deleted_at IS NULL
+   WHERE e.institution_id=$1
+    AND (COALESCE(NULLIF(u.display_name,''),u.full_name,e.full_name) ILIKE $2
+     OR COALESCE(u.email,e.email,'') ILIKE $2 OR e.roll_number ILIKE $2 OR e.claim_code ILIKE $2)
+  `+filters+`), matches AS (
+   SELECT DISTINCT ON (COALESCE(user_id::text,enrollment_id::text))
+    user_id,enrollment_id,name,email,state,grade,section
+   FROM people ORDER BY COALESCE(user_id::text,enrollment_id::text),touched DESC
+  ) SELECT * FROM matches ORDER BY name,user_id,enrollment_id `+
+		" LIMIT $"+strconv.Itoa(len(args)-1)+" OFFSET $"+strconv.Itoa(len(args)), args...)
+
 	if err != nil {
 		middleware.InternalError(w)
 		return
@@ -53,12 +64,21 @@ func (h *Handler) FindStudents(w http.ResponseWriter, r *http.Request) {
 		Name         string  `json:"name"`
 		Email        string  `json:"email"`
 		State        string  `json:"state"`
+		Grade        string  `json:"grade"`
+		Section      string  `json:"section"`
 	}
 	out := []match{}
 	for rows.Next() {
 		var m match
-		rows.Scan(&m.UserID, &m.EnrollmentID, &m.Name, &m.Email, &m.State)
+		if err := rows.Scan(&m.UserID, &m.EnrollmentID, &m.Name, &m.Email, &m.State, &m.Grade, &m.Section); err != nil {
+			middleware.InternalError(w)
+			return
+		}
 		out = append(out, m)
+	}
+	if rows.Err() != nil {
+		middleware.InternalError(w)
+		return
 	}
 	middleware.JSON(w, http.StatusOK, out)
 }

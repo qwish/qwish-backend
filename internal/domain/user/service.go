@@ -115,6 +115,27 @@ type AttemptSummary struct {
 	PointsDelta int64      `json:"points_delta"`
 	Status      string     `json:"status"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	QuizType    string     `json:"quiz_type"`
+	Subject     *string    `json:"subject,omitempty"`
+	// Counts are only written on completion; this list only shows completed.
+	TotalCorrect   int `json:"total_correct"`
+	TotalQuestions int `json:"total_questions"`
+}
+
+// attemptSummaryFrom is the shared SELECT/FROM for attempt lists; scanAttempt
+// reads it in the same order.
+const attemptSummaryFrom = `SELECT qa.id, qa.quiz_id, q.title, COALESCE(qa.score_pct,0), COALESCE(qa.points_delta,0), qa.status, qa.completed_at,
+	        q.type, COALESCE(sd.label, d.label), COALESCE(qa.total_correct,0), COALESCE(qa.total_questions,0)
+	 FROM quiz_attempts qa
+	 JOIN quizzes q ON q.id = qa.quiz_id
+	 LEFT JOIN domains d ON d.slug = q.domain
+	 LEFT JOIN subdomains sd ON sd.slug = q.subdomain`
+
+func scanAttempt(rows pgx.Rows) (AttemptSummary, error) {
+	var a AttemptSummary
+	err := rows.Scan(&a.ID, &a.QuizID, &a.QuizTitle, &a.ScorePct, &a.PointsDelta, &a.Status, &a.CompletedAt,
+		&a.QuizType, &a.Subject, &a.TotalCorrect, &a.TotalQuestions)
+	return a, err
 }
 
 func (s *Service) GetProfile(ctx context.Context, userID string) (*Profile, error) {
@@ -453,9 +474,7 @@ func (s *Service) GetAttempts(ctx context.Context, userID string, page, limit in
 	).Scan(&total)
 
 	rows, err := s.db.Query(ctx,
-		`SELECT qa.id, qa.quiz_id, q.title, COALESCE(qa.score_pct,0), COALESCE(qa.points_delta,0), qa.status, qa.completed_at
-		 FROM quiz_attempts qa
-		 JOIN quizzes q ON q.id = qa.quiz_id
+		attemptSummaryFrom+`
 		 WHERE qa.user_id=$1 AND qa.status='completed' AND ($2='' OR q.type=$2) AND ($3::timestamptz IS NULL OR qa.completed_at >= $3)
 		 ORDER BY qa.completed_at DESC, qa.id DESC
 		 LIMIT $4 OFFSET $5`, userID, quizType, since, limit, offset)
@@ -466,8 +485,10 @@ func (s *Service) GetAttempts(ctx context.Context, userID string, page, limit in
 
 	var attempts []AttemptSummary
 	for rows.Next() {
-		var a AttemptSummary
-		rows.Scan(&a.ID, &a.QuizID, &a.QuizTitle, &a.ScorePct, &a.PointsDelta, &a.Status, &a.CompletedAt)
+		a, err := scanAttempt(rows)
+		if err != nil {
+			return nil, 0, err
+		}
 		attempts = append(attempts, a)
 	}
 	if attempts == nil {
@@ -481,8 +502,7 @@ func (s *Service) GetAttemptsAfter(ctx context.Context, userID string, at time.T
 	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id WHERE qa.user_id=$1 AND qa.status='completed' AND ($2='' OR q.type=$2) AND ($3::timestamptz IS NULL OR qa.completed_at >= $3)`, userID, quizType, since).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.db.Query(ctx, `SELECT qa.id,qa.quiz_id,q.title,COALESCE(qa.score_pct,0),COALESCE(qa.points_delta,0),qa.status,qa.completed_at
-		FROM quiz_attempts qa JOIN quizzes q ON q.id=qa.quiz_id
+	rows, err := s.db.Query(ctx, attemptSummaryFrom+`
 		WHERE qa.user_id=$1 AND qa.status='completed' AND (qa.completed_at,qa.id)<($2,$3::uuid)
 		AND ($4='' OR q.type=$4) AND ($5::timestamptz IS NULL OR qa.completed_at >= $5)
 		ORDER BY qa.completed_at DESC,qa.id DESC LIMIT $6`, userID, at, id, quizType, since, limit)
@@ -492,8 +512,8 @@ func (s *Service) GetAttemptsAfter(ctx context.Context, userID string, at time.T
 	defer rows.Close()
 	out := []AttemptSummary{}
 	for rows.Next() {
-		var a AttemptSummary
-		if err := rows.Scan(&a.ID, &a.QuizID, &a.QuizTitle, &a.ScorePct, &a.PointsDelta, &a.Status, &a.CompletedAt); err != nil {
+		a, err := scanAttempt(rows)
+		if err != nil {
 			return nil, 0, err
 		}
 		out = append(out, a)

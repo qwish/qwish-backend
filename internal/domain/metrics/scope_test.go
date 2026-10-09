@@ -84,20 +84,20 @@ func TestScopeNoneEmitsNoPredicate(t *testing.T) {
 }
 
 func TestSelectMetricsDropsByKind(t *testing.T) {
-	// topic_requests has an institution column but no teacher linkage.
-	_, dropped, err := SelectMetrics([]string{"topic_requests"}, ScopeClasses)
+	// Reports have no teacher or institution linkage.
+	_, dropped, err := SelectMetrics([]string{"reports_opened"}, ScopeClasses)
 	if err != nil {
 		t.Fatalf("SelectMetrics: %v", err)
 	}
-	if len(dropped) != 1 || dropped[0].ID != "topic_requests" {
-		t.Fatalf("want topic_requests dropped, got %+v", dropped)
+	if len(dropped) != 1 || dropped[0].ID != "reports_opened" {
+		t.Fatalf("want reports_opened dropped, got %+v", dropped)
 	}
 	if dropped[0].Reason == "" {
 		t.Error("dropped metric carries no reason")
 	}
 
-	// Same metric survives an institution scope.
-	sel, dropped, err := SelectMetrics([]string{"topic_requests"}, ScopeInstitution)
+	// Same metric survives an unscoped platform query.
+	sel, dropped, err := SelectMetrics([]string{"reports_opened"}, ScopeNone)
 	if err != nil {
 		t.Fatalf("SelectMetrics: %v", err)
 	}

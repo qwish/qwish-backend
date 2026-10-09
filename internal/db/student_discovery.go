@@ -27,7 +27,7 @@ func StudentDiscoverySQL(q url.Values, args *[]interface{}) string {
 		add("u.last_active_at >= now() - ($%d::int * interval '1 day')", days)
 	}
 	if interest := strings.TrimSpace(q.Get("interest")); interest != "" {
-		add("EXISTS (SELECT 1 FROM unnest(u.interests) interest WHERE interest ILIKE $%d)", "%"+interest+"%")
+		add("EXISTS (SELECT 1 FROM unnest(u.interest_domains) interest WHERE interest ILIKE $%d)", "%"+interest+"%")
 	}
 	skill, experience := strings.TrimSpace(q.Get("skill")), strings.TrimSpace(q.Get("experience"))
 	if skill != "" || experience != "" {

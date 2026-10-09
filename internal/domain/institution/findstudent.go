@@ -45,7 +45,7 @@ func (h *Handler) FindStudents(w http.ResponseWriter, r *http.Request) {
    FROM enrollments e LEFT JOIN users u ON u.id=e.user_id AND u.deleted_at IS NULL
    WHERE e.institution_id=$1
     AND (COALESCE(NULLIF(u.display_name,''),u.full_name,e.full_name) ILIKE $2
-     OR COALESCE(u.email,e.email,'') ILIKE $2 OR e.roll_number ILIKE $2 OR e.claim_code ILIKE $2)
+     OR COALESCE(u.email,e.email,'') ILIKE $2)
   `+filters+`), matches AS (
    SELECT DISTINCT ON (COALESCE(user_id::text,enrollment_id::text))
     user_id,enrollment_id,name,email,state,grade,section

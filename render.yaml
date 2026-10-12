@@ -5,7 +5,9 @@ services:
     buildCommand: go build -o bin/api ./cmd/api
     startCommand: ./bin/api
     healthCheckPath: /health
-    autoDeploy: true
+    # Deploys are manual: a push to main must not ship on its own (migrations
+    # run on boot and can't be rolled back by redeploying).
+    autoDeploy: false
     envVars:
       - key: PORT
         value: 8080
@@ -15,9 +17,9 @@ services:
       # instead of letting a traffic spike get the process OOM-killed.
       - key: GOMEMLIMIT
         value: 400MiB
-      # go.mod requires 1.27.1; Render's default toolchain lags, so pin it.
+      # go.mod requires 1.27.2; Render's default toolchain lags, so pin it.
       - key: GO_VERSION
-        value: 1.27.1
+        value: 1.27.2
       # The database/auth settings below are mustEnv in internal/config/config.go — the process
       # log.Fatalf's on boot if any is unset.
       - key: DATABASE_URL

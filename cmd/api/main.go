@@ -133,6 +133,7 @@ func main() {
 	streakH := streak.NewHandler(streakSvc)
 	leaderboardH := leaderboard.NewHandler(pool)
 	parentH := parent.NewHandler(pool)
+	consentGate := parent.RequireConsent(pool)
 	uploadH := upload.NewHandler(s3Client)
 	enrollmentSvc := enrollment.NewService(pool)
 	enrollmentSvc.SetMailer(func(ctx context.Context, to, subject, body string) error {
@@ -683,15 +684,15 @@ func main() {
 				r.Delete("/users/me/emails/{emailId}", userEmailH.Remove)
 
 				// Social: batchmate follows
-				r.Post("/users/{userId}/follow", studyGroupH.Follow)
+				r.With(consentGate).Post("/users/{userId}/follow", studyGroupH.Follow)
 				r.Delete("/users/{userId}/follow", studyGroupH.Unfollow)
 				r.Get("/users/me/following", studyGroupH.Following)
 				r.Get("/users/me/followers", studyGroupH.Followers)
 
 				// Study groups (private leagues)
-				r.Post("/study-groups", studyGroupH.Create)
+				r.With(consentGate).Post("/study-groups", studyGroupH.Create)
 				r.Get("/study-groups", studyGroupH.ListMine)
-				r.Post("/study-groups/join", studyGroupH.Join)
+				r.With(consentGate).Post("/study-groups/join", studyGroupH.Join)
 				r.Get("/study-groups/{groupId}", studyGroupH.Get)
 				r.Delete("/study-groups/{groupId}", studyGroupH.Archive)
 				r.Post("/study-groups/{groupId}/leave", studyGroupH.Leave)

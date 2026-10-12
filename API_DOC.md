@@ -322,6 +322,7 @@ Creates the profile for a newly verified user. Only call this when `verify-otp` 
 | Field | Required | Notes |
 |-------|----------|-------|
 | `full_name` | Yes | |
+| `date_of_birth` | No | `YYYY-MM-DD` from the app's neutral age screen. Not editable later. Under 18 → `display_name` is set to the first name only, and social features need a linked parent (see `parental_consent_required`). Older app builds omit it; the user is then treated as an adult. 400 if not a real past date. |
 | `referral_code` | No | Determines institution and role (`student` or `teacher`) |
 
 ### Response `201`
@@ -428,9 +429,13 @@ Returns the authenticated user's full profile.
   "total_points":   1250,
   "current_streak": 5,
   "longest_streak": 12,
-  "member_since":   "2024-01-15T00:00:00Z"
+  "member_since":   "2024-01-15T00:00:00Z",
+  "is_minor":                  false,
+  "parental_consent_required": false
 }
 ```
+
+`is_minor`: date of birth under 18 years ago. `parental_consent_required`: a minor with no active parent link. While true, `POST /users/{userId}/follow`, `POST /study-groups` and `POST /study-groups/join` return `403 PARENTAL_CONSENT_REQUIRED`, the public profile is private to everyone else, and the app turns analytics off. A parent withdraws consent by revoking the link.
 
 ---
 
@@ -3835,6 +3840,8 @@ Uploads practice sessions completed offline. Idempotent on `id` (client-generate
 Response: `{ "received": 1, "stored": 1 }` (`stored` counts only newly-persisted, not re-syncs).
 
 ## Study Groups (Private Leagues) & Follows
+
+> Follow, create and join return `403 PARENTAL_CONSENT_REQUIRED` while the caller's `parental_consent_required` is true (see `GET /users/me`).
 
 ### POST `/study-groups`
 Body: `{ "name": "Batch 2026", "description": "optional" }` → creates a group, caller becomes owner & first member. Returns the group with a unique `invite_code`.

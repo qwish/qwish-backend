@@ -28,7 +28,8 @@ func TestPublicProfileShowsStanding(t *testing.T) {
 	defer pool.Close()
 	_, err = pool.Exec(ctx, `
  CREATE TEMP TABLE users(id text,display_name text,institution_id text,total_points int,current_streak int,longest_streak int,profile_private bool,recruiter_visible bool,deleted_at timestamptz,status text,role text,member_since timestamptz,
-   hidden_profile_sections text[] NOT NULL DEFAULT '{}',interest_domains text[] NOT NULL DEFAULT '{}');
+   hidden_profile_sections text[] NOT NULL DEFAULT '{}',interest_domains text[] NOT NULL DEFAULT '{}',date_of_birth date);
+ CREATE TEMP TABLE parent_student_links(student_id text,status text);
  CREATE TEMP TABLE user_profile_entries(user_id text,kind text,subtype text,title text,org text,start_date date,end_date date,ongoing bool,skills text[],pinned bool,status text);
  CREATE TEMP TABLE institutions(id text,name text);
  CREATE TEMP TABLE user_follows(follower_id text,followee_id text);

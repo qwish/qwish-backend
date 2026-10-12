@@ -308,13 +308,17 @@ func (s *Service) ActivateAdmin(ctx context.Context, id string) (bool, error) {
 }
 
 // CreateUser inserts a new user into the users table.
-func (s *Service) CreateUser(ctx context.Context, supabaseUID, fullName, email, role string, institutionID *string, status string) (UserProfile, error) {
+// A minor (dateOfBirth under 18 years ago) is ranked by first name only, so
+// leaderboards don't carry a child's full name.
+func (s *Service) CreateUser(ctx context.Context, supabaseUID, fullName, email, role string, institutionID *string, status string, dateOfBirth *time.Time) (UserProfile, error) {
 	var u UserProfile
 	err := s.db.QueryRow(ctx,
-		`INSERT INTO users (supabase_uid, full_name, display_name, email, role, institution_id, status)
-		 VALUES ($1, $2, $2, $3, $4, $5, $6)
+		`INSERT INTO users (supabase_uid, full_name, display_name, email, role, institution_id, status, date_of_birth)
+		 VALUES ($1, $2,
+		         CASE WHEN $7::date > current_date - interval '18 years' THEN split_part(btrim($2), ' ', 1) ELSE $2 END,
+		         $3, $4, $5, $6, $7)
 		 RETURNING id, full_name, display_name, email, role, institution_id, status, total_points, current_streak, longest_streak, member_since`,
-		supabaseUID, fullName, email, role, institutionID, status,
+		supabaseUID, fullName, email, role, institutionID, status, dateOfBirth,
 	).Scan(&u.ID, &u.FullName, &u.DisplayName, &u.Email, &u.Role,
 		&u.InstitutionID, &u.Status, &u.TotalPoints, &u.CurrentStreak, &u.LongestStreak, &u.MemberSince)
 	if err != nil {

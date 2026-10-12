@@ -50,6 +50,10 @@ type Profile struct {
 	LongestStreak int        `json:"longest_streak"`
 	MemberSince   time.Time  `json:"member_since"`
 	LastActiveAt  *time.Time `json:"last_active_at,omitempty"`
+	// Age gate (migration 101): IsMinor drives the app's safety reminder,
+	// ParentalConsentRequired its social and analytics lock.
+	IsMinor                 bool `json:"is_minor"`
+	ParentalConsentRequired bool `json:"parental_consent_required"`
 }
 
 type InstInfo struct {
@@ -172,10 +176,13 @@ func (s *Service) GetProfile(ctx context.Context, userID string) (*Profile, erro
 	var instID *string
 	err := s.db.QueryRow(ctx,
 		`SELECT u.id, u.full_name, u.display_name, u.email, u.role, u.institution_id,
-		        u.status, u.total_points, u.current_streak, u.longest_streak, u.member_since, u.last_active_at
+		        u.status, u.total_points, u.current_streak, u.longest_streak, u.member_since, u.last_active_at,
+		        COALESCE(u.date_of_birth > current_date - interval '18 years', false),
+		        parental_consent_required(u.id)
 		 FROM users u WHERE u.id = $1 AND u.deleted_at IS NULL`, userID,
 	).Scan(&p.ID, &p.FullName, &p.DisplayName, &p.Email, &p.Role, &instID,
-		&p.Status, &p.TotalPoints, &p.CurrentStreak, &p.LongestStreak, &p.MemberSince, &p.LastActiveAt)
+		&p.Status, &p.TotalPoints, &p.CurrentStreak, &p.LongestStreak, &p.MemberSince, &p.LastActiveAt,
+		&p.IsMinor, &p.ParentalConsentRequired)
 	if err != nil {
 		return nil, err
 	}
@@ -197,17 +204,24 @@ func (s *Service) GetProfile(ctx context.Context, userID string) (*Profile, erro
 func (s *Service) GetPublicProfile(ctx context.Context, viewerID, targetID string) (*PublicProfile, error) {
 	p := &PublicProfile{}
 	var instName *string
-	var profilePrivate, recruiterVisible bool
+	var profilePrivate, recruiterVisible, consentRequired bool
 	var hidden, interestSlugs []string
 	err := s.db.QueryRow(ctx,
 		`SELECT u.id, u.display_name, i.name, u.total_points, u.current_streak, u.longest_streak,
-		        u.profile_private, u.recruiter_visible, u.hidden_profile_sections, u.interest_domains
+		        u.profile_private, u.recruiter_visible, u.hidden_profile_sections, u.interest_domains,
+		        COALESCE(u.date_of_birth > current_date - interval '18 years', false)
+		          AND NOT EXISTS (SELECT 1 FROM parent_student_links l
+		                           WHERE l.student_id = u.id AND l.status = 'active')
 		 FROM users u
 		 LEFT JOIN institutions i ON i.id = u.institution_id
 		 WHERE u.id = $1 AND u.deleted_at IS NULL AND u.status = 'active'`, targetID,
-	).Scan(&p.ID, &p.DisplayName, &instName, &p.TotalPoints, &p.CurrentStreak, &p.LongestStreak, &profilePrivate, &recruiterVisible, &hidden, &interestSlugs)
+	).Scan(&p.ID, &p.DisplayName, &instName, &p.TotalPoints, &p.CurrentStreak, &p.LongestStreak, &profilePrivate, &recruiterVisible, &hidden, &interestSlugs, &consentRequired)
 	if err != nil {
 		return nil, err
+	}
+	// A minor's profile stays with them until a parent has linked.
+	if consentRequired && viewerID != targetID {
+		return nil, ErrProfilePrivate
 	}
 
 	if publicProfileNeedsFollow(viewerID, targetID, profilePrivate, recruiterVisible) {

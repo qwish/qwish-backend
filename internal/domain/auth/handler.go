@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -251,10 +252,11 @@ func (h *Handler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/auth/create-profile
 // Creates a profile for a newly verified user. Requires auth.
-// Body: { full_name, referral_code? }
+// Body: { full_name, date_of_birth?, referral_code? }
 func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		FullName          string `json:"full_name"`
+		DateOfBirth       string `json:"date_of_birth"` // YYYY-MM-DD, neutral age screen; older apps omit it
 		ReferralCode      string `json:"referral_code"`
 		InviteToken       string `json:"invite_token"`       // teacher email-invite token
 		OnboardingSession string `json:"onboarding_session"` // pre-signup calibration
@@ -266,6 +268,15 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 	if req.FullName == "" {
 		middleware.BadRequest(w, "full_name is required")
 		return
+	}
+	var dob *time.Time
+	if req.DateOfBirth != "" {
+		d, err := time.Parse(time.DateOnly, req.DateOfBirth)
+		if err != nil || d.After(time.Now()) || d.Before(time.Now().AddDate(-120, 0, 0)) {
+			middleware.BadRequest(w, "date_of_birth must be a real date (YYYY-MM-DD)")
+			return
+		}
+		dob = &d
 	}
 
 	uid := middleware.GetSupabaseUID(r)
@@ -334,7 +345,7 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 		middleware.Error(w, http.StatusForbidden, "APP_LOGIN_DENIED", "Login failed")
 		return
 	}
-	newUser, err := h.svc.CreateUser(r.Context(), uid, req.FullName, email, role, instID, status)
+	newUser, err := h.svc.CreateUser(r.Context(), uid, req.FullName, email, role, instID, status, dob)
 	if err != nil {
 		// Lost the race to a concurrent signup between the check above and this
 		// insert. The trigger is the authority, and it names itself.

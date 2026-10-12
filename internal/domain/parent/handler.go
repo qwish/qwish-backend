@@ -221,3 +221,31 @@ func getChildOverview(ctx context.Context, db *pgxpool.Pool, studentID string) (
 		"badges":          badges,
 	}, nil
 }
+
+// ConsentRequired reports whether userID is a minor without an active parent
+// link (see migration 101).
+func ConsentRequired(ctx context.Context, db *pgxpool.Pool, userID string) (bool, error) {
+	var required bool
+	err := db.QueryRow(ctx, `SELECT parental_consent_required($1)`, userID).Scan(&required)
+	return required, err
+}
+
+// RequireConsent blocks social actions for a minor until a parent has linked
+// their account (Google Play Families policy; COPPA; India DPDP Act).
+func RequireConsent(db *pgxpool.Pool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			required, err := ConsentRequired(r.Context(), db, middleware.GetUserID(r))
+			if err != nil {
+				middleware.InternalError(w)
+				return
+			}
+			if required {
+				middleware.Error(w, http.StatusForbidden, "PARENTAL_CONSENT_REQUIRED",
+					"Ask a parent to link their Qwish account before using study groups or following learners.")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/qwish/backend/internal/cache"
+	"slices"
 	"sort"
 	"time"
 
@@ -66,6 +67,11 @@ type PublicProfile struct {
 	QuizzesCompleted int      `json:"quizzes_completed"`
 	Badges           []string `json:"badges"`
 
+	// Sections the learner has chosen to show. Hidden sections are blanked below.
+	VisibleSections []string              `json:"visible_sections"`
+	Portfolio       []PublicPortfolioItem `json:"portfolio"`
+	Interests       []PublicInterest      `json:"interests"`
+
 	QwishScore        float64    `json:"qwish_score"` // 100–900
 	Percentile        int        `json:"percentile"`  // 1–100 among active students
 	Accuracy          *float64   `json:"accuracy"`    // nil until a question is answered
@@ -75,6 +81,29 @@ type PublicProfile struct {
 	Strengths         []Strength `json:"strengths"` // strongest first, enough answers only
 	BadgeCount        int        `json:"badge_count"`
 }
+
+// PublicPortfolioItem is a portfolio entry the learner has submitted. Drafts
+// and changes-requested entries stay private.
+type PublicPortfolioItem struct {
+	Kind      string     `json:"kind"`
+	Subtype   string     `json:"subtype"`
+	Title     string     `json:"title"`
+	Org       string     `json:"org,omitempty"`
+	StartDate *time.Time `json:"start_date,omitempty"`
+	EndDate   *time.Time `json:"end_date,omitempty"`
+	Ongoing   bool       `json:"ongoing"`
+	Skills    []string   `json:"skills"`
+	Pinned    bool       `json:"pinned"`
+}
+
+// PublicInterest is a learning topic the learner chose, by display name.
+type PublicInterest struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
+// ProfileSections are the parts of the public profile a learner can hide.
+var ProfileSections = []string{"standing", "strengths", "activity", "portfolio", "interests"}
 
 // Strength is one subject the learner has answered enough questions in to
 // judge, with their accuracy there.
@@ -169,13 +198,14 @@ func (s *Service) GetPublicProfile(ctx context.Context, viewerID, targetID strin
 	p := &PublicProfile{}
 	var instName *string
 	var profilePrivate, recruiterVisible bool
+	var hidden, interestSlugs []string
 	err := s.db.QueryRow(ctx,
 		`SELECT u.id, u.display_name, i.name, u.total_points, u.current_streak, u.longest_streak,
-		        u.profile_private, u.recruiter_visible
+		        u.profile_private, u.recruiter_visible, u.hidden_profile_sections, u.interest_domains
 		 FROM users u
 		 LEFT JOIN institutions i ON i.id = u.institution_id
 		 WHERE u.id = $1 AND u.deleted_at IS NULL AND u.status = 'active'`, targetID,
-	).Scan(&p.ID, &p.DisplayName, &instName, &p.TotalPoints, &p.CurrentStreak, &p.LongestStreak, &profilePrivate, &recruiterVisible)
+	).Scan(&p.ID, &p.DisplayName, &instName, &p.TotalPoints, &p.CurrentStreak, &p.LongestStreak, &profilePrivate, &recruiterVisible, &hidden, &interestSlugs)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +276,104 @@ func (s *Service) GetPublicProfile(ctx context.Context, viewerID, targetID strin
 			}
 		}
 	}
+
+	// Hidden sections never leave the backend: blank them here.
+	p.VisibleSections = visibleSections(hidden)
+	p.Portfolio = []PublicPortfolioItem{}
+	if !slices.Contains(p.VisibleSections, "standing") {
+		p.QwishScore, p.Percentile, p.Accuracy, p.QuestionsAnswered = 0, 0, nil, 0
+	}
+	if !slices.Contains(p.VisibleSections, "strengths") {
+		p.Strengths = []Strength{}
+	}
+	if !slices.Contains(p.VisibleSections, "activity") {
+		p.CurrentStreak, p.LongestStreak, p.ActiveDays30 = 0, 0, 0
+	}
+	if slices.Contains(p.VisibleSections, "portfolio") {
+		items, err := s.publicPortfolio(ctx, targetID)
+		if err != nil {
+			return nil, err
+		}
+		p.Portfolio = items
+	}
+	p.Interests = []PublicInterest{}
+	if slices.Contains(p.VisibleSections, "interests") {
+		interests, err := s.publicInterests(ctx, interestSlugs)
+		if err != nil {
+			return nil, err
+		}
+		p.Interests = interests
+	}
 	return p, nil
+}
+
+// publicInterests resolves the learner's topic slugs to names, in the order
+// they chose them.
+func (s *Service) publicInterests(ctx context.Context, slugs []string) ([]PublicInterest, error) {
+	out := []PublicInterest{}
+	if len(slugs) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT slug, name FROM subdomains WHERE slug = ANY($1::text[])`, slugs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names := map[string]string{}
+	for rows.Next() {
+		var slug, name string
+		if err := rows.Scan(&slug, &name); err != nil {
+			return nil, err
+		}
+		names[slug] = name
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, slug := range slugs {
+		if name, ok := names[slug]; ok {
+			out = append(out, PublicInterest{Slug: slug, Name: name})
+		}
+	}
+	return out, nil
+}
+
+// visibleSections is every section not in hidden, in ProfileSections order.
+func visibleSections(hidden []string) []string {
+	out := []string{}
+	for _, sec := range ProfileSections {
+		if !slices.Contains(hidden, sec) {
+			out = append(out, sec)
+		}
+	}
+	return out
+}
+
+// publicPortfolio returns the learner's submitted and reviewed entries,
+// pinned first, newest first. Drafts stay private.
+func (s *Service) publicPortfolio(ctx context.Context, userID string) ([]PublicPortfolioItem, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT kind, COALESCE(subtype,''), title, COALESCE(org,''), start_date, end_date, ongoing, skills, pinned
+		  FROM user_profile_entries
+		 WHERE user_id = $1 AND status IN ('submitted','reviewed')
+		 ORDER BY pinned DESC, start_date DESC NULLS LAST
+		 LIMIT 12`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PublicPortfolioItem{}
+	for rows.Next() {
+		var it PublicPortfolioItem
+		if err := rows.Scan(&it.Kind, &it.Subtype, &it.Title, &it.Org, &it.StartDate, &it.EndDate, &it.Ongoing, &it.Skills, &it.Pinned); err != nil {
+			return nil, err
+		}
+		if it.Skills == nil {
+			it.Skills = []string{}
+		}
+		items = append(items, it)
+	}
+	return items, rows.Err()
 }
 
 func publicProfileNeedsFollow(viewerID, targetID string, profilePrivate, recruiterVisible bool) bool {
@@ -890,25 +1017,29 @@ func (s *Service) UpdateLearningPreferences(ctx context.Context, userID, languag
 // ── Settings: theme (dark mode) + privacy ──────────────────────────────────────
 
 type Settings struct {
-	Theme            string `json:"theme"`             // 'auto' | 'light' | 'dark'
-	ProfilePrivate   bool   `json:"profile_private"`   // private by default
-	RecruiterVisible bool   `json:"recruiter_visible"` // opt-in recruiter discovery
+	Theme                 string   `json:"theme"`                   // 'auto' | 'light' | 'dark'
+	ProfilePrivate        bool     `json:"profile_private"`         // private by default
+	RecruiterVisible      bool     `json:"recruiter_visible"`       // opt-in recruiter discovery
+	HiddenProfileSections []string `json:"hidden_profile_sections"` // see ProfileSections
 }
 
 func (s *Service) GetSettings(ctx context.Context, userID string) (*Settings, error) {
 	st := &Settings{}
 	err := s.db.QueryRow(ctx,
-		`SELECT theme, profile_private, recruiter_visible FROM users WHERE id=$1`, userID,
-	).Scan(&st.Theme, &st.ProfilePrivate, &st.RecruiterVisible)
+		`SELECT theme, profile_private, recruiter_visible, hidden_profile_sections FROM users WHERE id=$1`, userID,
+	).Scan(&st.Theme, &st.ProfilePrivate, &st.RecruiterVisible, &st.HiddenProfileSections)
 	if err != nil {
 		return nil, err
+	}
+	if st.HiddenProfileSections == nil {
+		st.HiddenProfileSections = []string{}
 	}
 	return st, nil
 }
 
 // UpdateSettings applies the non-nil fields atomically. Returns ErrInvalidTheme
 // for a bad theme value.
-func (s *Service) UpdateSettings(ctx context.Context, userID string, theme *string, private, recruiter *bool) (*Settings, error) {
+func (s *Service) UpdateSettings(ctx context.Context, userID string, theme *string, private, recruiter *bool, hidden *[]string) (*Settings, error) {
 	if theme != nil {
 		switch *theme {
 		case "auto", "light", "dark":
@@ -916,16 +1047,32 @@ func (s *Service) UpdateSettings(ctx context.Context, userID string, theme *stri
 			return nil, ErrInvalidTheme
 		}
 	}
+	var hiddenArg any // nil leaves the column untouched
+	if hidden != nil {
+		for _, sec := range *hidden {
+			if !slices.Contains(ProfileSections, sec) {
+				return nil, ErrInvalidSection
+			}
+		}
+		clean := slices.Compact(slices.Sorted(slices.Values(*hidden)))
+		if clean == nil {
+			clean = []string{}
+		}
+		hiddenArg = clean
+	}
 	if _, err := s.db.Exec(ctx, `UPDATE users SET theme=COALESCE($1,theme),
 		profile_private=COALESCE($2,profile_private),
-		recruiter_visible=COALESCE($3,recruiter_visible), updated_at=now()
-		WHERE id=$4`, theme, private, recruiter, userID); err != nil {
+		recruiter_visible=COALESCE($3,recruiter_visible),
+		hidden_profile_sections=COALESCE($5,hidden_profile_sections), updated_at=now()
+		WHERE id=$4`, theme, private, recruiter, userID, hiddenArg); err != nil {
 		return nil, err
 	}
 	return s.GetSettings(ctx, userID)
 }
 
 var ErrInvalidTheme = errors.New("theme must be one of: auto, light, dark")
+
+var ErrInvalidSection = errors.New("hidden_profile_sections must only contain: standing, strengths, activity, portfolio")
 
 // ── Notification preferences ────────────────────────────────────────────────
 

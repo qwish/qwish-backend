@@ -350,16 +350,17 @@ func (h *Handler) GetMySettings(w http.ResponseWriter, r *http.Request) {
 // PATCH /api/v1/users/me/settings — update theme (dark mode) and privacy flags.
 func (h *Handler) UpdateMySettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Theme            *string `json:"theme"`
-		ProfilePrivate   *bool   `json:"profile_private"`
-		RecruiterVisible *bool   `json:"recruiter_visible"`
+		Theme                 *string   `json:"theme"`
+		ProfilePrivate        *bool     `json:"profile_private"`
+		RecruiterVisible      *bool     `json:"recruiter_visible"`
+		HiddenProfileSections *[]string `json:"hidden_profile_sections"`
 	}
 	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
 		middleware.BadRequest(w, "invalid request body")
 		return
 	}
-	st, err := h.svc.UpdateSettings(r.Context(), middleware.GetUserID(r), req.Theme, req.ProfilePrivate, req.RecruiterVisible)
-	if errors.Is(err, ErrInvalidTheme) {
+	st, err := h.svc.UpdateSettings(r.Context(), middleware.GetUserID(r), req.Theme, req.ProfilePrivate, req.RecruiterVisible, req.HiddenProfileSections)
+	if errors.Is(err, ErrInvalidTheme) || errors.Is(err, ErrInvalidSection) {
 		middleware.BadRequest(w, err.Error())
 		return
 	}

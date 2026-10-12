@@ -27,7 +27,9 @@ func TestPublicProfileShowsStanding(t *testing.T) {
 	}
 	defer pool.Close()
 	_, err = pool.Exec(ctx, `
- CREATE TEMP TABLE users(id text,display_name text,institution_id text,total_points int,current_streak int,longest_streak int,profile_private bool,recruiter_visible bool,deleted_at timestamptz,status text,role text,member_since timestamptz);
+ CREATE TEMP TABLE users(id text,display_name text,institution_id text,total_points int,current_streak int,longest_streak int,profile_private bool,recruiter_visible bool,deleted_at timestamptz,status text,role text,member_since timestamptz,
+   hidden_profile_sections text[] NOT NULL DEFAULT '{}',interest_domains text[] NOT NULL DEFAULT '{}');
+ CREATE TEMP TABLE user_profile_entries(user_id text,kind text,subtype text,title text,org text,start_date date,end_date date,ongoing bool,skills text[],pinned bool,status text);
  CREATE TEMP TABLE institutions(id text,name text);
  CREATE TEMP TABLE user_follows(follower_id text,followee_id text);
  CREATE TEMP TABLE leaderboard_scores(user_id text,qwish_score float8);
@@ -38,7 +40,7 @@ func TestPublicProfileShowsStanding(t *testing.T) {
  CREATE TEMP TABLE question_responses(attempt_id text,is_correct bool);
  CREATE TEMP TABLE badges(user_id text,badge_type text,earned_at timestamptz);
  INSERT INTO institutions VALUES('i','Greenfield College');
- INSERT INTO users VALUES('me','Asha','i',900,4,9,false,false,NULL,'active','student','2026-01-15'),
+ INSERT INTO users(id,display_name,institution_id,total_points,current_streak,longest_streak,profile_private,recruiter_visible,deleted_at,status,role,member_since) VALUES('me','Asha','i',900,4,9,false,false,NULL,'active','student','2026-01-15'),
    ('p1','P1',NULL,0,0,0,false,false,NULL,'active','student',now()),('p2','P2',NULL,0,0,0,false,false,NULL,'active','student',now()),
    ('p3','P3',NULL,0,0,0,false,false,NULL,'active','student',now()),('t','T',NULL,0,0,0,false,false,NULL,'active','teacher',now());
  INSERT INTO leaderboard_scores VALUES('me',640),('p1',300),('p2',500),('p3',700),('t',900);

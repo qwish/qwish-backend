@@ -717,19 +717,21 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 	// A downloaded answer key makes this practice: no points, like a repeat.
 	isRepeatAttempt = isRepeatAttempt || answersExposed
 
-	// Load all question responses with time_taken_ms and time_limit_seconds
+	// Start from the delivered question snapshot so unanswered questions remain
+	// in the completion result and count as incorrect against the full quiz.
 	rows, err := tx.Query(ctx,
-		`SELECT qr.question_id, qv.type, qv.correct_answer, qr.answer, qr.confidence_level, qr.clues_used, qr.combo_level, qr.points_earned,
-		        q.position, qv.prompt, qr.is_correct, q.difficulty, q.rating_b, q.rating_n,
+		`SELECT aq.question_id, qv.type, qv.correct_answer, qr.answer, qr.confidence_level,
+		        COALESCE(qr.clues_used,0), COALESCE(qr.combo_level,0), COALESCE(qr.points_earned,0),
+		        q.position, qv.prompt, COALESCE(qr.is_correct,false), q.difficulty, q.rating_b, q.rating_n,
 		        `+scoring.GuessFloorSQL+`,
 		        EXISTS (SELECT 1 FROM question_responses p JOIN quiz_attempts pa ON pa.id=p.attempt_id
-		                 WHERE pa.user_id=$2 AND pa.status='completed' AND p.question_id=qr.question_id)
-		 FROM question_responses qr
-		 JOIN questions q ON q.id = qr.question_id
-		 JOIN quiz_attempt_questions aq ON aq.attempt_id=qr.attempt_id AND aq.question_id=qr.question_id
+		                 WHERE pa.user_id=$2 AND pa.status='completed' AND p.question_id=aq.question_id)
+		 FROM quiz_attempt_questions aq
+		 JOIN questions q ON q.id = aq.question_id
 		 JOIN question_versions qv ON qv.id=aq.question_version_id
-		 WHERE qr.attempt_id=$1
-		 ORDER BY q.position`, attemptID, userID)
+		 LEFT JOIN question_responses qr ON qr.attempt_id=aq.attempt_id AND qr.question_id=aq.question_id
+		 WHERE aq.attempt_id=$1
+		 ORDER BY aq.position`, attemptID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -758,20 +760,18 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 			return nil, err
 		}
 
-		rawPoints += ptsEarned
-		answered++
+		if studentAns != nil {
+			rawPoints += ptsEarned
+			answered++
+			totalDifficulty += qDifficulty
+		}
 		if isCorrect {
 			totalCorrect++
 		}
 
-		// Derived per-question difficulty (refined nightly; read live — an
-		// attempt lasts minutes so mid-flight drift is negligible).
-		// ponytail: snapshot per-question difficulty only if that drift bites.
-		totalDifficulty += qDifficulty
-
 		// Only a first sight of a question measures ability; repeats measure
 		// memory of it and would let practice on one quiz inflate the rating.
-		if !seenBefore && !answersExposed && qid != nil {
+		if studentAns != nil && !seenBefore && !answersExposed && qid != nil {
 			b := scoring.SeedDifficulty(qDifficulty)
 			if ratingB != nil {
 				b = *ratingB
@@ -1012,12 +1012,12 @@ func (s *Service) GetResult(ctx context.Context, userID, attemptID string) (map[
 		return nil, fmt.Errorf("attempt is not completed")
 	}
 	breakdown := []QuestionBreakdownItem{}
-	rows, err := s.db.Query(ctx, `SELECT q.position,qv.prompt,qr.answer,qv.correct_answer,qr.is_correct,qr.points_earned
-		FROM question_responses qr
-		JOIN quiz_attempt_questions aq ON aq.attempt_id=qr.attempt_id AND aq.question_id=qr.question_id
-		JOIN questions q ON q.id=qr.question_id
+	rows, err := s.db.Query(ctx, `SELECT aq.position,qv.prompt,qr.answer,qv.correct_answer,COALESCE(qr.is_correct,false),COALESCE(qr.points_earned,0)
+		FROM quiz_attempt_questions aq
+		JOIN questions q ON q.id=aq.question_id
 		JOIN question_versions qv ON qv.id=aq.question_version_id
-		WHERE qr.attempt_id=$1 ORDER BY q.position`, attemptID)
+		LEFT JOIN question_responses qr ON qr.attempt_id=aq.attempt_id AND qr.question_id=aq.question_id
+		WHERE aq.attempt_id=$1 ORDER BY aq.position`, attemptID)
 	if err != nil {
 		return nil, err
 	}
@@ -1189,7 +1189,11 @@ func (s *Service) legacyCompletion(ctx context.Context, tx pgx.Tx, userID, attem
 	} else if resp.ScorePct >= 50 {
 		resp.PerformanceBadge = "good"
 	}
-	rows, err := tx.Query(ctx, `SELECT aq.position,LEFT(qv.prompt,80),qr.answer,qv.correct_answer,qr.is_correct,qr.points_earned FROM question_responses qr JOIN quiz_attempt_questions aq ON aq.attempt_id=qr.attempt_id AND aq.question_id=qr.question_id JOIN question_versions qv ON qv.id=aq.question_version_id WHERE qr.attempt_id=$1 ORDER BY aq.position`, attemptID)
+	rows, err := tx.Query(ctx, `SELECT aq.position,LEFT(qv.prompt,80),qr.answer,qv.correct_answer,COALESCE(qr.is_correct,false),COALESCE(qr.points_earned,0)
+		FROM quiz_attempt_questions aq
+		JOIN question_versions qv ON qv.id=aq.question_version_id
+		LEFT JOIN question_responses qr ON qr.attempt_id=aq.attempt_id AND qr.question_id=aq.question_id
+		WHERE aq.attempt_id=$1 ORDER BY aq.position`, attemptID)
 	if err != nil {
 		return nil, err
 	}

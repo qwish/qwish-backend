@@ -15,16 +15,28 @@ func RegisterJobs(q *jobs.Queue) {
 		if err := json.Unmarshal(j.Payload, &p); err != nil {
 			return nil, err
 		}
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,1))`, p.QuizID); err != nil {
-			return nil, err
-		}
-		// Capture pending IDs before rebuilding, so only changes included in the
-		// rebuild are acknowledged. Other running workers retain their own leases.
-		var pending []string
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(array_agg(id::text),'{}') FROM background_jobs WHERE kind='quiz_stats' AND state='pending' AND payload->>'quiz_id'=$1`, p.QuizID).Scan(&pending); err != nil {
-			return nil, err
-		}
-		_, err := tx.Exec(ctx, `INSERT INTO quiz_read_stats(quiz_id,completions,completed_attempts,started_count,avg_score_pct,avg_seconds,difficulty,updated_at)
+		return nil, rebuildQuizStats(ctx, tx, p.QuizID)
+	})
+}
+
+// rebuildQuizStats recomputes one quiz's read model and acknowledges the
+// pending quiz_stats jobs that rebuild covers.
+func rebuildQuizStats(ctx context.Context, tx pgx.Tx, quizID string) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,1))`, quizID); err != nil {
+		return err
+	}
+	// Capture pending IDs before rebuilding, so only changes included in the
+	// rebuild are acknowledged. Other running workers retain their own leases.
+	// Lock them now, skipping any another worker holds: waiting on such a row
+	// while holding the advisory lock that worker needs is a deadlock, and the
+	// holder rebuilds for its own job anyway.
+	var pending []string
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(array_agg(id::text),'{}') FROM (
+		SELECT id FROM background_jobs WHERE kind='quiz_stats' AND state='pending' AND payload->>'quiz_id'=$1
+		FOR UPDATE SKIP LOCKED) mine`, quizID).Scan(&pending); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO quiz_read_stats(quiz_id,completions,completed_attempts,started_count,avg_score_pct,avg_seconds,difficulty,updated_at)
  SELECT q.id,a.users,a.completed,a.started,a.score,a.seconds,d.difficulty,now()
  FROM quizzes q CROSS JOIN LATERAL (
  SELECT count(*) started,count(*) FILTER(WHERE status='completed') completed,count(DISTINCT user_id) FILTER(WHERE status='completed') users,
@@ -33,11 +45,10 @@ func RegisterJobs(q *jobs.Queue) {
  FROM quiz_attempts WHERE quiz_id=q.id)a
  CROSS JOIN LATERAL (SELECT avg(difficulty)::float8 difficulty FROM questions WHERE quiz_id=q.id)d WHERE q.id=$1
  ON CONFLICT(quiz_id) DO UPDATE SET completions=EXCLUDED.completions,completed_attempts=EXCLUDED.completed_attempts,started_count=EXCLUDED.started_count,
- avg_score_pct=EXCLUDED.avg_score_pct,avg_seconds=EXCLUDED.avg_seconds,difficulty=EXCLUDED.difficulty,updated_at=now()`, p.QuizID)
-		if err != nil {
-			return nil, err
-		}
-		_, err = tx.Exec(ctx, `UPDATE background_jobs SET state='completed',updated_at=now() WHERE id=ANY($1::uuid[]) AND state='pending'`, pending)
-		return nil, err
-	})
+ avg_score_pct=EXCLUDED.avg_score_pct,avg_seconds=EXCLUDED.avg_seconds,difficulty=EXCLUDED.difficulty,updated_at=now()`, quizID)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE background_jobs SET state='completed',updated_at=now() WHERE id=ANY($1::uuid[]) AND state='pending'`, pending)
+	return err
 }

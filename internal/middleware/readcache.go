@@ -23,7 +23,7 @@ func (e *uncacheable) Error() string { return "response is not cacheable" }
 
 type ResponseCache struct{ store *cache.Cache[cachedResponse] }
 
-func NewResponseCache() *ResponseCache { return &ResponseCache{cache.New[cachedResponse](128)} }
+func NewResponseCache() *ResponseCache { return &ResponseCache{cache.New[cachedResponse](1024)} }
 func (c *ResponseCache) Clear()        { c.store.Clear() }
 func (c *ResponseCache) Stats() map[string]any {
 	return map[string]any{"hits": c.store.Hits.Load(), "misses": c.store.Misses.Load(), "entries": c.store.Len()}
@@ -106,21 +106,74 @@ func (c *ResponseCache) Wrap(ttl time.Duration, h http.HandlerFunc) http.Handler
 	}
 }
 
-// ClearOnWrite removes local cached reads immediately after successful mutation.
+type actorKey struct{}
+
+// actor is filled in by authentication so ClearOnWrite, which runs outside it,
+// knows whose request just wrote.
+type actor struct{ user, admin string }
+
+func noteActor(ctx context.Context, user, admin string) {
+	if a, ok := ctx.Value(actorKey{}).(*actor); ok {
+		a.user, a.admin = user, admin
+	}
+}
+
+// ClearOnWrite drops the writer's own cached reads after a mutation, so people
+// always see their own changes. Other users' entries are left to their TTL or
+// to table-level invalidation: one learner answering a question must not
+// clear every dashboard.
 func (c *ResponseCache) ClearOnWrite(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
-		if r.Method != "GET" && r.Method != "HEAD" && r.Method != "OPTIONS" {
-			c.Invalidate("mutation")
+		if r.Method == "GET" || r.Method == "HEAD" || r.Method == "OPTIONS" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		who := &actor{}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), actorKey{}, who)))
+		if who.user != "" || who.admin != "" {
+			c.InvalidateUser(who.user, who.admin)
 		}
 	})
 }
 
-// Independent taxonomy/metadata survives ordinary learner traffic. Other
-// caches are invalidated conservatively when their dependencies change.
+// InvalidateUser removes every cached read keyed to this identity.
+func (c *ResponseCache) InvalidateUser(user, admin string) {
+	head, _ := json.Marshal([]string{user, admin})
+	prefix := strings.TrimSuffix(string(head), "]") + ","
+	c.store.Invalidate(func(key string) bool { return strings.HasPrefix(key, prefix) })
+}
+
+// activityTables change constantly as learners play: attempts, answers, scores,
+// streaks, points, sessions and last-seen stamps. Cached reads built on them
+// expire with their TTL (10–30s) instead of being cleared on every write; the
+// writer's own entries are cleared by ClearOnWrite. Every table not listed
+// here still clears the cache, so a new table is safe by default.
+var activityTables = map[string]bool{
+	"quiz_attempts": true, "quiz_attempt_questions": true, "question_responses": true,
+	"clue_reveals": true, "learning_evidence": true, "learning_evidence_misconceptions": true,
+	"leaderboard_scores": true, "learner_ratings": true, "learner_topic_mastery": true,
+	"quiz_read_stats": true, "attempt_daily_metrics": true, "points_ledger": true,
+	"streaks": true, "badges": true, "saved_quizzes": true, "quiz_ratings": true,
+	"learning_assignment_recipients": true, "practice_sessions": true,
+	// questions churns from difficulty calibration after every completion; an
+	// author's edit is visible to the author at once and to others within TTL.
+	"questions": true,
+	// users is written on every attempt (last_active_at, points, streak). Role,
+	// status and institution are checked live by authentication and are part
+	// of every cache key, so a permission change never serves stale scope.
+	"users": true, "admin_sessions": true,
+	"user_notifications": true, "notification_preferences": true, "device_tokens": true,
+	"recommendation_bandit_stats": true, "content_delivery_events": true, "profile_views": true,
+}
+
+// IsActivityTable reports whether writes to table are left to cache TTLs.
+func IsActivityTable(table string) bool { return activityTables[table] }
+
+// Invalidate reacts to a committed write on table. Learner activity is left to
+// TTLs; content, membership and configuration changes clear cached reads.
+// Taxonomy/metadata entries survive everything except taxonomy changes.
 func (c *ResponseCache) Invalidate(table string) {
-	switch table {
-	case "user_notifications", "notification_preferences", "device_tokens", "recommendation_bandit_stats", "content_delivery_events", "profile_views":
+	if activityTables[table] {
 		return
 	}
 	c.store.Invalidate(func(key string) bool {

@@ -198,6 +198,7 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 					Error(w, http.StatusForbidden, "APP_LOGIN_DENIED", "Login failed")
 					return
 				}
+				noteActor(r.Context(), adminID, adminID)
 				ctx := context.WithValue(r.Context(), ContextKeyAdminID, adminID)
 				ctx = context.WithValue(ctx, ContextKeyUserID, adminID)
 				ctx = context.WithValue(ctx, ContextKeyRole, adminRole)
@@ -236,6 +237,11 @@ func Authenticate(jwtSecret, supabaseURL string, db *pgxpool.Pool) func(http.Han
 				}
 			}
 
+			if adminPrincipal {
+				noteActor(r.Context(), u.ID, adminID)
+			} else {
+				noteActor(r.Context(), u.ID, "")
+			}
 			ctx = context.WithValue(r.Context(), ContextKeyUserID, u.ID)
 			ctx = context.WithValue(ctx, ContextKeyUserRecord, true)
 			ctx = context.WithValue(ctx, ContextKeyRole, u.Role)

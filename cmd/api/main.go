@@ -210,8 +210,9 @@ func main() {
 		case "institutions", "enrollments", "group_students":
 			leaderboardH.ClearCache()
 		}
-		switch table {
-		case "users", "quizzes", "questions", "quiz_attempts", "quiz_read_stats", "learner_topic_mastery":
+		// Recommendations follow the same rule as cached responses: learner
+		// activity expires through their 15s TTL; content changes clear them.
+		if !mw.IsActivityTable(table) {
 			userSvc.ClearRecommendationCache()
 		}
 		if table == "point_economy_config" {

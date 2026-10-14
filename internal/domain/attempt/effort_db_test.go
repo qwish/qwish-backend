@@ -122,4 +122,18 @@ func TestCompleteDiscountsLowEffortAnswers(t *testing.T) {
 	if d := discounts(cID); len(d) != 1 || d[1] != 0.5 {
 		t.Fatalf("only question 1 should be discounted 0.5, got %v", d)
 	}
+
+	// Hidden time past int32 in total (50 day-long events, each individually
+	// valid) must still complete and discount, not overflow the sum.
+	_, dID := play(newUser("student", "d"), 20000, func(st *StartAttemptResp) []BehaviorEvent {
+		q0 := st.Questions[0].ID
+		evs := make([]BehaviorEvent, 50)
+		for i := range evs {
+			evs[i] = BehaviorEvent{ClientEventID: uuid.NewString(), EventType: "focus_gained", QuestionID: &q0, HiddenMs: hidden(86400000)}
+		}
+		return evs
+	})
+	if d := discounts(dID); len(d) != 1 || d[1] != 0.5 {
+		t.Fatalf("huge hidden total should discount question 1 by 0.5, got %v", d)
+	}
 }

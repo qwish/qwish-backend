@@ -738,7 +738,7 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		 JOIN question_versions qv ON qv.id=aq.question_version_id
 		 LEFT JOIN question_responses qr ON qr.attempt_id=aq.attempt_id AND qr.question_id=aq.question_id
 		 LEFT JOIN LATERAL (
-		   SELECT SUM(e.hidden_ms)::int ms FROM attempt_behavior_events e
+		   SELECT SUM(e.hidden_ms) ms FROM attempt_behavior_events e
 		    WHERE e.attempt_id=aq.attempt_id AND e.question_id=aq.question_id
 		 ) hid ON true
 		 WHERE aq.attempt_id=$1

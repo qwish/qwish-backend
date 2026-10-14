@@ -219,7 +219,12 @@ func main() {
 		}
 	})
 	go notifSvc.StartBroadcast(ctx, workerPool)
-	queue.Start(ctx, 3)
+	// Each worker holds a worker-pool connection while it runs a job, beside the
+	// two LISTEN connections and one spare for the scheduler and maintenance.
+	if need := int32(cfg.JobWorkers) + 3; workerPool.Config().MaxConns < need {
+		log.Fatalf("JOB_WORKERS=%d needs WORKER_DB_MAX_CONNS of at least %d", cfg.JobWorkers, need)
+	}
+	queue.Start(ctx, cfg.JobWorkers)
 	defer queue.Wait()
 	// Router
 	r := chi.NewRouter()

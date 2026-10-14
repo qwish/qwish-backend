@@ -3,6 +3,7 @@ package config
 import (
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -41,6 +42,7 @@ type Config struct {
 	RecruiterTestLoginEmail  string // active recruiter membership used by test login
 	DemoLoginEmail           string // store-review account; empty disables the fixed-OTP login
 	DemoLoginOTP             string // the 6-digit code that address accepts
+	JobWorkers               int    // background job goroutines; extras go to the per-attempt jobs
 }
 
 func Load() *Config {
@@ -81,6 +83,7 @@ func Load() *Config {
 		RecruiterTestLoginEmail:  getEnv("RECRUITER_TEST_LOGIN_EMAIL", ""),
 		DemoLoginEmail:           strings.ToLower(strings.TrimSpace(getEnv("DEMO_LOGIN_EMAIL", ""))),
 		DemoLoginOTP:             getEnv("DEMO_LOGIN_OTP", ""),
+		JobWorkers:               getEnvInt("JOB_WORKERS", 3),
 	}
 	// Unlike the recruiter test login this one is allowed in production — app
 	// store review runs against prod. Half a configuration is a foot-gun, so
@@ -114,6 +117,18 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getEnvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		log.Fatalf("%s must be a positive integer", key)
+	}
+	return n
 }
 
 func sixDigits(v string) bool {

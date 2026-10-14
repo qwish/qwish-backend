@@ -95,8 +95,14 @@ func (q *Queue) Start(ctx context.Context, workers int) {
 	if len(groups) == 0 {
 		return
 	}
+	// Every group gets one worker; any extra go to the first group (the
+	// transactional jobs every attempt enqueues), which is the one that backs
+	// up under load. Delivery and generation stay at one apiece.
 	for i := range max(workers, len(groups)) {
-		kinds := groups[i%len(groups)]
+		kinds := groups[0]
+		if i < len(groups) {
+			kinds = groups[i]
+		}
 		q.wg.Add(1)
 		go func() {
 			defer q.wg.Done()

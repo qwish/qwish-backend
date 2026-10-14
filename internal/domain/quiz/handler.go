@@ -114,7 +114,7 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 		middleware.NotFound(w, "quiz")
 		return
 	}
-	quiz, err := h.svc.GetByID(r.Context(), chi.URLParam(r, "quizId"))
+	quiz, err := h.svc.GetForViewer(r.Context(), chi.URLParam(r, "quizId"), middleware.GetUserID(r))
 	if err != nil {
 		middleware.NotFound(w, "quiz")
 		return

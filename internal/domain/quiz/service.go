@@ -324,54 +324,56 @@ func (s *Service) listForStudentFilteredScope(ctx context.Context, institutionID
 }
 
 func (s *Service) GetByID(ctx context.Context, quizID string) (*Quiz, error) {
+	return s.GetForViewer(ctx, quizID, "")
+}
+
+// GetForViewer is GetByID plus the viewer's own is_saved/has_played, derived
+// exactly as the student list derives them. An empty viewerID leaves both false.
+// Question types and curriculum units ride along as arrays so the detail view
+// costs one round trip instead of three.
+func (s *Service) GetForViewer(ctx context.Context, quizID, viewerID string) (*Quiz, error) {
 	q := &Quiz{}
 	err := s.db.QueryRow(ctx,
 		`SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status,
 		        LEAST(q.question_count, COALESCE(q.question_limit, q.question_count)) AS question_count,
 		        st.taker_count, q.ends_at, q.published_at, q.rejection_reason, q.group_id, q.domain, q.subdomain, d.label, sd.label, q.curriculum_concept_id, q.curriculum_question_mapping_enabled, q.created_at,
-		        st.avg_score_pct, st.avg_seconds
+		        st.avg_score_pct, st.avg_seconds,
+		        ARRAY(SELECT DISTINCT qs.type FROM questions qs WHERE qs.quiz_id = q.id ORDER BY qs.type),
+		        ARRAY(SELECT cu.unit_id::text FROM quiz_curriculum_units cu WHERE cu.quiz_id = q.id ORDER BY cu.position, cu.unit_id),
+		        EXISTS (SELECT 1 FROM saved_quizzes sq WHERE sq.quiz_id=q.id AND sq.user_id=$2::uuid AND q.type='knowledge_check') AS is_saved,
+		        EXISTS (SELECT 1 FROM quiz_attempts mine
+		                WHERE mine.quiz_id = q.id AND mine.user_id = $2::uuid
+		                  AND mine.status = 'completed') AS has_played
 		 FROM quizzes q
 		 JOIN users u ON u.id = q.created_by
 		 LEFT JOIN institutions i ON i.id = u.institution_id
 		 LEFT JOIN domains d ON d.slug = q.domain
 		 LEFT JOIN subdomains sd ON sd.slug = q.subdomain
 		 LEFT JOIN LATERAL (`+attemptStatsSelect+`) st ON TRUE
-		 WHERE q.id = $1 AND q.deleted_at IS NULL`, quizID,
+		 WHERE q.id = $1 AND q.deleted_at IS NULL`, quizID, nullableUUID(viewerID),
 	).Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName, &q.Title, &q.Description,
 		&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt,
 		&q.RejectionReason, &q.GroupID, &q.Domain, &q.Subdomain, &q.DomainLabel, &q.SubdomainLabel, &q.ConceptID, &q.CurriculumQuestionMappingEnabled, &q.CreatedAt,
-		&q.AvgScorePct, &q.AvgSeconds)
+		&q.AvgScorePct, &q.AvgSeconds, &q.QuestionTypes, &q.CurriculumUnitIDs, &q.IsSaved, &q.HasPlayed)
 	if err != nil {
 		return nil, err
 	}
-	// Get distinct question types
-	rows, err := s.db.Query(ctx, `SELECT DISTINCT type FROM questions WHERE quiz_id = $1 ORDER BY type`, quizID)
-	if err != nil {
-		return nil, err
+	// Preserve the previous JSON: both fields are omitempty and were nil when empty.
+	if len(q.QuestionTypes) == 0 {
+		q.QuestionTypes = nil
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var t string
-		rows.Scan(&t)
-		q.QuestionTypes = append(q.QuestionTypes, t)
-	}
-	unitRows, err := s.db.Query(ctx, `SELECT unit_id FROM quiz_curriculum_units WHERE quiz_id=$1 ORDER BY position, unit_id`, quizID)
-	if err != nil {
-		return nil, err
-	}
-	defer unitRows.Close()
-	for unitRows.Next() {
-		var unitID string
-		if err := unitRows.Scan(&unitID); err != nil {
-			return nil, err
-		}
-		q.CurriculumUnitIDs = append(q.CurriculumUnitIDs, unitID)
-	}
-	if err := unitRows.Err(); err != nil {
-		return nil, err
+	if len(q.CurriculumUnitIDs) == 0 {
+		q.CurriculumUnitIDs = nil
 	}
 	return q, nil
+}
+
+func nullableUUID(id string) any {
+	if id == "" {
+		return nil
+	}
+	return id
 }
 
 func (s *Service) CanView(ctx context.Context, quizID, userID, institutionID, role string) bool {

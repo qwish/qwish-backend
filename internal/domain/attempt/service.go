@@ -731,11 +731,16 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		        q.position, qv.prompt, COALESCE(qr.is_correct,false), q.difficulty, q.rating_b, q.rating_n,
 		        `+scoring.GuessFloorSQL+`,
 		        EXISTS (SELECT 1 FROM question_responses p JOIN quiz_attempts pa ON pa.id=p.attempt_id
-		                 WHERE pa.user_id=$2 AND pa.status='completed' AND p.question_id=aq.question_id)
+		                 WHERE pa.user_id=$2 AND pa.status='completed' AND p.question_id=aq.question_id),
+		        COALESCE(qr.time_taken_ms,0), qv.time_limit_seconds, COALESCE(hid.ms,0)
 		 FROM quiz_attempt_questions aq
 		 JOIN questions q ON q.id = aq.question_id
 		 JOIN question_versions qv ON qv.id=aq.question_version_id
 		 LEFT JOIN question_responses qr ON qr.attempt_id=aq.attempt_id AND qr.question_id=aq.question_id
+		 LEFT JOIN LATERAL (
+		   SELECT SUM(e.hidden_ms)::int ms FROM attempt_behavior_events e
+		    WHERE e.attempt_id=aq.attempt_id AND e.question_id=aq.question_id
+		 ) hid ON true
 		 WHERE aq.attempt_id=$1
 		 ORDER BY aq.position`, attemptID, userID)
 	if err != nil {
@@ -760,8 +765,9 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 		var ratingB *float64
 		var ratingN int
 		var seenBefore bool
+		var timeMs, timeLimitSec, hiddenMs int
 
-		if err := rows.Scan(&qid, &qtype, &correctAns, &studentAns, &confLevel, &cluesUsed, &comboLevel, &ptsEarned, &position, &prompt, &isCorrect, &qDifficulty, &ratingB, &ratingN, &guess, &seenBefore); err != nil {
+		if err := rows.Scan(&qid, &qtype, &correctAns, &studentAns, &confLevel, &cluesUsed, &comboLevel, &ptsEarned, &position, &prompt, &isCorrect, &qDifficulty, &ratingB, &ratingN, &guess, &seenBefore, &timeMs, &timeLimitSec, &hiddenMs); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -784,6 +790,7 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 			}
 			ratingObs = append(ratingObs, scoring.RatingObs{
 				QuestionID: *qid, Correct: isCorrect, Guess: guess, B: b, QN: ratingN,
+				Discount: scoring.EffortDiscount(timeMs, timeLimitSec, hiddenMs),
 			})
 		}
 
@@ -815,6 +822,9 @@ func (s *Service) Complete(ctx context.Context, userID, attemptID string) (*Comp
 	// Before the attempt UPDATE: its leaderboard trigger reads learner_ratings.
 	scoreBefore, scoreAfter, err := scoring.ApplyRatings(ctx, tx, userID, ratingObs)
 	if err != nil {
+		return nil, err
+	}
+	if err := saveRatingDiscounts(ctx, tx, attemptID, ratingObs); err != nil {
 		return nil, err
 	}
 
@@ -1227,4 +1237,24 @@ func (s *Service) legacyCompletion(ctx context.Context, tx pgx.Tx, userID, attem
 		return nil, err
 	}
 	return resp, nil
+}
+
+// saveRatingDiscounts records which answers the rating counted for less, so a
+// replay reaches the same rating after the behaviour events expire. This
+// annotates scoring only; the answer itself stays insert-once.
+func saveRatingDiscounts(ctx context.Context, tx pgx.Tx, attemptID string, obs []scoring.RatingObs) error {
+	var ids []string
+	var ds []float32
+	for _, o := range obs {
+		if o.Discount > 0 {
+			ids, ds = append(ids, o.QuestionID), append(ds, float32(o.Discount))
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `UPDATE question_responses qr SET rating_discount=t.d
+		FROM unnest($2::uuid[], $3::real[]) AS t(qid, d)
+		WHERE qr.attempt_id=$1 AND qr.question_id=t.qid`, attemptID, ids, ds)
+	return err
 }

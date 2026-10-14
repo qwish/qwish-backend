@@ -76,11 +76,21 @@ func TestSeriesQueryPassesInstitutionID(t *testing.T) {
 }
 
 // Metrics sharing a source share its subquery. Two metrics must not become two
-// scans of quiz_attempts.
+// scans — of the daily starts rollup, or of quiz_attempts at hourly grain.
 func TestMetricsSharingASourceShareOneSubquery(t *testing.T) {
-	sql, _ := BuildSeriesQuery(mustSelect(t, "attempts_started", "attempts_abandoned"), testWindow(), Scope{})
+	sel := mustSelect(t, "attempts_started", "attempts_abandoned")
+	sql, _ := BuildSeriesQuery(sel, testWindow(), Scope{})
+	if n := strings.Count(sql, "FROM attempt_daily_starts qa JOIN users u"); n != 1 {
+		t.Errorf("the starts rollup is read %d times, want 1 — both metrics share the attempts_start source", n)
+	}
+	if strings.Contains(sql, "FROM quiz_attempts") {
+		t.Error("daily attempt-start metrics should not scan quiz_attempts")
+	}
+	hourly := testWindow()
+	hourly.Gran = GranHour
+	sql, _ = BuildSeriesQuery(sel, hourly, Scope{})
 	if n := strings.Count(sql, "FROM quiz_attempts qa JOIN users u"); n != 1 {
-		t.Errorf("quiz_attempts is scanned %d times, want 1 — both metrics share the attempts_start source", n)
+		t.Errorf("hourly: quiz_attempts is scanned %d times, want 1", n)
 	}
 }
 

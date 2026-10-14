@@ -213,25 +213,41 @@ func BuildTotalsQuery(sel []MetricDef, w Window, sc Scope) (string, []any) {
 	return b.String(), args
 }
 
+// seriesSource swaps a raw source for its daily rollup when every selected
+// metric can be read from it. Hourly buckets need raw timestamps, so they
+// always read the raw tables.
 func seriesSource(key string, selected []MetricDef, w Window) (source, []MetricDef) {
 	s, _ := Source(key)
-	if key != "attempts_done" || w.Gran == GranHour {
+	if w.Gran == GranHour {
+		return s, selected
+	}
+	var rollup map[string]string
+	var from, where string
+	switch key {
+	case "attempts_done":
+		rollup = map[string]string{
+			"attempts_completed": "COALESCE(SUM(qa.completed),0)::bigint",
+			"avg_score":          "SUM(qa.score_sum)/NULLIF(SUM(qa.score_count),0)",
+			"active_users":       "COUNT(DISTINCT qa.user_id)",
+		}
+		from, where = "attempt_daily_metrics qa JOIN users u ON u.id=qa.user_id", "qa.completed>0"
+	case "attempts_start":
+		rollup = map[string]string{
+			"attempts_started":   "COALESCE(SUM(qa.started),0)::bigint",
+			"attempts_abandoned": "COALESCE(SUM(qa.abandoned),0)::bigint",
+		}
+		from, where = "attempt_daily_starts qa JOIN users u ON u.id=qa.user_id", "qa.started>0"
+	default:
 		return s, selected
 	}
 	rewritten := append([]MetricDef(nil), selected...)
 	for i, m := range rewritten {
-		switch m.ID {
-		case "attempts_completed":
-			rewritten[i].Expr = "COALESCE(SUM(qa.completed),0)::bigint"
-		case "avg_score":
-			rewritten[i].Expr = "SUM(qa.score_sum)/NULLIF(SUM(qa.score_count),0)"
-		case "active_users":
-			rewritten[i].Expr = "COUNT(DISTINCT qa.user_id)"
-		default:
+		expr, ok := rollup[m.ID]
+		if !ok {
 			return s, selected
 		}
+		rewritten[i].Expr = expr
 	}
-	s.From = "attempt_daily_metrics qa JOIN users u ON u.id=qa.user_id"
-	s.Where = "qa.completed>0"
+	s.From, s.Where = from, where
 	return s, rewritten
 }

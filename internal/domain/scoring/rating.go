@@ -194,10 +194,10 @@ func BackfillRatings(ctx context.Context, db *pgxpool.Pool) (int, error) {
 	}
 
 	rows, err := tx.Query(ctx, `
-		SELECT user_id, attempt_id, question_id, is_correct, guess, difficulty, submitted_at FROM (
+		SELECT user_id, attempt_id, question_id, is_correct, guess, difficulty, submitted_at, discount FROM (
 		  SELECT DISTINCT ON (a.user_id, qr.question_id)
 		         a.user_id::text, a.id::text attempt_id, qr.question_id::text, COALESCE(qr.is_correct,false) is_correct,
-		         `+GuessFloorSQL+` guess, q.difficulty, qr.submitted_at
+		         `+GuessFloorSQL+` guess, q.difficulty, qr.submitted_at, COALESCE(qr.rating_discount,0)::float8 discount
 		    FROM question_responses qr
 		    JOIN quiz_attempts a ON a.id=qr.attempt_id AND a.status='completed'
 		    JOIN questions q ON q.id=qr.question_id
@@ -221,9 +221,9 @@ func BackfillRatings(ctx context.Context, db *pgxpool.Pool) (int, error) {
 	for rows.Next() {
 		var uid, aid, qid string
 		var correct bool
-		var guess, diff float64
+		var guess, diff, discount float64
 		var at time.Time
-		if err := rows.Scan(&uid, &aid, &qid, &correct, &guess, &diff, &at); err != nil {
+		if err := rows.Scan(&uid, &aid, &qid, &correct, &guess, &diff, &at, &discount); err != nil {
 			return 0, err
 		}
 		q := questions[qid]
@@ -239,7 +239,7 @@ func BackfillRatings(ctx context.Context, db *pgxpool.Pool) (int, error) {
 			u.r = u.r.Age(at.Sub(u.last).Hours() / 24)
 		}
 		var d float64
-		u.r, d = u.r.Update(q.b+q.delta, guess, correct, q.n)
+		u.r, d = u.r.UpdateWeighted(q.b+q.delta, guess, correct, q.n, RatingObs{Discount: discount}.weight())
 		q.delta += d
 		q.n++
 		u.last = at

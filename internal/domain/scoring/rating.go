@@ -75,6 +75,13 @@ func SeedDifficulty(d float64) float64 {
 // difficulty, guess its blind-guess floor, qN how many answers already shaped
 // b. It returns the new rating and how far b should move.
 func (r Rating) Update(b, guess float64, correct bool, qN int) (Rating, float64) {
+	return r.UpdateWeighted(b, guess, correct, qN, 1)
+}
+
+// UpdateWeighted is Update with the answer counted as w (0–1) of an
+// observation, a tempered likelihood: a discounted answer moves theta, shrinks
+// sigma and shifts the question's difficulty proportionally less.
+func (r Rating) UpdateWeighted(b, guess float64, correct bool, qN int, w float64) (Rating, float64) {
 	l := 1 / (1 + math.Exp(-(r.Theta-b)/ratingScale))
 	p := guess + (1-guess)*l
 	p = math.Max(1e-6, math.Min(1-1e-6, p))
@@ -83,8 +90,8 @@ func (r Rating) Update(b, guess float64, correct bool, qN int) (Rating, float64)
 		y = 1
 	}
 	slope := (1 - guess) * l * (1 - l) / ratingScale // dp/dTheta
-	info := slope * slope / (p * (1 - p))
-	grad := (y - p) / (p * (1 - p)) * slope
+	info := w * slope * slope / (p * (1 - p))
+	grad := w * (y - p) / (p * (1 - p)) * slope
 
 	v := 1 / (1/(r.Sigma*r.Sigma) + info)
 	r.Theta += v * grad
@@ -94,7 +101,7 @@ func (r Rating) Update(b, guess float64, correct bool, qN int) (Rating, float64)
 	// ponytail: fixed decaying step for questions; a full per-question sigma
 	// is only worth it once questions are compared across cohorts.
 	k := math.Max(4, 40/math.Sqrt(1+float64(qN)))
-	return r, -k * (y - p)
+	return r, -w * k * (y - p)
 }
 
 // RatingObs is one first-time answer. Callers must drop repeats: seeing the
@@ -105,6 +112,14 @@ type RatingObs struct {
 	Guess      float64
 	B          float64 // current question difficulty on the rating scale
 	QN         int
+	Discount   float64 // share of the evidence to drop, 0–1; zero value = full evidence
+}
+
+func (o RatingObs) weight() float64 {
+	if !(o.Discount > 0) { // also catches NaN
+		return 1
+	}
+	return math.Max(0, 1-o.Discount)
 }
 
 // ApplyRatings folds obs into the learner's stored rating inside tx and moves
@@ -134,7 +149,7 @@ func ApplyRatings(ctx context.Context, tx pgx.Tx, userID string, obs []RatingObs
 	seeds := make([]float64, len(obs))
 	for i, o := range obs {
 		var d float64
-		r, d = r.Update(o.B, o.Guess, o.Correct, o.QN)
+		r, d = r.UpdateWeighted(o.B, o.Guess, o.Correct, o.QN, o.weight())
 		ids[i], deltas[i], seeds[i] = o.QuestionID, d, o.B
 	}
 

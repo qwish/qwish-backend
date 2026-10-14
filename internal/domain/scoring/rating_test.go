@@ -1,6 +1,9 @@
 package scoring
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestRatingBehaviour(t *testing.T) {
 	// Hard wins are worth more than easy wins.
@@ -49,5 +52,18 @@ func TestRatingBehaviour(t *testing.T) {
 	}
 	if b := SeedDifficulty(0.5); b != RatingStart {
 		t.Fatalf("median difficulty should seed at %v, got %v", RatingStart, b)
+	}
+	// A discounted answer moves theta, sigma and the question less; a zero
+	// weight leaves the rating where it was.
+	full, dFull := NewRating().UpdateWeighted(600, 0.25, true, 0, 1)
+	tenth, dTenth := NewRating().UpdateWeighted(600, 0.25, true, 0, 0.1)
+	if !(tenth.Theta-RatingStart < full.Theta-RatingStart && tenth.Sigma > full.Sigma && math.Abs(dTenth) < math.Abs(dFull)) {
+		t.Fatalf("weight 0.1 should move less: full=%+v/%v tenth=%+v/%v", full, dFull, tenth, dTenth)
+	}
+	if none, d := NewRating().UpdateWeighted(600, 0.25, true, 0, 0); none.Theta != RatingStart || none.Sigma != RatingSigmaStart || d != 0 {
+		t.Fatalf("weight 0 must not move anything: %+v d=%v", none, d)
+	}
+	if a, _ := NewRating().Update(600, 0.25, true, 0); a != full {
+		t.Fatal("Update must equal UpdateWeighted with weight 1")
 	}
 }

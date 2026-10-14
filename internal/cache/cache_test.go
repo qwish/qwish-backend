@@ -77,3 +77,43 @@ func TestInvalidationDoesNotRestoreInflightValue(t *testing.T) {
 		t.Fatalf("invalidated load was cached: %d %v", value, err)
 	}
 }
+
+// A narrow invalidation during a load discards only the loads it matches:
+// one user's write must not stop everyone else's results from being cached.
+func TestTargetedInvalidationDiscardsOnlyMatchingLoads(t *testing.T) {
+	c := New[int](16)
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	slow := func(v int) func() (int, error) {
+		return func() (int, error) { entered <- struct{}{}; <-release; return v, nil }
+	}
+	done := make(chan struct{}, 2)
+	for _, key := range []string{"alice", "bob"} {
+		go func() {
+			c.Load(context.Background(), key, time.Minute, slow(1))
+			done <- struct{}{}
+		}()
+	}
+	<-entered
+	<-entered
+	c.Invalidate(func(k string) bool { return k == "alice" })
+	close(release)
+	<-done
+	<-done
+
+	var loads atomic.Int32
+	count := func() (int, error) { loads.Add(1); return 2, nil }
+	c.Load(context.Background(), "bob", time.Minute, count)
+	if loads.Load() != 0 {
+		t.Fatal("unrelated in-flight load was discarded")
+	}
+	c.Load(context.Background(), "alice", time.Minute, count)
+	if loads.Load() != 1 {
+		t.Fatal("invalidated in-flight load was cached")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.recent) != 0 || len(c.active) != 0 {
+		t.Fatalf("bookkeeping not released: recent=%d active=%d", len(c.recent), len(c.active))
+	}
+}

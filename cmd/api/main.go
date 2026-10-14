@@ -478,6 +478,8 @@ func main() {
 					r.Get("/recommendations", obSessionH.Recommendations)
 					r.Get("/quizzes/{quizId}", obSessionH.Questions)
 					r.With(mw.RateLimit(30, 10*time.Minute)).Post("/submit", obSessionH.Submit)
+					r.Get("/sampler", obSessionH.Sampler)
+					r.With(mw.RateLimit(30, 10*time.Minute)).Post("/sampler/submit", obSessionH.SubmitSampler)
 				})
 			})
 
@@ -656,6 +658,7 @@ func main() {
 				r.Get("/users/me/insights/weekly", responseCache.Wrap(30*time.Second, userH.GetMyWeeklyInsights))
 				r.With(mw.RequireUserRecord()).Get("/users/me/insights/breakdown", responseCache.Wrap(30*time.Second, userH.GetMyInsightsBreakdown))
 				r.Get("/users/me/insights/trend", responseCache.Wrap(30*time.Second, userH.GetMyScoreTrend))
+				r.With(mw.RequireUserRecord()).Get("/users/me/insights/performance", responseCache.Wrap(30*time.Second, userH.GetMyPerformance))
 				r.Get("/users/me/notices", noticeH.Mine)
 				r.Get("/users/me/learning-summary", responseCache.Wrap(15*time.Second, learningH.StudentSummary))
 				r.Get("/users/me/assignments", learningH.StudentAssignments)

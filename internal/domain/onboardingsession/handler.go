@@ -55,6 +55,8 @@ func respond(w http.ResponseWriter, err error) {
 		middleware.NotFound(w, "session")
 	case errors.Is(err, ErrQuizNotEligible):
 		middleware.NotFound(w, "quiz")
+	case errors.Is(err, ErrNoSampler):
+		middleware.NotFound(w, "sampler")
 	case errors.Is(err, ErrAlreadySubmitted):
 		middleware.BadRequest(w, "this calibration was already submitted")
 	default:
@@ -148,6 +150,41 @@ func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := h.svc.Submit(r.Context(), sessionID, req.QuizID, req.Answers)
+	if err != nil {
+		respond(w, err)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, result)
+}
+
+// GET /api/v1/onboarding/session/sampler
+func (h *Handler) Sampler(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := requireSessionBearer(w, r)
+	if !ok {
+		return
+	}
+	questions, err := h.svc.Sampler(r.Context(), sessionID)
+	if err != nil {
+		respond(w, err)
+		return
+	}
+	middleware.JSON(w, http.StatusOK, questions)
+}
+
+// POST /api/v1/onboarding/session/sampler/submit
+func (h *Handler) SubmitSampler(w http.ResponseWriter, r *http.Request) {
+	sessionID, ok := requireSessionBearer(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Answers []Answer `json:"answers"`
+	}
+	if err := jsonx.NewDecoder(r.Body).Decode(&req); err != nil {
+		middleware.BadRequest(w, "answers are required")
+		return
+	}
+	result, err := h.svc.SubmitSampler(r.Context(), sessionID, req.Answers)
 	if err != nil {
 		respond(w, err)
 		return

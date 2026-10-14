@@ -30,7 +30,17 @@ const MinLearningTopics = 10
 type Service struct {
 	db              *pgxpool.Pool
 	recommendations *cache.Cache[[]RecommendedQuiz]
+	standings       Standings
 }
+
+// Standings ranks a score within a leaderboard scope from a shared snapshot;
+// the leaderboard handler implements it.
+type Standings interface {
+	Standing(ctx context.Context, scope, instID, domain string, score float64) (rank, total int, err error)
+}
+
+// SetStandings wires the rank source GetRank reads from.
+func (s *Service) SetStandings(st Standings) { s.standings = st }
 
 func NewService(db *pgxpool.Pool) *Service {
 	return &Service{db: db, recommendations: cache.New[[]RecommendedQuiz](256)}
@@ -730,62 +740,51 @@ type RankInfo struct {
 }
 
 func (s *Service) GetRank(ctx context.Context, userID, instID string) (*RankInfo, error) {
+	if s.standings == nil {
+		return nil, errors.New("rank standings not configured")
+	}
 	ri := &RankInfo{}
 
-	// A CTE binds the caller's points/domain once, then every rank/total is a
-	// scalar subquery referencing it — collapsing 7 sequential round-trips into
-	// one. Institution/domain counts are computed unconditionally (cheap) and
-	// only surfaced below when applicable; NULLIF guards the empty instID so the
-	// ::uuid cast doesn't blow up.
+	// One indexed read for the caller; every rank and total then comes from the
+	// leaderboard's shared snapshot (at most 30s old), so the cost no longer
+	// grows with the number of students. completed_quizzes is the distinct
+	// completed-quiz count, kept current by the quiz_attempts trigger.
 	var domain *string
 	var role string
-	var ir, it, dr, dt int
+	var score float64
 	err := s.db.QueryRow(ctx, `
-		WITH me AS (
-			SELECT COALESCE(ls.qwish_score,100) score, u.domain, u.role
-			  FROM users u LEFT JOIN leaderboard_scores ls ON ls.user_id=u.id WHERE u.id=$1
-		), eligible AS (
-			SELECT u.id, COALESCE(ls.qwish_score,100) score, u.domain, u.institution_id
-			  FROM users u LEFT JOIN leaderboard_scores ls ON ls.user_id=u.id
-			 WHERE u.status='active' AND u.role='student'
-			   AND (
-				SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa
-				 WHERE qa.user_id=u.id AND qa.status='completed'
-			   ) >= 5
-		)
-		SELECT
-			(SELECT domain FROM me),
-			(SELECT role FROM me),
-			(SELECT COUNT(DISTINCT quiz_id) FROM quiz_attempts WHERE user_id=$1 AND status='completed'),
-			(SELECT COUNT(*)+1 FROM eligible WHERE score>(SELECT score FROM me)),
-			(SELECT COUNT(*) FROM eligible),
-			(SELECT COUNT(*)+1 FROM eligible WHERE institution_id=NULLIF($2,'')::uuid AND score>(SELECT score FROM me)),
-			(SELECT COUNT(*) FROM eligible WHERE institution_id=NULLIF($2,'')::uuid),
-			(SELECT COUNT(*)+1 FROM eligible WHERE LOWER(domain)=LOWER((SELECT domain FROM me)) AND score>(SELECT score FROM me)),
-			(SELECT COUNT(*) FROM eligible WHERE LOWER(domain)=LOWER((SELECT domain FROM me)))`,
-		userID, instID,
-	).Scan(&domain, &role, &ri.DistinctQuizzesCompleted, &ri.GlobalRank, &ri.GlobalTotal, &ir, &it, &dr, &dt)
+		SELECT COALESCE(ls.qwish_score,100), u.domain, u.role, COALESCE(ls.completed_quizzes,0)
+		  FROM users u LEFT JOIN leaderboard_scores ls ON ls.user_id=u.id WHERE u.id=$1`,
+		userID,
+	).Scan(&score, &domain, &role, &ri.DistinctQuizzesCompleted)
 	if err != nil {
 		return nil, err
 	}
 	ri.LeaderboardUnlocked = role == "student" && ri.DistinctQuizzesCompleted >= 5
 	if !ri.LeaderboardUnlocked {
-		ri.GlobalRank = 0
-		ri.GlobalTotal = 0
 		return ri, nil
 	}
 
+	if ri.GlobalRank, ri.GlobalTotal, err = s.standings.Standing(ctx, "global", "", "", score); err != nil {
+		return nil, err
+	}
 	if ri.GlobalTotal > 0 {
 		above := float64(ri.GlobalRank - 1)
 		ri.TopPercentile = above / float64(ri.GlobalTotal) * 100
 	}
 	if instID != "" {
-		ri.InstRank = &ir
-		ri.InstTotal = &it
+		ir, it, err := s.standings.Standing(ctx, "institution", instID, "", score)
+		if err != nil {
+			return nil, err
+		}
+		ri.InstRank, ri.InstTotal = &ir, &it
 	}
 	if domain != nil && *domain != "" {
-		ri.DomainRank = &dr
-		ri.DomainTotal = &dt
+		dr, dt, err := s.standings.Standing(ctx, "global", "", *domain, score)
+		if err != nil {
+			return nil, err
+		}
+		ri.DomainRank, ri.DomainTotal = &dr, &dt
 	}
 
 	return ri, nil

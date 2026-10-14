@@ -132,6 +132,7 @@ func main() {
 	pointsH := points.NewHandler(pool)
 	streakH := streak.NewHandler(streakSvc)
 	leaderboardH := leaderboard.NewHandler(pool)
+	userSvc.SetStandings(leaderboardH)
 	parentH := parent.NewHandler(pool)
 	consentGate := parent.RequireConsent(pool)
 	uploadH := upload.NewHandler(s3Client)

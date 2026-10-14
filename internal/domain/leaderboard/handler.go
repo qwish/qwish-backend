@@ -41,6 +41,17 @@ type Entry struct {
 	CurrentStreak   int     `json:"current_streak"`
 }
 
+// Standing reports where score would rank among eligible learners in a scope,
+// from the shared snapshot (at most pageTTL old) instead of a per-request count.
+func (h *Handler) Standing(ctx context.Context, scope, instID, domain string, score float64) (rank, total int, err error) {
+	s, err := h.snapshot(ctx, scope, instID, strings.ToLower(domain))
+	if err != nil {
+		return 0, 0, err
+	}
+	rank, total = s.standing(score)
+	return rank, total, nil
+}
+
 // GET /api/v1/leaderboard?scope=institution|global&domain=<optional>
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	scope := r.URL.Query().Get("scope")

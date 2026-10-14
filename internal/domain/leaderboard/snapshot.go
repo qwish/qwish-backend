@@ -29,7 +29,10 @@ func nullableInstitution(id string) any {
 }
 
 type rankSnapshot struct {
-	entries   []Entry
+	entries []Entry
+	// scores holds every eligible score, highest first, so any learner's exact
+	// standing is a binary search instead of a COUNT over the scope.
+	scores    []float64
 	buckets   map[int]int
 	total     int
 	updatedAt time.Time
@@ -56,6 +59,14 @@ func scoreBucket(score float64) int {
 		return 81
 	}
 	return int(math.Floor((score-100)/10)) + 1
+}
+
+// standing is the exact rank a score would hold (ties share the better rank,
+// as SQL RANK does) and the scope's size. A caller who became eligible after
+// the refresh is counted in the total so rank never exceeds it.
+func (s *rankSnapshot) standing(score float64) (rank, total int) {
+	higher := sort.Search(len(s.scores), func(i int) bool { return s.scores[i] <= score })
+	return higher + 1, max(len(s.scores), higher+1)
 }
 
 func (s *rankSnapshot) position(score float64, cutoff int) (int, *int) {
@@ -145,7 +156,8 @@ func (h *Handler) snapshot(ctx context.Context, scope, instID, domain string) (*
 }
 
 func (h *Handler) loadSnapshot(ctx context.Context, scope, instID, domain string) (*rankSnapshot, error) {
-	// Both queries observe one snapshot, so page ranks, histogram and total agree.
+	// Both queries observe one snapshot, so page ranks, scores, histogram and
+	// total agree.
 	tx, err := h.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return nil, err
@@ -163,19 +175,20 @@ func (h *Handler) loadSnapshot(ctx context.Context, scope, instID, domain string
 		filter += " AND " + qdb.LiveMemberSQL("u.id", fmt.Sprintf("$%d", len(args)))
 	}
 	s := &rankSnapshot{entries: []Entry{}, buckets: map[int]int{}}
-	rows, err := tx.Query(ctx, `SELECT width_bucket(ls.qwish_score,100,900,80),count(*)`+filter+` GROUP BY 1`, args...)
+	rows, err := tx.Query(ctx, `SELECT ls.qwish_score`+filter+` ORDER BY ls.qwish_score DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		var bucket, n int
-		if err = rows.Scan(&bucket, &n); err != nil {
+		var score float64
+		if err = rows.Scan(&score); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		s.buckets[bucket] = n
-		s.total += n
+		s.scores = append(s.scores, score)
+		s.buckets[scoreBucket(score)]++
 	}
+	s.total = len(s.scores)
 	err = rows.Err()
 	rows.Close()
 	if err != nil {

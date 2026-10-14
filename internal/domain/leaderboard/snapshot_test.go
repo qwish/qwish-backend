@@ -34,6 +34,28 @@ func TestSnapshotPositionsAndTies(t *testing.T) {
 	}
 }
 
+func TestSnapshotStandingIsExactBeyondTheTopList(t *testing.T) {
+	s := &rankSnapshot{scores: []float64{900, 800, 800, 700, 500}}
+	for _, tt := range []struct {
+		score       float64
+		rank, total int
+	}{
+		{950, 1, 5}, // above everyone
+		{900, 1, 5}, // own score is not "higher"
+		{800, 2, 5}, // ties share the better rank
+		{750, 4, 5},
+		{500, 5, 5},
+		{100, 6, 6}, // newly eligible, not in the snapshot yet
+	} {
+		if rank, total := s.standing(tt.score); rank != tt.rank || total != tt.total {
+			t.Errorf("score %v: %d/%d, want %d/%d", tt.score, rank, total, tt.rank, tt.total)
+		}
+	}
+	if rank, total := (&rankSnapshot{}).standing(300); rank != 1 || total != 1 {
+		t.Errorf("empty scope: %d/%d, want 1/1", rank, total)
+	}
+}
+
 func TestSnapshotCutoffsAndLiveEligibility(t *testing.T) {
 	pool := openTestDB(t)
 	ctx := context.Background()

@@ -276,15 +276,24 @@ func (s *Service) Start(ctx context.Context, userID, quizID, assignmentID string
 		return nil, err
 	}
 
-	// One pipelined round trip instead of one per question, while the tx holds
-	// a pool connection.
-	batch := &pgx.Batch{}
+	// One statement for the whole delivered set: per-statement triggers fire
+	// once, not once per question, while the tx holds a pool connection.
+	ids := make([]string, len(questions))
+	revisions := make([]int, len(questions))
+	versions := make([]string, len(questions))
+	orders := make([]*string, len(questions))
 	for i, question := range questions {
-		batch.Queue(
-			`INSERT INTO quiz_attempt_questions (attempt_id, question_id, position, question_revision, question_version_id, option_order) VALUES ($1,$2,$3,$4,$5,$6)`,
-			attemptID, question.ID, i+1, question.Revision, question.VersionID, question.OptionOrder)
+		ids[i], revisions[i], versions[i] = question.ID, question.Revision, question.VersionID
+		if question.OptionOrder != nil {
+			order := string(question.OptionOrder)
+			orders[i] = &order
+		}
 	}
-	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO quiz_attempt_questions (attempt_id, question_id, position, question_revision, question_version_id, option_order)
+		 SELECT $1, q.id, q.position, q.revision, q.version, q.option_order::jsonb
+		   FROM unnest($2::uuid[], $3::int[], $4::uuid[], $5::text[]) WITH ORDINALITY AS q(id, revision, version, option_order, position)`,
+		attemptID, ids, revisions, versions, orders); err != nil {
 		return nil, err
 	}
 	if assignmentID != "" {
@@ -450,23 +459,42 @@ func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, re
 	}
 	defer tx.Rollback(ctx)
 
-	// Verify attempt belongs to user and is in_progress. FOR UPDATE (not FOR
-	// SHARE) because the combo counter and answer clock are written below.
-	// timeTakenMs is measured from the previous answer using the DB clock, so a
-	// client cannot understate how long it took.
+	// One locked read: the attempt (FOR UPDATE, not FOR SHARE, because the combo
+	// counter and answer clock are written below) and the exact question
+	// snapshot delivered to it. timeTakenMs is measured from the previous answer
+	// using the DB clock, so a client cannot understate how long it took.
+	// cluesUsed counts clues actually handed out by the server, not what the
+	// client claims. The question ID is compared as text so a malformed ID reads
+	// as a missing snapshot rather than failing the whole query.
 	var quizID string
 	var cfgSnapshot json.RawMessage
-	var qType string
 	var comboLevel, timeTakenMs int
+	var qTypeRaw *string
+	var correctAnswer, choices json.RawMessage
+	var timeLimitRaw, cluesRaw *int
 	err = tx.QueryRow(ctx,
-		`SELECT quiz_id, point_config_snapshot, combo_level,
-		        GREATEST(0, EXTRACT(EPOCH FROM (now() - COALESCE(last_answer_at, started_at))) * 1000)::INT
-		 FROM quiz_attempts WHERE id=$1 AND user_id=$2 AND status='in_progress' FOR UPDATE`,
-		attemptID, userID,
-	).Scan(&quizID, &cfgSnapshot, &comboLevel, &timeTakenMs)
+		`SELECT a.quiz_id, a.point_config_snapshot, a.combo_level,
+		        GREATEST(0, EXTRACT(EPOCH FROM (now() - COALESCE(a.last_answer_at, a.started_at))) * 1000)::INT,
+		        s.type, s.correct_answer, s.time_limit_seconds, s.option_choices, s.clues
+		 FROM quiz_attempts a
+		 LEFT JOIN LATERAL (
+		   SELECT qv.type, qv.correct_answer, qv.time_limit_seconds, aq.option_choices,
+		          (SELECT COUNT(*) FROM clue_reveals cr WHERE cr.attempt_id=a.id AND cr.question_id=aq.question_id)::int AS clues
+		   FROM quiz_attempt_questions aq
+		   JOIN question_versions qv ON qv.id=aq.question_version_id
+		   JOIN questions q ON q.id=aq.question_id
+		   WHERE aq.attempt_id=a.id AND aq.question_id::text=$3 AND q.quiz_id=a.quiz_id
+		 ) s ON true
+		 WHERE a.id=$1 AND a.user_id=$2 AND a.status='in_progress' FOR UPDATE OF a`,
+		attemptID, userID, req.QuestionID,
+	).Scan(&quizID, &cfgSnapshot, &comboLevel, &timeTakenMs, &qTypeRaw, &correctAnswer, &timeLimitRaw, &choices, &cluesRaw)
 	if err != nil {
 		return nil, fmt.Errorf("attempt not found or not in progress")
 	}
+	if qTypeRaw == nil {
+		return nil, fmt.Errorf("question snapshot not found")
+	}
+	qType, timeLimitSeconds, cluesUsed := *qTypeRaw, *timeLimitRaw, *cluesRaw
 
 	// A replayed answer carries the time the client measured before any attempt
 	// row existed; there is no DB clock to derive it from.
@@ -483,19 +511,6 @@ func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, re
 		} // fallback to load from db
 	}
 
-	// Grade and interpret the exact question delivered to this attempt.
-	var correctAnswer, choices json.RawMessage
-	// cluesUsed: clues actually handed out by the server, not what the client
-	// claims — folded into this read to save a round trip under the row lock.
-	var timeLimitSeconds, cluesUsed int
-	err = tx.QueryRow(ctx, `SELECT qv.type,qv.correct_answer,qv.time_limit_seconds,aq.option_choices,
- (SELECT COUNT(*) FROM clue_reveals cr WHERE cr.attempt_id=$1 AND cr.question_id=$2)::int
- FROM quiz_attempt_questions aq JOIN question_versions qv ON qv.id=aq.question_version_id
- JOIN questions q ON q.id=aq.question_id
- WHERE aq.attempt_id=$1 AND aq.question_id=$2 AND q.quiz_id=$3`, attemptID, req.QuestionID, quizID).Scan(&qType, &correctAnswer, &timeLimitSeconds, &choices, &cluesUsed)
-	if err != nil {
-		return nil, fmt.Errorf("question snapshot not found")
-	}
 	req.Answer, req.OptionID, err = resolveAnswerOption(qType, choices, req.Answer, req.OptionID)
 	if err != nil {
 		return nil, err
@@ -524,27 +539,18 @@ func (s *Service) submitAnswer(ctx context.Context, userID, attemptID string, re
 
 	// Insert, never update. The response below reveals the correct answer, so
 	// allowing a second write would let a wrong answer be replaced with the
-	// right one for full points.
+	// right one for full points. Evidence, misconception tags and the attempt
+	// advance all hang off the inserted response in this one statement, so a
+	// duplicate answer writes none of them.
 	var responseID string
-	err = tx.QueryRow(ctx,
-		`INSERT INTO question_responses (attempt_id, question_id, answer, is_correct, time_taken_ms, clues_used, confidence_level, combo_level, points_earned, option_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-		 ON CONFLICT (attempt_id, question_id) DO NOTHING RETURNING id`,
-		attemptID, req.QuestionID, req.Answer, isCorrect, timeTakenMs, cluesUsed, confidence, comboLevel, pts, req.OptionID).Scan(&responseID)
+	err = tx.QueryRow(ctx, submitAnswerSQL,
+		attemptID, req.QuestionID, req.Answer, isCorrect, timeTakenMs, cluesUsed, confidence, comboLevel, pts, req.OptionID,
+		userID, contentCorrect, timedOut, newCombo).Scan(&responseID)
 	if err == pgx.ErrNoRows {
 		return nil, fmt.Errorf("question already answered")
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to save response: %w", err)
-	}
-	if err = recordLearningEvidence(ctx, tx, responseID, userID, attemptID, req.QuestionID, req.OptionID, contentCorrect, timedOut, confidence, cluesUsed); err != nil {
-		return nil, fmt.Errorf("failed to record learning evidence: %w", err)
-	}
-
-	if _, err = tx.Exec(ctx,
-		`UPDATE quiz_attempts SET combo_level=$1, last_answer_at=now() WHERE id=$2`,
-		newCombo, attemptID); err != nil {
-		return nil, fmt.Errorf("failed to advance attempt: %w", err)
+		return nil, fmt.Errorf("failed to save answer: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

@@ -1323,9 +1323,11 @@ type InsightsBreakdown struct {
 // SkillRatingBreakdown explains the published conservative skill rating.
 // Legacy components remain diagnostics for clients that still consume them.
 type SkillRatingBreakdown struct {
-	AbilityEstimate      float64 `json:"ability_estimate"`
-	ConfidenceAdjustment float64 `json:"confidence_adjustment"`
-	EvidenceCount        int     `json:"evidence_count"`
+	AbilityEstimate      float64    `json:"ability_estimate"`
+	ConfidenceAdjustment float64    `json:"confidence_adjustment"`
+	EvidenceCount        int        `json:"evidence_count"`
+	Status               string     `json:"status"` // "active", or "idle" after scoring.RatingIdleAfter without evidence
+	LastEvidenceAt       *time.Time `json:"last_evidence_at"`
 }
 
 const lowSampleQuestions = 10
@@ -1394,14 +1396,17 @@ func (s *Service) GetInsightsBreakdown(ctx context.Context, userID string) (*Ins
 	// diagnostics only and no longer feed it.
 	qwishScore := 100.0
 	var rating scoring.Rating
+	var updatedAt time.Time
 	var skillRating *SkillRatingBreakdown
-	if err := s.db.QueryRow(ctx, `SELECT score, theta, sigma, n FROM learner_ratings WHERE user_id=$1`, userID).Scan(&qwishScore, &rating.Theta, &rating.Sigma, &rating.N); err != nil && err != pgx.ErrNoRows {
+	if err := s.db.QueryRow(ctx, `SELECT score, theta, sigma, n, updated_at FROM learner_ratings WHERE user_id=$1`, userID).Scan(&qwishScore, &rating.Theta, &rating.Sigma, &rating.N, &updatedAt); err != nil && err != pgx.ErrNoRows {
 		return nil, err
 	} else if err == nil {
 		skillRating = &SkillRatingBreakdown{
 			AbilityEstimate:      rating.Theta,
 			ConfidenceAdjustment: 2 * rating.Sigma,
 			EvidenceCount:        rating.N,
+			Status:               scoring.RatingStatus(updatedAt, time.Now()),
+			LastEvidenceAt:       &updatedAt,
 		}
 	}
 

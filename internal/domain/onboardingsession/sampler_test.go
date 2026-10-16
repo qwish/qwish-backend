@@ -7,65 +7,89 @@ import (
 	"testing"
 )
 
-func TestInferInterestsRanksCorrectBySpeed(t *testing.T) {
-	got := inferInterests([]topicScore{
-		{Domain: "verbal", Correct: true, ElapsedMs: 50_000, LimitMs: 60_000},
-		{Domain: "logical", Correct: true, ElapsedMs: 5_000, LimitMs: 60_000},
-		{Domain: "quantitative", Correct: false, ElapsedMs: 1_000, LimitMs: 60_000},
-		{Domain: "general", Correct: true, ElapsedMs: 30_000, LimitMs: 0},
-		{Domain: "aptitude", Correct: true, ElapsedMs: 90_000, LimitMs: 60_000},
-	})
-	want := []string{"logical", "general", "verbal"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("inferInterests = %v; want %v", got, want)
+// letters turns "AAAAAAABDB" into option positions.
+func letters(s string) []int {
+	out := make([]int, len(s))
+	for i, c := range s {
+		out[i] = int(c - 'A')
+	}
+	return out
+}
+
+// The walkthrough from the product sheet: 1A-5A, 6A, 7A, 8B, 9D, 10B.
+func TestProfileMatchesProductWalkthrough(t *testing.T) {
+	top, subs := profile(letters("AAAAAAABDB"))
+	if want := []string{"quantitative", "aptitude"}; !slices.Equal(top, want) {
+		t.Fatalf("top = %v; want %v", top, want)
+	}
+	want := []string{
+		// primary: Q2A's Data Interpretation, then Q6A
+		"apt_di", "quant_arithmetic", "quant_percentages", "quant_tsw", "quant_number_system",
+		// secondary: Q9D; Q7A and Q8B drop out, their topics scored nothing
+		"current_india", "current_world", "current_business_tech", "current_sports",
+		// wildcard: Q10B
+		"ent_anime", "ent_games", "ent_comics", "ent_scifi_fantasy",
+	}
+	if !slices.Equal(subs, want) {
+		t.Fatalf("subs = %v; want %v", subs, want)
 	}
 }
 
-func TestInferInterestsEmptyWhenNothingCorrect(t *testing.T) {
-	got := inferInterests([]topicScore{
-		{Domain: "verbal", Correct: false, ElapsedMs: 2_000, LimitMs: 60_000},
-	})
-	if got == nil || len(got) != 0 {
-		t.Fatalf("inferInterests = %#v; want an empty, non-nil list", got)
+func TestProfileRoutesFlatScoresToMixed(t *testing.T) {
+	// Entertainment 4; Social Studies, Current Affairs and Science 3.
+	top, subs := profile(letters("DDCEBAAAAA"))
+	if !slices.Equal(top, []string{"general", "aptitude"}) || !slices.Equal(subs, []string{"general_mixed", "apt_mixed"}) {
+		t.Fatalf("profile = %v, %v; want the mixed route", top, subs)
+	}
+	top, _ = profile([]int{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1})
+	if !slices.Equal(top, []string{"general", "aptitude"}) {
+		t.Fatalf("all skipped: top = %v; want the mixed route", top)
 	}
 }
 
-// The sampler hands out at most one question per subject, never from a quiz
-// the pre-signup player cannot render, keeps the same set across calls, and
-// turns the subjects answered correctly into the session topics that signup
-// copies into the user's interests.
-func TestSamplerDrawsPerSubjectAndInfersInterests(t *testing.T) {
+func TestOptionIndexMatchesTextOnly(t *testing.T) {
+	opts := json.RawMessage(`["A","B","C"]`)
+	for answer, want := range map[string]int{`"C"`: 2, `"Z"`: -1, `""`: -1, `3`: -1} {
+		if got := optionIndex(opts, json.RawMessage(answer)); got != want {
+			t.Errorf("optionIndex(%s) = %d; want %d", answer, got, want)
+		}
+	}
+}
+
+// The seeded quiz and the scoring sheet must agree, every slug must exist, and
+// the sampler must serve the quiz, keep it across calls, and store the
+// profiled sub-topics where signup copies them into the user's interests.
+func TestDiscoveryQuizMatchesSheetAndProfiles(t *testing.T) {
 	pool := openTestDB(t)
 	ctx := context.Background()
 	svc := NewService(pool, nil)
 
-	var author string
-	if err := pool.QueryRow(ctx,
-		`SELECT id FROM users WHERE email='system@qwish.internal'`).Scan(&author); err != nil {
-		t.Skipf("system author missing: %v", err)
-	}
-	mk := func(title, domain, qType string) {
-		var qid string
+	for q, choices := range profileQuiz {
+		var n int
 		if err := pool.QueryRow(ctx,
-			`INSERT INTO quizzes (created_by, title, type, visibility, status, question_count, domain, published_at)
-			 VALUES ($1,$2,'knowledge_check','public','published',1,$3, now()) RETURNING id`,
-			author, title, domain).Scan(&qid); err != nil {
-			t.Fatalf("insert quiz: %v", err)
+			`SELECT jsonb_array_length(options) FROM questions WHERE quiz_id=$1 AND position=$2`,
+			discoveryQuizID, q+1).Scan(&n); err != nil || n != len(choices) {
+			t.Fatalf("Q%d: seeded %d options, %v; sheet has %d", q+1, n, err, len(choices))
 		}
-		if _, err := pool.Exec(ctx,
-			`INSERT INTO questions (quiz_id, position, type, prompt, options, correct_answer, time_limit_seconds)
-			 VALUES ($1,1,$2,'p','["A","B"]','"A"',60)`, qid, qType); err != nil {
-			t.Fatalf("insert question: %v", err)
+		for _, c := range choices {
+			for _, p := range c.Points {
+				var ok bool
+				pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM domains WHERE slug=$1)`, p.Domain).Scan(&ok)
+				if !ok {
+					t.Errorf("Q%d: unknown topic %q", q+1, p.Domain)
+				}
+			}
+			for _, tg := range c.Tags {
+				var ok bool
+				pool.QueryRow(ctx,
+					`SELECT EXISTS (SELECT 1 FROM subdomains WHERE slug=$1 AND domain_slug=$2)`,
+					tg.Sub, tg.Domain).Scan(&ok)
+				if !ok {
+					t.Errorf("Q%d: %s is not a sub-topic of %s", q+1, tg.Sub, tg.Domain)
+				}
+			}
 		}
-		t.Cleanup(func() {
-			pool.Exec(ctx, `DELETE FROM questions WHERE quiz_id=$1`, qid)
-			pool.Exec(ctx, `DELETE FROM quizzes WHERE id=$1`, qid)
-		})
 	}
-	// Other quizzes may exist; these guarantee the draw is not empty.
-	mk("sampler-verbal", "verbal", "multiple_choice")
-	mk("sampler-logical", "logical", "multiple_choice")
-	mk("sampler-puzzle", "aptitude", "puzzle")
 
 	id, err := svc.Create(ctx, "en", nil)
 	if err != nil {
@@ -77,66 +101,35 @@ func TestSamplerDrawsPerSubjectAndInfersInterests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sampler: %v", err)
 	}
-	if len(first) == 0 || len(first) > samplerSize {
-		t.Fatalf("Sampler returned %d questions; want 1..%d", len(first), samplerSize)
-	}
-	domains := map[string]bool{}
-	for _, q := range first {
-		if domains[q.Domain] {
-			t.Fatalf("subject %q drawn twice", q.Domain)
-		}
-		domains[q.Domain] = true
-		var mixed bool
-		pool.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM questions WHERE quiz_id=$1 AND type <> 'multiple_choice')`,
-			q.QuizID).Scan(&mixed)
-		if mixed {
-			t.Fatalf("drew from quiz %s, which has a non-MCQ question", q.QuizID)
-		}
+	if len(first) != len(profileQuiz) || first[0].QuizID != discoveryQuizID || first[9].Position != 10 {
+		t.Fatalf("Sampler = %d questions; want the %d-question discovery quiz in order", len(first), len(profileQuiz))
 	}
 	again, err := svc.Sampler(ctx, id)
-	if err != nil || len(again) != len(first) {
-		t.Fatalf("second Sampler call = %d questions, %v; want %d", len(again), err, len(first))
-	}
-	for i := range first {
-		if again[i].ID != first[i].ID {
-			t.Fatal("second Sampler call changed the set")
-		}
+	if err != nil || len(again) != len(first) || again[0].ID != first[0].ID {
+		t.Fatalf("second Sampler call changed the set: %v", err)
 	}
 
-	// Answer only the first question correctly.
 	var answers []Answer
-	for i, q := range first {
-		answer := json.RawMessage(`"not an option"`)
-		if i == 0 {
-			if err := pool.QueryRow(ctx,
-				`SELECT correct_answer FROM questions WHERE id=$1`, q.ID).Scan(&answer); err != nil {
-				t.Fatalf("read correct answer: %v", err)
-			}
-		}
-		answers = append(answers, Answer{QuestionID: q.ID, Answer: answer, ElapsedMs: 4_000})
+	for i, pick := range letters("AAAAAAABDB") {
+		var opts []string
+		json.Unmarshal(first[i].Options, &opts)
+		answer, _ := json.Marshal(opts[pick])
+		answers = append(answers, Answer{QuestionID: first[i].ID, Answer: answer})
 	}
 	res, err := svc.SubmitSampler(ctx, id, answers)
 	if err != nil {
 		t.Fatalf("SubmitSampler: %v", err)
 	}
-	want := first[0].Domain
-	if res.TotalCorrect != 1 || len(res.Topics) != len(first) {
-		t.Fatalf("result = %d correct over %d topics; want 1 over %d",
-			res.TotalCorrect, len(res.Topics), len(first))
+	if !res.Profile || res.TotalCorrect != 10 || res.TotalQuestions != 10 || len(res.Review) != 0 {
+		t.Fatalf("result = %+v; want a 10/10-answered profile", res.SubmitResult)
 	}
-	if len(res.Interests) != 1 || res.Interests[0].Slug != want {
-		t.Fatalf("interests = %+v; want [%s]", res.Interests, want)
+	if len(res.Interests) != 2 || res.Interests[0].Slug != "quantitative" || res.Interests[1].Slug != "aptitude" {
+		t.Fatalf("interests = %+v; want [quantitative aptitude]", res.Interests)
 	}
-	for _, q := range res.Recommendations {
-		if q.Domain == nil || *q.Domain != want {
-			t.Fatalf("recommended %q outside the inferred interest %s", q.Title, want)
-		}
-	}
-
+	_, want := profile(letters("AAAAAAABDB"))
 	_, topics, err := svc.Prefs(ctx, id)
-	if err != nil || !slices.Equal(topics, []string{want}) {
-		t.Fatalf("session topics = %v, %v; want [%s]", topics, err, want)
+	if err != nil || !slices.Equal(topics, want) {
+		t.Fatalf("session topics = %v, %v; want %v", topics, err, want)
 	}
 	if _, err := svc.SubmitSampler(ctx, id, answers); err != ErrAlreadySubmitted {
 		t.Fatalf("second submit = %v; want ErrAlreadySubmitted", err)

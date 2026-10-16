@@ -195,7 +195,11 @@ func main() {
 	sched.RegisterJobs(queue)
 	teacher.NewHandler(workerPool).RegisterGenerationJobs(queue, questionGenerator)
 	responseCache := mw.NewResponseCache()
-	mw.ConfigureDistributedRateLimits(pool)
+	// A single replica can keep GCRA state in memory and skip a DB write per
+	// limited request; limits then reset on restart.
+	if os.Getenv("RATE_LIMIT_STORE") != "memory" {
+		mw.ConfigureDistributedRateLimits(pool)
+	}
 	// A session connection carries invalidations and SSE across replicas.
 	go db.Listen(ctx, workerPool, "qwish_cache", func() {
 		responseCache.Clear()
@@ -306,6 +310,8 @@ func main() {
 				r.Use(mw.RequireCronSecret(cfg.CronSecret))
 				r.Get("/quiz-list", quizH.Profile)
 				r.Get("/goroutine-leak", pprof.Handler("goroutineleak").ServeHTTP)
+				r.Get("/goroutine", pprof.Handler("goroutine").ServeHTTP)
+				r.With(mw.WriteDeadline(2*time.Minute)).Get("/cpu", pprof.Profile)
 				r.Get("/operational-metrics", mw.OperationalMetrics(pool, workerPool, responseCache))
 			})
 		}

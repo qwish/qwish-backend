@@ -147,7 +147,9 @@ func (c *ResponseCache) InvalidateUser(user, admin string) {
 // streaks, points, sessions and last-seen stamps. Cached reads built on them
 // expire with their TTL (10–30s) instead of being cleared on every write; the
 // writer's own entries are cleared by ClearOnWrite. Every table not listed
-// here still clears the cache, so a new table is safe by default.
+// here still clears the cache, so a new table is safe by default. Migration 107
+// drops the NOTIFY triggers on these tables; adding one here means dropping its
+// trigger in a new migration too.
 var activityTables = map[string]bool{
 	"quiz_attempts": true, "quiz_attempt_questions": true, "question_responses": true,
 	"clue_reveals": true, "learning_evidence": true, "learning_evidence_misconceptions": true,

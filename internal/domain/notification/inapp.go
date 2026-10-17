@@ -91,6 +91,9 @@ func (s *Service) EmitTx(ctx context.Context, tx pgx.Tx, userID, kind, title, bo
 	if kind == "assignment" {
 		data["deep_link"] = "qwish://assignments"
 	}
+	if o.reference == "avatar_persona" {
+		data["deep_link"] = "qwish://profile" // show off the new avatar look
+	}
 	if activity, _, ok := strings.Cut(strings.TrimPrefix(o.reference, "activity:"), ":"); kind == "activity" && ok {
 		data["deep_link"] = "qwish://activities/" + activity
 	}

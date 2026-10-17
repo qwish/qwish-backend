@@ -258,19 +258,20 @@ func (s *Service) DailyReset(ctx context.Context) error {
 	// that one run (this cron lives in-process, so any restart or deploy can)
 	// and the flag stayed false forever, leaving a dead streak on display
 	// indefinitely. Date-keyed, every run heals whatever earlier runs missed.
+	//
+	// users.current_streak (what home, profile stats, leaderboards and nudges
+	// read) is reset in the same statement, keyed on the same date. It used to
+	// be a separate full-table sync whose error was dropped, so a failed sync
+	// zeroed streaks but left every dead streak showing on users indefinitely.
 	_, err = s.db.Exec(ctx,
-		`UPDATE streaks SET current_streak=0, grace_window_active=false,
-		 milestone_7_claimed=false, milestone_15_claimed=false, milestone_30_claimed=false
-		 WHERE last_completed_date < (CURRENT_DATE - INTERVAL '2 days')::date
-		 AND (current_streak > 0 OR grace_window_active)`)
-	if err != nil {
-		return err
-	}
-
-	// Sync denormalized fields
-	s.db.Exec(ctx,
-		`UPDATE users u SET current_streak=s.current_streak, longest_streak=s.longest_streak
-		 FROM streaks s WHERE s.user_id=u.id`)
-
-	return nil
+		`WITH s AS (
+		   UPDATE streaks SET current_streak=0, grace_window_active=false,
+		          milestone_7_claimed=false, milestone_15_claimed=false, milestone_30_claimed=false
+		    WHERE last_completed_date < (CURRENT_DATE - INTERVAL '2 days')::date
+		      AND (current_streak > 0 OR grace_window_active)
+		 )
+		 UPDATE users SET current_streak=0, updated_at=now()
+		  WHERE (last_completed_date IS NULL OR last_completed_date < (CURRENT_DATE - INTERVAL '2 days')::date)
+		    AND current_streak > 0`)
+	return err
 }

@@ -17,11 +17,11 @@ func TestRunnerPreservesChainsAndSecret(t *testing.T) {
 	}
 	for group, jobs := range map[string][]string{
 		"hourly":          {"close-expired-quizzes", "abandon-stale-attempts", "assignment-reminders", "teacher-notifications"},
-		"nightly":         {"expire-points", "reset-streaks", "rank-change-alerts", "recompute-question-difficulty", "purge-onboarding-sessions", "purge-attempt-behavior", "end-inactive-enrollments"},
+		"nightly":         {"reset-streaks", "expire-points", "rank-change-alerts", "recompute-question-difficulty", "purge-onboarding-sessions", "purge-attempt-behavior", "end-inactive-enrollments"},
 		"streak-nudges":   {"streak-nudges"},
 		"announcements":   {"dispatch-announcements"},
 		"weekly-snapshot": {"snapshot-leaderboard"},
-		"weekly-digests":  {"weekly-digests", "weekly-insights-email"},
+		"weekly-digests":  {"avatar-personas", "weekly-digests", "weekly-insights-email"},
 	} {
 		t.Run(group, func(t *testing.T) {
 			var mu sync.Mutex

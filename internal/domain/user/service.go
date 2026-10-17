@@ -64,6 +64,12 @@ type Profile struct {
 	// ParentalConsentRequired its social and analytics lock.
 	IsMinor                 bool `json:"is_minor"`
 	ParentalConsentRequired bool `json:"parental_consent_required"`
+	// Avatar look (migrations 108/109): the worn outfit and its tier, plus a
+	// mood from recent effort. Render with
+	// GET /avatars/{id}?persona=&tier=&mood=. Persona is nil until one is earned.
+	AvatarPersona *string `json:"avatar_persona"`
+	AvatarTier    int     `json:"avatar_tier"`
+	AvatarMood    string  `json:"avatar_mood"`
 }
 
 type InstInfo struct {
@@ -80,6 +86,8 @@ type PublicProfile struct {
 	LongestStreak    int      `json:"longest_streak"`
 	QuizzesCompleted int      `json:"quizzes_completed"`
 	Badges           []string `json:"badges"`
+	AvatarPersona    *string  `json:"avatar_persona"`
+	AvatarTier       int      `json:"avatar_tier"`
 
 	// Sections the learner has chosen to show. Hidden sections are blanked below.
 	VisibleSections []string              `json:"visible_sections"`
@@ -188,11 +196,11 @@ func (s *Service) GetProfile(ctx context.Context, userID string) (*Profile, erro
 		`SELECT u.id, u.full_name, u.display_name, u.email, u.role, u.institution_id,
 		        u.status, u.total_points, u.current_streak, u.longest_streak, u.member_since, u.last_active_at,
 		        COALESCE(u.date_of_birth > current_date - interval '18 years', false),
-		        parental_consent_required(u.id)
+		        parental_consent_required(u.id), u.avatar_persona, u.avatar_tier, `+avatarMoodSQL+`
 		 FROM users u WHERE u.id = $1 AND u.deleted_at IS NULL`, userID,
 	).Scan(&p.ID, &p.FullName, &p.DisplayName, &p.Email, &p.Role, &instID,
 		&p.Status, &p.TotalPoints, &p.CurrentStreak, &p.LongestStreak, &p.MemberSince, &p.LastActiveAt,
-		&p.IsMinor, &p.ParentalConsentRequired)
+		&p.IsMinor, &p.ParentalConsentRequired, &p.AvatarPersona, &p.AvatarTier, &p.AvatarMood)
 	if err != nil {
 		return nil, err
 	}
@@ -221,11 +229,12 @@ func (s *Service) GetPublicProfile(ctx context.Context, viewerID, targetID strin
 		        u.profile_private, u.recruiter_visible, u.hidden_profile_sections, u.interest_domains,
 		        COALESCE(u.date_of_birth > current_date - interval '18 years', false)
 		          AND NOT EXISTS (SELECT 1 FROM parent_student_links l
-		                           WHERE l.student_id = u.id AND l.status = 'active')
+		                           WHERE l.student_id = u.id AND l.status = 'active'),
+		        u.avatar_persona, u.avatar_tier
 		 FROM users u
 		 LEFT JOIN institutions i ON i.id = u.institution_id
 		 WHERE u.id = $1 AND u.deleted_at IS NULL AND u.status = 'active'`, targetID,
-	).Scan(&p.ID, &p.DisplayName, &instName, &p.TotalPoints, &p.CurrentStreak, &p.LongestStreak, &profilePrivate, &recruiterVisible, &hidden, &interestSlugs, &consentRequired)
+	).Scan(&p.ID, &p.DisplayName, &instName, &p.TotalPoints, &p.CurrentStreak, &p.LongestStreak, &profilePrivate, &recruiterVisible, &hidden, &interestSlugs, &consentRequired, &p.AvatarPersona, &p.AvatarTier)
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +416,11 @@ func publicProfileNeedsFollow(viewerID, targetID string, profilePrivate, recruit
 func (s *Service) GetStats(ctx context.Context, userID string) (*Stats, error) {
 	st := &Stats{}
 	s.db.QueryRow(ctx,
-		`SELECT u.total_points, u.current_streak, u.longest_streak FROM users u WHERE u.id = $1`, userID,
+		// Streak derived from the date, as in streak.GetInfo, so the home
+		// screen never shows a dead streak while waiting on the nightly reset.
+		`SELECT u.total_points,
+		        CASE WHEN u.last_completed_date >= CURRENT_DATE - 2 THEN u.current_streak ELSE 0 END,
+		        u.longest_streak FROM users u WHERE u.id = $1`, userID,
 	).Scan(&st.TotalPoints, &st.CurrentStreak, &st.LongestStreak)
 
 	s.db.QueryRow(ctx,

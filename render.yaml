@@ -139,7 +139,8 @@ services:
           envVarKey: CRON_SECRET
 
   # Nightly sweep. Streaks must run before rank-change alerts, which read the
-  # streak/points state this chain settles.
+  # streak/points state this chain settles. reset-streaks goes first: it
+  # depends on nothing, and behind expire-points a failure there skipped it.
   - type: cron
     name: qwish-cron-nightly
     runtime: image
@@ -150,8 +151,8 @@ services:
       sh -c '
       set -e;
       post() { curl -fsS --max-time 900 -X POST -H "X-Cron-Secret: $CRON_SECRET" "https://$API_HOST/api/v1/internal/cron/$1"; echo; };
-      post expire-points;
       post reset-streaks;
+      post expire-points;
       post rank-change-alerts;
       post recompute-question-difficulty;
       post purge-onboarding-sessions;
@@ -204,6 +205,7 @@ services:
       sh -c '
       set -e;
       post() { curl -fsS --max-time 900 -X POST -H "X-Cron-Secret: $CRON_SECRET" "https://$API_HOST/api/v1/internal/cron/$1"; echo; };
+      post avatar-personas;
       post weekly-digests;
       post weekly-insights-email;
       '

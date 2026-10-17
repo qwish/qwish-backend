@@ -660,7 +660,6 @@ func (s *Service) Duplicate(ctx context.Context, sourceID, teacherID string, req
 		return nil, err
 	}
 
-	newQuestions := make([]Question, 0, len(questions))
 	for _, sourceQuestion := range questions {
 		var newID string
 		if err = tx.QueryRow(ctx, `INSERT INTO questions
@@ -682,16 +681,12 @@ func (s *Service) Duplicate(ctx context.Context, sourceID, teacherID string, req
 			WHERE map.question_id=$3`, newID, teacherID, sourceQuestion.ID); err != nil {
 			return nil, err
 		}
-		newQuestions = append(newQuestions, Question{ID: newID, Prompt: sourceQuestion.Prompt})
 	}
 	if _, err = tx.Exec(ctx, `UPDATE quizzes SET question_count=$1 WHERE id=$2`, len(questions), duplicateID); err != nil {
 		return nil, err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err
-	}
-	for _, question := range newQuestions {
-		storeMinhash(ctx, s.db, question.ID, question.Prompt)
 	}
 	return s.GetByID(ctx, duplicateID)
 }
@@ -764,6 +759,17 @@ func (s *Service) validateAdminQuiz(ctx context.Context, req AdminCreateQuizReq)
 		}
 		if question.TimeLimitSeconds < 0 || question.TimeLimitSeconds > 600 {
 			return fmt.Errorf("question %d has an invalid time limit", i+1)
+		}
+	}
+	// Bulk saves replace the whole question bank, so duplicates can only hide
+	// inside the batch itself.
+	sigs := make([]questionSig, len(req.Questions))
+	for i, question := range req.Questions {
+		sigs[i] = signature(question.Prompt, question.CorrectAnswer, question.MediaURL)
+		for j := range i {
+			if sigs[i].duplicates(sigs[j]) {
+				return fmt.Errorf("question %d is a near-duplicate of question %d", i+1, j+1)
+			}
 		}
 	}
 	return nil
@@ -1022,7 +1028,7 @@ func (s *Service) AddQuestion(ctx context.Context, quizID, ownerID string, req A
 	if check == 0 {
 		return nil, fmt.Errorf("not found or forbidden")
 	}
-	if duplicate, err := findNearDuplicate(ctx, s.db, quizID, req.Prompt, ""); err != nil {
+	if duplicate, err := findNearDuplicate(ctx, s.db, quizID, req.Prompt, req.CorrectAnswer, req.MediaURL, ""); err != nil {
 		return nil, err
 	} else if duplicate {
 		return nil, ErrDuplicateQuestion
@@ -1054,7 +1060,6 @@ func (s *Service) AddQuestion(ctx context.Context, quizID, ownerID string, req A
 			return nil, err
 		}
 	}
-	storeMinhash(ctx, s.db, q.ID, q.Prompt)
 	// Update question count
 	s.db.Exec(ctx,
 		`UPDATE quizzes SET question_count = (SELECT COUNT(*) FROM questions WHERE quiz_id=$1), updated_at=now() WHERE id=$1`, quizID)
@@ -1070,7 +1075,7 @@ func (s *Service) UpdateQuestion(ctx context.Context, quizID, questionID, ownerI
 	if check == 0 {
 		return fmt.Errorf("forbidden")
 	}
-	if duplicate, err := findNearDuplicate(ctx, s.db, quizID, req.Prompt, questionID); err != nil {
+	if duplicate, err := findNearDuplicate(ctx, s.db, quizID, req.Prompt, req.CorrectAnswer, req.MediaURL, questionID); err != nil {
 		return err
 	} else if duplicate {
 		return ErrDuplicateQuestion
@@ -1079,9 +1084,6 @@ func (s *Service) UpdateQuestion(ctx context.Context, quizID, questionID, ownerI
 		`UPDATE questions SET position=$1, type=$2, prompt=$3, media_url=$4, options=$5, correct_answer=$6, time_limit_seconds=$7, clues=$8
 		 WHERE id=$9 AND quiz_id=$10`,
 		req.Position, req.Type, req.Prompt, req.MediaURL, req.Options, req.CorrectAnswer, req.TimeLimitSeconds, req.Clues, questionID, quizID)
-	if err == nil {
-		storeMinhash(ctx, s.db, questionID, req.Prompt)
-	}
 	return err
 }
 

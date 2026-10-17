@@ -39,6 +39,8 @@ type Entry struct {
 	QwishScore      float64 `json:"qwish_score"`
 	TotalPoints     int64   `json:"total_points"`
 	CurrentStreak   int     `json:"current_streak"`
+	AvatarPersona   *string `json:"avatar_persona"`
+	AvatarTier      int     `json:"avatar_tier"`
 }
 
 // Standing reports where score would rank among eligible learners in a scope,

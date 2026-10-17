@@ -24,50 +24,138 @@ Deterministic, procedurally-generated SVG avatars. **Public — no auth.** Same
 seed always returns the exact same image, so use a stable per-user seed (the
 user `id`). Zero stored assets; every avatar is generated from the seed.
 
+The seed fixes the learner's **identity**: one of three gender-neutral head
+shapes (squircle, pebble, capsule), skin, hair, nose, a character mark
+(freckles, a band-aid or rosy cheeks) and a *signature colour*. What changes over time is layered on top without touching
+it: a **mood**, and an earned domain **outfit** (persona + tier). A learner who
+becomes a scientist is still recognisably themselves under the lab coat.
+
 ### GET `/avatars/{seed}`
 
 Returns an avatar as `image/svg+xml`. Use `<img>` / `SvgPicture.network` directly.
 
-Optional query params override the seed's random baseline. Unknown or invalid
-values are **ignored** (the random choice is kept), so the endpoint never errors
-on bad input.
+Optional query params override the seed's baseline. Unknown or invalid values
+are **ignored**, so the endpoint never errors on bad input.
 
 | Param        | Values                                                                    |
 |--------------|---------------------------------------------------------------------------|
-| `skin`       | `cream`, `peach`, `tan`, `brown`, or a `#RRGGBB` hex                       |
-| `hairStyle`  | `cap`, `helmet`, `swept`, `afro`                                           |
-| `hairColor`  | palette name (see below), or a `#RRGGBB` hex                              |
-| `background` | palette name, or a `#RRGGBB` hex                                          |
-| `expression` | `happy`, `neutral`, `sad`                                                  |
-| `accessory`  | `none`, `circle`, `triangle`, `bar`                                        |
-
-Palette names: `cobalt`, `vermilion`, `yellow`, `teal`, `terracotta`, `violet`,
-`deepteal`, `sand`.
+| `skin`       | `cream`, `peach`, `tan`, `brown`, `deep`, or a `#RRGGBB` hex               |
+| `hairStyle`  | `cloud`, `sprout`, `wavy` (legacy `afro`/`cap`/`swept`/`helmet` still map) |
+| `hairColor`  | `black`, `brown`, `auburn`, `blond`, `cobalt`, `violet`, `deepteal`, `vermilion`, or hex |
+| `background` | `cream`, `sky`, `sage`, `blush`, `lilac`, `sand`, `mint`, `stone`, or hex (quiet tones) |
+| `signature`  | palette name (`cobalt`, `vermilion`, `yellow`, `teal`, `terracotta`, `violet`, `deepteal`, `sand`) or hex — the outfit colour |
+| `mood`       | `smile` (default), `engaged`, `delighted`, `resting`                      |
+| `persona`    | an earned outfit, see below                                                |
+| `tier`       | `1`–`3`: how far the outfit has been upgraded (default 1)                 |
+| `expression` | *deprecated* — `happy`→`delighted`, `neutral`→`smile`, `sad`→`resting`     |
 
 Response is cacheable (`Cache-Control: public, max-age=31536000, immutable`);
-params are part of the URL, so each customization caches separately.
+params are part of the URL, so each look caches separately.
 
 ```
-GET /avatars/8f2a...            # random avatar for this user
-GET /avatars/8f2a...?hairStyle=afro&skin=brown&expression=happy&background=cobalt
+GET /avatars/8f2a...                                   # plain clothes, soft smile
+GET /avatars/8f2a...?persona=director&tier=2&mood=engaged
 ```
+
+Render a user as `/avatars/{user.id}?persona={avatar_persona}&tier={avatar_tier}&mood={avatar_mood}`
+(omit `persona` while it's `null`; `avatar_mood` is only on `GET /users/me`).
+
+**Moods** follow effort and return, never scores, and are never disappointed:
+`delighted` after finishing a demanding session (10+ questions or a hard quiz)
+in the last day, whatever the result; `engaged` after any session today;
+`resting` (eyes closed, a few Zs) after three quiet days; `smile` otherwise.
+
+**Outfits** show what the learner is good at: one strong wearable plus a
+supporting detail, kept clear of the face. Every quiz domain maps to one
+(`domains.persona`, optionally overridden per subdomain). Mastering a topic
+(≥75% over 3+ quizzes) earns its outfit; deeper mastery upgrades it — tier 2 at
+≥82% over 8+, tier 3 at ≥90% over 15+ — adding details (the explorer's hat gains
+a neckerchief, then a well-travelled backpack and compass). Outfits and tiers are
+never taken away. The backdrop aura grows with the tier (a signature-colour
+ring at tier 2, a gold double ring at tier 3). A weekly job grows each wardrobe and, unless the learner has
+picked one, dresses them in their strongest domain.
+
+| Persona | Earned by mastering |
+|---------|---------------------|
+| `mathematician` | Quantitative, Mathematics, Engineering Maths |
+| `detective` | Logical reasoning |
+| `strategist` | Aptitude |
+| `author` | Verbal, Novels, Comics, Poetry |
+| `coder` | Computer Science, Technology |
+| `executive` | Corporate, Business & Finance, Economics |
+| `director` | Entertainment (movies, TV, anime…) |
+| `scientist` | Science |
+| `historian` | Social Studies (history) |
+| `explorer` | Geography, Flags & Capitals, Travel |
+| `journalist` | Current Affairs, International Relations |
+| `linguist` | Language Learning |
+| `athlete` | Sports |
+| `artist` | Arts & Culture |
+| `musician` | Music, Music Theory, Instruments, K-Pop |
+| `chef` | Food & Drink |
+| `doctor` | Health & Medicine |
+| `naturalist` | Nature & Animals, Botany, Zoology |
+| `pilot` | Vehicles & Transport |
+| `philosopher` | Philosophy & Religion, Mythology |
+| `judge` | Law, Civics, Indian Polity |
+| `engineer` | Engineering |
+| `grandmaster` | Games & Puzzles |
+| `gamer` | Video Games, Esports |
+| `astronaut` | Space Science, Space Technology |
+| `trendsetter` | Lifestyle |
+| `topper` | Exam Prep (UPSC, JEE, CAT…) |
+| `scholar` | General (fallback) |
 
 ### GET `/avatars/options`
 
-Returns the valid values for every customization param as JSON, for building
-pickers without hardcoding:
+Returns the valid values for every param as JSON, for building pickers without
+hardcoding:
 
 ```json
 {
-  "skin": ["cream", "peach", "tan", "brown"],
-  "hairStyle": ["cap", "helmet", "swept", "afro"],
-  "hairColor": ["cobalt", "vermilion", "yellow", "teal", "terracotta", "violet", "deepteal", "sand"],
-  "background": ["cobalt", "vermilion", "yellow", "teal", "terracotta", "violet", "deepteal", "sand"],
-  "expression": ["happy", "neutral", "sad"],
-  "accessory": ["none", "circle", "triangle", "bar"],
-  "note": "hairColor/background/skin also accept a #RRGGBB hex"
+  "skin": ["cream", "peach", "tan", "brown", "deep"],
+  "hairStyle": ["cloud", "sprout", "wavy"],
+  "hairColor": ["black", "brown", "auburn", "blond", "cobalt", "violet", "deepteal", "vermilion"],
+  "background": ["cream", "sky", "sage", "blush", "lilac", "sand", "mint", "stone"],
+  "signature": ["cobalt", "vermilion", "yellow", "teal", "terracotta", "violet", "deepteal", "sand"],
+  "mood": ["smile", "engaged", "delighted", "resting"],
+  "persona": ["mathematician", "detective", "…", "scholar"],
+  "tier": [1, 2, 3],
+  "note": "skin/hairColor/background/signature also accept a #RRGGBB hex"
 }
 ```
+
+### GET `/users/me/avatar`
+**Auth required:** Yes
+
+The learner's avatar wardrobe: what they wear, their mood, and every outfit earned.
+
+```json
+{
+  "persona": "explorer",
+  "tier":    2,
+  "mood":    "engaged",
+  "chosen":  false,
+  "outfits": [
+    { "persona": "explorer",  "tier": 2, "earned_at": "2026-10-12T08:00:00Z" },
+    { "persona": "scientist", "tier": 1, "earned_at": "2026-10-19T08:00:00Z" }
+  ]
+}
+```
+
+`persona` is `null` until an outfit is earned. `chosen: false` means the weekly
+job dresses them in their strongest domain.
+
+### PUT `/users/me/avatar`
+**Auth required:** Yes · rate limit 30/min
+
+```json
+{ "persona": "scientist" }
+```
+
+Wears an earned outfit at its current tier and pins the choice. `null` or `""`
+hands the choice back to the weekly job (the current look stays until it runs).
+Returns the wardrobe as above. `400` if the outfit hasn't been earned.
 
 ---
 
@@ -431,7 +519,10 @@ Returns the authenticated user's full profile.
   "longest_streak": 12,
   "member_since":   "2024-01-15T00:00:00Z",
   "is_minor":                  false,
-  "parental_consent_required": false
+  "parental_consent_required": false,
+  "avatar_persona":            "director",
+  "avatar_tier":               2,
+  "avatar_mood":               "engaged"
 }
 ```
 
@@ -599,6 +690,8 @@ Returns a public profile (no email or sensitive data).
   "longest_streak":   12,
   "quizzes_completed": 34,
   "badges":           ["first_quiz", "perfect_score"],
+  "avatar_persona":   "director",
+  "avatar_tier":      1,
   "badge_count":      2,
   "qwish_score":      640,
   "percentile":       67,
@@ -1368,7 +1461,9 @@ through the TTL; membership changes and listener reconnects invalidate snapshots
       "institution_name": "Qwish Academy",
       "qwish_score":    745.2,
       "total_points":   2100,
-      "current_streak": 9
+      "current_streak": 9,
+      "avatar_persona": "mathematician",
+      "avatar_tier":    3
     }
   ]
 }
@@ -3363,6 +3458,7 @@ Jobs sharing a slot run as one chained shell command, so ordering is explicit.
 | `POST` | `/internal/cron/recompute-question-difficulty` | `0 0 * * *` | Recomputes derived question difficulty |
 | `POST` | `/internal/cron/streak-nudges` | `0 14 * * *` | Reminds users whose streak is unclaimed today |
 | `POST` | `/internal/cron/snapshot-leaderboard` | `1 0 * * 1` | Snapshots weekly leaderboard rankings |
+| `POST` | `/internal/cron/avatar-personas` | `0 8 * * 1` | Sets each learner's avatar persona from their best-mastered topic; notifies on change |
 | `POST` | `/internal/cron/weekly-digests` | `0 8 * * 1` | Weekly summary push |
 | `POST` | `/internal/cron/weekly-insights-email` | `0 8 * * 1` | Weekly insights email |
 

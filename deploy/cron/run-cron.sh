@@ -9,11 +9,12 @@ esac
 
 case "${1:-}" in
   hourly) jobs=(close-expired-quizzes abandon-stale-attempts assignment-reminders teacher-notifications) ;;
-  nightly) jobs=(expire-points reset-streaks rank-change-alerts recompute-question-difficulty purge-onboarding-sessions purge-attempt-behavior end-inactive-enrollments) ;;
+  # reset-streaks first: it depends on nothing, and a failure ahead of it skipped it.
+  nightly) jobs=(reset-streaks expire-points rank-change-alerts recompute-question-difficulty purge-onboarding-sessions purge-attempt-behavior end-inactive-enrollments) ;;
   streak-nudges) jobs=(streak-nudges) ;;
   announcements) jobs=(dispatch-announcements) ;;
   weekly-snapshot) jobs=(snapshot-leaderboard) ;;
-  weekly-digests) jobs=(weekly-digests weekly-insights-email) ;;
+  weekly-digests) jobs=(avatar-personas weekly-digests weekly-insights-email) ;;
   *) echo "Unknown cron group: ${1:-missing}" >&2; exit 1 ;;
 esac
 

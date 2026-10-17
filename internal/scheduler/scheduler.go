@@ -359,7 +359,7 @@ func (s *Scheduler) SendStreakNudges(ctx context.Context) error {
 			   WHERE u.status='active' AND u.role IN ('student','teacher')
 			     AND (u.role='teacher' OR (SELECT COUNT(DISTINCT qa.quiz_id) FROM quiz_attempts qa WHERE qa.user_id=u.id AND qa.status='completed') >= 5)
 		   AND u.current_streak > 0
-		   AND (u.last_completed_date IS NULL OR u.last_completed_date < CURRENT_DATE)
+		   AND u.last_completed_date >= CURRENT_DATE - 2 AND u.last_completed_date < CURRENT_DATE
 		   AND COALESCE(np.push_streak_nudge, true)`)
 	if err != nil {
 		return err

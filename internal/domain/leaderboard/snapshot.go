@@ -200,7 +200,7 @@ func (h *Handler) loadSnapshot(ctx context.Context, scope, instID, domain string
 	query := `WITH leaders AS (SELECT ls.user_id,ls.qwish_score,
  RANK() OVER (ORDER BY ls.qwish_score DESC) AS rank` + filter +
 		fmt.Sprintf(` ORDER BY ls.qwish_score DESC,ls.user_id LIMIT $%d)
- SELECT l.user_id,u.display_name,i.name,l.qwish_score,u.total_points,u.current_streak,l.rank
+ SELECT l.user_id,u.display_name,i.name,l.qwish_score,u.total_points,u.current_streak,l.rank,u.avatar_persona,u.avatar_tier
  FROM leaders l JOIN users u ON u.id=l.user_id LEFT JOIN institutions i ON i.id=u.institution_id
  ORDER BY l.qwish_score DESC,l.user_id`, len(args))
 	rows, err = tx.Query(ctx, query, args...)
@@ -209,7 +209,7 @@ func (h *Handler) loadSnapshot(ctx context.Context, scope, instID, domain string
 	}
 	for rows.Next() {
 		var e Entry
-		if err = rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.QwishScore, &e.TotalPoints, &e.CurrentStreak, &e.Rank); err != nil {
+		if err = rows.Scan(&e.UserID, &e.DisplayName, &e.InstitutionName, &e.QwishScore, &e.TotalPoints, &e.CurrentStreak, &e.Rank, &e.AvatarPersona, &e.AvatarTier); err != nil {
 			rows.Close()
 			return nil, err
 		}

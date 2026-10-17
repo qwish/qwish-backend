@@ -130,3 +130,24 @@ func TestMilestoneCreditAndClaimRollBackTogether(t *testing.T) {
 		t.Fatalf("%d %v", credits, err)
 	}
 }
+
+// Four days idle is past the one-day grace: the nightly reset must zero the
+// streak on users too, since home, leaderboards and nudges read that column.
+func TestDailyResetZeroesDeadStreakOnUsers(t *testing.T) {
+	pool, id := newStreakUser(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `INSERT INTO streaks(user_id,current_streak,longest_streak,last_completed_date) VALUES($1,5,5,CURRENT_DATE-4)`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET current_streak=5,longest_streak=5,last_completed_date=CURRENT_DATE-4 WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewService(pool).DailyReset(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var s, u, longest int
+	pool.QueryRow(ctx, `SELECT s.current_streak,u.current_streak,u.longest_streak FROM streaks s JOIN users u ON u.id=s.user_id WHERE s.user_id=$1`, id).Scan(&s, &u, &longest)
+	if s != 0 || u != 0 || longest != 5 {
+		t.Fatalf("streaks=%d users=%d longest=%d, want 0 0 5", s, u, longest)
+	}
+}

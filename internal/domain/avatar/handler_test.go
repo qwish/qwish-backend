@@ -39,7 +39,7 @@ func TestServeMeta(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d", rr.Code)
 	}
-	if !strings.Contains(rr.Body.String(), "afro") {
+	if !strings.Contains(rr.Body.String(), "cloud") {
 		t.Fatalf("meta missing vocab: %s", rr.Body.String())
 	}
 }

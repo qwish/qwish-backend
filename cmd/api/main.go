@@ -415,6 +415,13 @@ func main() {
 					}
 					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
 				})
+				r.Post("/avatar-personas", func(w http.ResponseWriter, r *http.Request) {
+					if err := sched.RefreshAvatarPersonas(r.Context()); err != nil {
+						mw.InternalError(w)
+						return
+					}
+					mw.JSON(w, http.StatusOK, map[string]string{"message": "done"})
+				})
 				r.Post("/recompute-question-difficulty", func(w http.ResponseWriter, r *http.Request) {
 					if err := sched.RecomputeQuestionDifficulty(r.Context()); err != nil {
 						mw.InternalError(w)
@@ -613,6 +620,8 @@ func main() {
 				r.With(mw.RequireUserRecord(), mw.RateLimitByUser(30, time.Minute)).Get("/users/me/badges", userH.GetMyBadges)
 				r.With(mw.RequireUserRecord(), mw.RateLimitByUser(6, time.Hour)).Post("/users/me/scorecard-shares", userH.RecordMyScorecardShare)
 				r.Get("/users/me/attempts", userH.GetMyAttempts)
+				r.With(mw.RequireUserRecord()).Get("/users/me/avatar", userH.GetMyAvatar)
+				r.With(mw.RequireUserRecord(), mw.RateLimitByUser(30, time.Minute)).Put("/users/me/avatar", userH.WearMyAvatar)
 				r.Get("/users/me/points", pointsH.GetBalance)
 				r.Get("/users/me/points/ledger", pointsH.GetLedger)
 				r.With(mw.RequireUserRecord()).Get("/users/me/streak", streakH.GetStreak)

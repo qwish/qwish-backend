@@ -2,6 +2,7 @@ package avatar
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
@@ -15,19 +16,23 @@ type Handler struct{}
 func NewHandler() *Handler { return &Handler{} }
 
 // Get renders the avatar for {seed} as image/svg+xml. Optional query params
-// (skin, hairStyle, hairColor, background, expression, accessory) override the
-// seeded random baseline; unknown/invalid values are ignored. See Meta for the
-// valid vocabularies.
+// (skin, hairStyle, hairColor, background, signature, mood, persona, tier)
+// override the seeded baseline; unknown/invalid values are ignored. The legacy
+// expression param still maps onto mood. See Meta for the valid vocabularies.
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	seed := chi.URLParam(r, "seed")
 	q := r.URL.Query()
+	tier, _ := strconv.Atoi(q.Get("tier"))
 	svg := GenerateAvatarCustom(seed, Options{
 		Skin:       q.Get("skin"),
 		HairStyle:  q.Get("hairStyle"),
 		HairColor:  q.Get("hairColor"),
 		Background: q.Get("background"),
+		Signature:  q.Get("signature"),
+		Mood:       q.Get("mood"),
+		Persona:    q.Get("persona"),
+		Tier:       tier,
 		Expression: q.Get("expression"),
-		Accessory:  q.Get("accessory"),
 	})
 	w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
 	// Deterministic + no auth: safe to cache hard. Params are part of the URL,
@@ -42,10 +47,12 @@ func (h *Handler) Meta(w http.ResponseWriter, r *http.Request) {
 	mw.JSON(w, http.StatusOK, map[string]any{
 		"skin":       SkinTones,
 		"hairStyle":  HairStyles,
-		"hairColor":  PaletteNames,
-		"background": PaletteNames,
-		"expression": Expressions,
-		"accessory":  Accessories,
-		"note":       "hairColor/background/skin also accept a #RRGGBB hex",
+		"hairColor":  HairColors,
+		"background": Backgrounds,
+		"signature":  PaletteNames,
+		"mood":       Moods,
+		"persona":    Personas,
+		"tier":       []int{1, 2, MaxTier},
+		"note":       "skin/hairColor/background/signature also accept a #RRGGBB hex",
 	})
 }

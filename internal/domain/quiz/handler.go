@@ -495,6 +495,10 @@ func (h *Handler) TeacherUpdateQuestion(w http.ResponseWriter, r *http.Request) 
 	jsonx.NewDecoder(r.Body).Decode(&req)
 	if err := h.svc.UpdateQuestion(r.Context(),
 		chi.URLParam(r, "quizId"), chi.URLParam(r, "questionId"), middleware.GetUserID(r), req); err != nil {
+		if errors.Is(err, ErrDuplicateQuestion) {
+			middleware.Error(w, http.StatusConflict, "DUPLICATE_QUESTION", err.Error())
+			return
+		}
 		middleware.Error(w, http.StatusForbidden, "FORBIDDEN", err.Error())
 		return
 	}

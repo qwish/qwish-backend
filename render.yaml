@@ -81,7 +81,7 @@ services:
       - key: WEBAUTHN_RP_ORIGINS
         # Android origin = base64url(SHA-256 signing certificate fingerprint),
         # without padding. Keep this aligned with Play App Signing / assetlinks.
-        value: "https://app.qwish.in,https://qwish.in,https://superadmin.qwish.in,android:apk-key-hash:CapMhpbwljRivsSQzwSQbxHfnODPOYPURPaVkYAeL6c"
+        value: "https://app.qwish.in,https://qwish.in,https://superadmin.qwish.in,android:apk-key-hash:CapMhpbwljRivsSQzwSQbxHfnODPOYPURPaVkYAeL6c,android:apk-key-hash:So24wDtA-F8aPSjg2R4JTi6dy0nHot5yqZ1Iz3WHSrU,android:apk-key-hash:qFgDa21woCFuEwDq8lIlAiflUzV_OqPygWXaK-s4L20,android:apk-key-hash:Mah8tXceamY2suOY0xMCq1SqctUZNR56dTySzpoAlro,android:apk-key-hash:QkC1pySTyIE6FwJCliN2rY0ENBPVhpgFjptNsoDkHCU"
       - key: WEBAUTHN_RP_DISPLAY_NAME
         value: Qwish
       # Frontend URLs used in invite emails & generated links. Code defaults

@@ -1,0 +1,62 @@
+flowchart TB
+  %% Proposed logical grouping; current frontend projects are not merged.
+  %% Solid module arrows: source depends on target, not SQL FK edges.
+  %% Dashed arrows: proposed workspace association or workflow integration.
+  subgraph qwish["ONE QWISH PLATFORM — proposed feature grouping"]
+    direction TB
+    subgraph workspaces["Role-specific entry points — existing clients retain their implementation boundaries"]
+      learner["Learner — Flutter numpie"]
+      teacher["Teacher panel"]
+      institute["Institute and leadership"]
+      recruiter["Recruiter dashboard — via Next.js server"]
+      admin["Super-admin console"]
+      public["Brand website — public forms"]
+    end
+
+    subgraph modules["Dependent features grouped into shared modules — 123 PostgreSQL tables"]
+      identity["1. Identity and institute operations — 20 tables<br/>Accounts, preferences, enrollment and invites<br/>Institutions, classes, departments and staff roles"]
+      learning["2. Teaching, learning and intervention — 42 tables<br/>Curriculum, quizzes, versions, assignments and recipients<br/>Attempts, responses, evidence and misconceptions<br/>Practice, mastery, recommendations, support and parent summaries"]
+      careers["3. Portfolio, community and careers — 15 tables<br/>Education, skills, portfolio revisions and reviews<br/>Parent links, follows and study groups<br/>Recruiter organisations, roles, candidate states and audit"]
+      rewards["4. Rewards and rankings — 8 tables<br/>Points, streaks, badges, leaderboards and sharing<br/>Economy configuration and institute multipliers"]
+      engagement["5. Engagement and delivery — 18 tables<br/>Forms, polls, audiences, versions and responses<br/>Notices, announcements and promotional content<br/>Notification preferences, tokens and delivery tracking"]
+      governance["6. Governance, acquisition and sponsorship — 17 tables<br/>Admin authentication, moderation, settings, reports and audit<br/>Brands, sponsorship requests and public contact handling<br/>Anonymous research, demos and onboarding"]
+      runtime["7. Shared runtime — 3 tables<br/>Search versions, background jobs and rate limiting"]
+    end
+
+    learner -.-> learning
+    learner -.-> careers
+    learner -.-> rewards
+    teacher -.-> learning
+    teacher -.-> engagement
+    institute -.-> identity
+    institute -.-> learning
+    institute -.-> careers
+    recruiter -.-> careers
+    admin -.-> governance
+    public -.-> governance
+
+    learning -->|"users, institutes, classes and staff scope"| identity
+    careers -->|"users and institute reviews"| identity
+    rewards -->|"users and institute scope"| identity
+    rewards -->|"learning activity and reward events"| learning
+    rewards -->|"admin economy controls"| governance
+    engagement -->|"users, institutes, departments and audiences"| identity
+    governance -->|"institution and user oversight"| identity
+    governance -->|"moderation, sponsored quizzes, demos and onboarding"| learning
+    engagement -->|"admin publication and approval"| governance
+    learning -.->|"assignment and support delivery"| engagement
+
+    modules --> api["Shared Go API — /api/v1"]
+    api --> pg[("Shared PostgreSQL — 123 application tables")]
+    api --> auth["Supabase Auth — user identity"]
+    api --> media["S3 media"]
+    api --> delivery["Email and push delivery"]
+  end
+
+  subgraph outside["Separate store and incomplete integrations — outside connected feature grouping"]
+    soon["Coming-soon website"] --> soonapi["Own Next.js API"]
+    soonapi --> mongo[("MongoDB — Waitlist and Contact")]
+    expo["Expo learner prototype"] --> fixtures["Fixtures/local state<br/>Optional profile and insight reads with mock fallback"]
+    brandui["Brand dashboard prototype"] --> embedded["Embedded programme and campaign data"]
+    extension["HR LeetCode monitor extension<br/>Review material only — no established runtime integration"]
+  end

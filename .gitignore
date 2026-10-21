@@ -24,3 +24,7 @@ deploy/*.env
 deploy/cron/*.env
 AWS_Commands_and_Steps.txt
 
+
+# Shared architecture and dashboard workflow documentation
+!docs/workspace/
+!docs/workspace/**

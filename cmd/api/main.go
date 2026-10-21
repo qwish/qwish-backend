@@ -729,6 +729,7 @@ func main() {
 				r.Get("/quizzes/featured", responseCache.Wrap(30*time.Second, userH.GetFeaturedQuizzes))
 				r.Get("/quizzes", responseCache.Wrap(10*time.Second, quizH.List))
 				r.Get("/quizzes/{quizId}", quizH.Get)
+				r.With(mw.RateLimitByUser(60, time.Minute)).Get("/quizzes/{quizId}/leaderboard", quizH.Leaderboard)
 				r.With(mw.RequireUserRecord(), mw.RequireRole("student")).Get("/quizzes/{quizId}/rating", quizH.GetRating)
 				r.With(mw.RequireUserRecord(), mw.RequireRole("student"), mw.RateLimitByUser(60, time.Minute)).Put("/quizzes/{quizId}/rating", quizH.PutRating)
 				r.Post("/quizzes/{quizId}/save", quizH.Save)

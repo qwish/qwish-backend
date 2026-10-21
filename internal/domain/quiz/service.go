@@ -35,6 +35,7 @@ type Quiz struct {
 	// queries must never expose the larger authoring-bank size.
 	QuestionCount                    int        `json:"question_count"`
 	TakerCount                       int        `json:"taker_count"`
+	StartsAt                         *time.Time `json:"starts_at,omitempty"`
 	EndsAt                           *time.Time `json:"ends_at,omitempty"`
 	PublishedAt                      *time.Time `json:"published_at,omitempty"`
 	RejectionReason                  *string    `json:"rejection_reason,omitempty"`
@@ -46,6 +47,7 @@ type Quiz struct {
 	ConceptID                        *string    `json:"curriculum_concept_id,omitempty"`
 	CurriculumUnitIDs                []string   `json:"curriculum_unit_ids,omitempty"`
 	CurriculumQuestionMappingEnabled bool       `json:"curriculum_question_mapping_enabled,omitempty"`
+	QuestionLimit                    *int       `json:"question_limit,omitempty"`
 	CreatedAt                        time.Time  `json:"created_at"`
 	QuestionTypes                    []string   `json:"question_types,omitempty"`
 	// Peer stats over completed attempts; nil when nobody has finished the quiz.
@@ -136,12 +138,15 @@ type CreateQuizReq struct {
 	Type                             string     `json:"type"`
 	Visibility                       string     `json:"visibility"`
 	GroupID                          *string    `json:"group_id"`
+	StartsAt                         *time.Time `json:"starts_at"`
 	EndsAt                           *time.Time `json:"ends_at"`
 	Domain                           *string    `json:"domain"`
 	Subdomain                        *string    `json:"subdomain"`
 	ConceptID                        *string    `json:"curriculum_concept_id"`
 	CurriculumUnitIDs                []string   `json:"curriculum_unit_ids"`
 	CurriculumQuestionMappingEnabled bool       `json:"curriculum_question_mapping_enabled"`
+	// QuestionLimit serves a random subset of this size per attempt; nil serves the whole bank.
+	QuestionLimit *int `json:"question_limit"`
 }
 
 type DuplicateQuizReq struct {
@@ -402,7 +407,7 @@ func (s *Service) GetForViewer(ctx context.Context, quizID, viewerID string) (*Q
 		`SELECT q.id, q.institution_id, q.created_by, u.display_name, COALESCE(i.name, '') AS institution_name,
 		        q.title, q.description, q.type, q.visibility, q.status,
 		        LEAST(q.question_count, COALESCE(q.question_limit, q.question_count)) AS question_count,
-		        st.taker_count, q.ends_at, q.published_at, q.rejection_reason, q.group_id, q.domain, q.subdomain, d.label, sd.label, q.curriculum_concept_id, q.curriculum_question_mapping_enabled, q.created_at,
+		        st.taker_count, q.starts_at, q.ends_at, q.published_at, q.rejection_reason, q.group_id, q.domain, q.subdomain, d.label, sd.label, q.curriculum_concept_id, q.curriculum_question_mapping_enabled, q.question_limit, q.created_at,
 		        st.avg_score_pct, st.avg_seconds,
 		        ARRAY(SELECT DISTINCT qs.type FROM questions qs WHERE qs.quiz_id = q.id ORDER BY qs.type),
 		        ARRAY(SELECT cu.unit_id::text FROM quiz_curriculum_units cu WHERE cu.quiz_id = q.id ORDER BY cu.position, cu.unit_id),
@@ -418,8 +423,8 @@ func (s *Service) GetForViewer(ctx context.Context, quizID, viewerID string) (*Q
 		 LEFT JOIN LATERAL (`+attemptStatsSelect+`) st ON TRUE
 		 WHERE q.id = $1 AND q.deleted_at IS NULL`, quizID, nullableUUID(viewerID),
 	).Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.TeacherName, &q.InstitutionName, &q.Title, &q.Description,
-		&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.EndsAt, &q.PublishedAt,
-		&q.RejectionReason, &q.GroupID, &q.Domain, &q.Subdomain, &q.DomainLabel, &q.SubdomainLabel, &q.ConceptID, &q.CurriculumQuestionMappingEnabled, &q.CreatedAt,
+		&q.Type, &q.Visibility, &q.Status, &q.QuestionCount, &q.TakerCount, &q.StartsAt, &q.EndsAt, &q.PublishedAt,
+		&q.RejectionReason, &q.GroupID, &q.Domain, &q.Subdomain, &q.DomainLabel, &q.SubdomainLabel, &q.ConceptID, &q.CurriculumQuestionMappingEnabled, &q.QuestionLimit, &q.CreatedAt,
 		&q.AvgScorePct, &q.AvgSeconds, &q.QuestionTypes, &q.CurriculumUnitIDs, &q.IsSaved, &q.HasPlayed)
 	if err != nil {
 		return nil, err
@@ -510,12 +515,12 @@ func (s *Service) Create(ctx context.Context, req CreateQuizReq, userID, institu
 	defer tx.Rollback(ctx)
 	q := &Quiz{}
 	err = tx.QueryRow(ctx,
-		`INSERT INTO quizzes (institution_id, created_by, title, description, type, visibility, group_id, ends_at, domain, subdomain, curriculum_concept_id, curriculum_question_mapping_enabled)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		 RETURNING id, institution_id, created_by, title, description, type, visibility, status, question_count, ends_at, group_id, domain, subdomain, created_at`,
-		institutionID, userID, req.Title, req.Description, req.Type, req.Visibility, req.GroupID, req.EndsAt, req.Domain, req.Subdomain, req.ConceptID, req.CurriculumQuestionMappingEnabled,
+		`INSERT INTO quizzes (institution_id, created_by, title, description, type, visibility, group_id, ends_at, domain, subdomain, curriculum_concept_id, curriculum_question_mapping_enabled, question_limit, starts_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		 RETURNING id, institution_id, created_by, title, description, type, visibility, status, question_count, starts_at, ends_at, group_id, domain, subdomain, question_limit, created_at`,
+		institutionID, userID, req.Title, req.Description, req.Type, req.Visibility, req.GroupID, req.EndsAt, req.Domain, req.Subdomain, req.ConceptID, req.CurriculumQuestionMappingEnabled, req.QuestionLimit, req.StartsAt,
 	).Scan(&q.ID, &q.InstitutionID, &q.CreatedBy, &q.Title, &q.Description, &q.Type,
-		&q.Visibility, &q.Status, &q.QuestionCount, &q.EndsAt, &q.GroupID, &q.Domain, &q.Subdomain, &q.CreatedAt)
+		&q.Visibility, &q.Status, &q.QuestionCount, &q.StartsAt, &q.EndsAt, &q.GroupID, &q.Domain, &q.Subdomain, &q.QuestionLimit, &q.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -652,9 +657,9 @@ func (s *Service) Duplicate(ctx context.Context, sourceID, teacherID string, req
 	var source Quiz
 	var conceptID *string
 	var mappingEnabled bool
-	if err = tx.QueryRow(ctx, `SELECT institution_id,title,description,type,visibility,group_id,domain,subdomain,curriculum_concept_id,curriculum_question_mapping_enabled
+	if err = tx.QueryRow(ctx, `SELECT institution_id,title,description,type,visibility,group_id,domain,subdomain,curriculum_concept_id,curriculum_question_mapping_enabled,question_limit
 		FROM quizzes WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL FOR SHARE`, sourceID, teacherID).
-		Scan(&source.InstitutionID, &source.Title, &source.Description, &source.Type, &source.Visibility, &source.GroupID, &source.Domain, &source.Subdomain, &conceptID, &mappingEnabled); err != nil {
+		Scan(&source.InstitutionID, &source.Title, &source.Description, &source.Type, &source.Visibility, &source.GroupID, &source.Domain, &source.Subdomain, &conceptID, &mappingEnabled, &source.QuestionLimit); err != nil {
 		return nil, err
 	}
 	title := req.Title
@@ -676,9 +681,9 @@ func (s *Service) Duplicate(ctx context.Context, sourceID, teacherID string, req
 
 	var duplicateID string
 	if err = tx.QueryRow(ctx, `INSERT INTO quizzes
-		(institution_id,created_by,title,description,type,visibility,status,group_id,domain,subdomain,curriculum_concept_id,curriculum_question_mapping_enabled,question_count)
-		VALUES($1,$2,$3,$4,$5,$6,'draft',$7,$8,$9,$10,$11,0) RETURNING id`, source.InstitutionID, teacherID,
-		title, source.Description, source.Type, source.Visibility, source.GroupID, source.Domain, source.Subdomain, conceptID, mappingEnabled).Scan(&duplicateID); err != nil {
+		(institution_id,created_by,title,description,type,visibility,status,group_id,domain,subdomain,curriculum_concept_id,curriculum_question_mapping_enabled,question_count,question_limit)
+		VALUES($1,$2,$3,$4,$5,$6,'draft',$7,$8,$9,$10,$11,0,$12) RETURNING id`, source.InstitutionID, teacherID,
+		title, source.Description, source.Type, source.Visibility, source.GroupID, source.Domain, source.Subdomain, conceptID, mappingEnabled, source.QuestionLimit).Scan(&duplicateID); err != nil {
 		return nil, err
 	}
 	unitRows, err := tx.Query(ctx, `SELECT unit_id FROM quiz_curriculum_units WHERE quiz_id=$1 ORDER BY position, unit_id`, sourceID)
@@ -1004,9 +1009,9 @@ func (s *Service) Update(ctx context.Context, quizID, ownerID string, req Create
 	}
 	defer tx.Rollback(ctx)
 	result, err := tx.Exec(ctx,
-		`UPDATE quizzes SET title=$1, description=$2, type=$3, visibility=$4, group_id=$5, ends_at=$6, domain=$7, subdomain=$8, curriculum_concept_id=$9, curriculum_question_mapping_enabled=$10, updated_at=now()
+		`UPDATE quizzes SET title=$1, description=$2, type=$3, visibility=$4, group_id=$5, ends_at=$6, domain=$7, subdomain=$8, curriculum_concept_id=$9, curriculum_question_mapping_enabled=$10, question_limit=$13, starts_at=$14, updated_at=now()
 		 WHERE id=$11 AND created_by=$12 AND status IN ('draft','rejected') AND deleted_at IS NULL`,
-		req.Title, req.Description, req.Type, req.Visibility, req.GroupID, req.EndsAt, req.Domain, req.Subdomain, req.ConceptID, req.CurriculumQuestionMappingEnabled, quizID, ownerID)
+		req.Title, req.Description, req.Type, req.Visibility, req.GroupID, req.EndsAt, req.Domain, req.Subdomain, req.ConceptID, req.CurriculumQuestionMappingEnabled, quizID, ownerID, req.QuestionLimit, req.StartsAt)
 	if err != nil {
 		return err
 	}
@@ -1189,9 +1194,13 @@ func (s *Service) DeleteQuestion(ctx context.Context, quizID, questionID, ownerI
 func (s *Service) Publish(ctx context.Context, quizID, ownerID string) (string, error) {
 	// Must have at least 1 question
 	var qCount int
-	s.db.QueryRow(ctx, `SELECT question_count FROM quizzes WHERE id=$1 AND created_by=$2`, quizID, ownerID).Scan(&qCount)
+	var ended bool
+	s.db.QueryRow(ctx, `SELECT question_count, COALESCE(ends_at <= now(), false) FROM quizzes WHERE id=$1 AND created_by=$2`, quizID, ownerID).Scan(&qCount, &ended)
 	if qCount == 0 {
 		return "", fmt.Errorf("quiz must have at least one question")
+	}
+	if ended {
+		return "", fmt.Errorf("end time has already passed; choose a later end time")
 	}
 
 	var visibility string

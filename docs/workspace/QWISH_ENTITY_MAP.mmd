@@ -1,0 +1,393 @@
+%% Qwish persisted entity map - migrations 001 through 094, reviewed 2026-10-06.
+%% Solid arrows: referencing table -> referenced table; labels are FK columns.
+flowchart LR
+  subgraph domain1["Identity and preferences"]
+    users["users"]
+    user_emails["user_emails"]
+    webauthn_user_credentials["webauthn_user_credentials"]
+    user_sign_ins["user_sign_ins"]
+    user_preferences["user_preferences"]
+    user_dashboard_layouts["user_dashboard_layouts"]
+    teacher_feature_onboarding["teacher_feature_onboarding"]
+  end
+  subgraph domain2["Institutions and memberships"]
+    institutions["institutions"]
+    institution_domains["institution_domains"]
+    enrollments["enrollments"]
+    groups["groups"]
+    group_students["group_students"]
+    group_teachers["group_teachers"]
+    group_student_history["group_student_history"]
+    departments["departments"]
+    staff_role_assignments["staff_role_assignments"]
+    teacher_invites["teacher_invites"]
+    student_invites["student_invites"]
+    action_item_owners["action_item_owners"]
+    referral_code_reset_requests["referral_code_reset_requests"]
+  end
+  subgraph domain3["Curriculum"]
+    academic_years["academic_years"]
+    curricula["curricula"]
+    curriculum_versions["curriculum_versions"]
+    curriculum_version_revisions["curriculum_version_revisions"]
+    curriculum_chapters["curriculum_chapters"]
+    curriculum_concepts["curriculum_concepts"]
+    class_curricula["class_curricula"]
+    quiz_curriculum_units["quiz_curriculum_units"]
+  end
+  subgraph domain4["Assessments and attempts"]
+    quizzes["quizzes"]
+    questions["questions"]
+    question_options["question_options"]
+    question_versions["question_versions"]
+    quiz_attempts["quiz_attempts"]
+    quiz_attempt_questions["quiz_attempt_questions"]
+    question_responses["question_responses"]
+    attempt_behavior_events["attempt_behavior_events"]
+    clue_reveals["clue_reveals"]
+    offline_answer_exposures["offline_answer_exposures"]
+    saved_quizzes["saved_quizzes"]
+    teacher_quiz_favorites["teacher_quiz_favorites"]
+    featured_quizzes["featured_quizzes"]
+    domains["domains"]
+    subdomains["subdomains"]
+    question_lsh_buckets["question_lsh_buckets"]
+  end
+  subgraph domain5["Assignments and learning evidence"]
+    learning_assignments["learning_assignments"]
+    learning_assignment_recipients["learning_assignment_recipients"]
+    question_concepts["question_concepts"]
+    misconceptions["misconceptions"]
+    question_misconception_options["question_misconception_options"]
+    question_misconception_suggestions["question_misconception_suggestions"]
+    learning_evidence["learning_evidence"]
+    learning_evidence_misconceptions["learning_evidence_misconceptions"]
+    misconception_reviews["misconception_reviews"]
+    teacher_student_support["teacher_student_support"]
+    parent_summaries["parent_summaries"]
+    topic_requests["topic_requests"]
+  end
+  subgraph domain6["Portfolio and social"]
+    user_education["user_education"]
+    user_skills["user_skills"]
+    user_profile_entries["user_profile_entries"]
+    user_profile_entry_revisions["user_profile_entry_revisions"]
+    user_profile_entry_reviews["user_profile_entry_reviews"]
+    profile_views["profile_views"]
+    parent_student_links["parent_student_links"]
+    user_follows["user_follows"]
+    study_groups["study_groups"]
+    study_group_members["study_group_members"]
+    practice_sessions["practice_sessions"]
+  end
+  subgraph domain7["Recruitment"]
+    recruiter_organisations["recruiter_organisations"]
+    recruiter_memberships["recruiter_memberships"]
+    recruiter_roles["recruiter_roles"]
+    recruiter_candidate_states["recruiter_candidate_states"]
+    recruiter_audit_events["recruiter_audit_events"]
+  end
+  subgraph domain8["Rewards and rankings"]
+    points_ledger["points_ledger"]
+    streaks["streaks"]
+    badges["badges"]
+    leaderboard_scores["leaderboard_scores"]
+    leaderboard_snapshots["leaderboard_snapshots"]
+    scorecard_share_days["scorecard_share_days"]
+    point_economy_config["point_economy_config"]
+    institution_multiplier_history["institution_multiplier_history"]
+  end
+  subgraph domain9["Forms and polls"]
+    activities["activities"]
+    activity_audience_groups["activity_audience_groups"]
+    activity_versions["activity_versions"]
+    activity_responses["activity_responses"]
+    activity_response_history["activity_response_history"]
+    activity_audit_events["activity_audit_events"]
+  end
+  subgraph domain10["Communications and content"]
+    notices["notices"]
+    notice_audience["notice_audience"]
+    user_notifications["user_notifications"]
+    notification_preferences["notification_preferences"]
+    teacher_notification_preferences["teacher_notification_preferences"]
+    notification_log["notification_log"]
+    device_tokens["device_tokens"]
+    announcements["announcements"]
+    announcement_institutions["announcement_institutions"]
+    promotional_content["promotional_content"]
+    promo_institutions["promo_institutions"]
+    content_delivery_events["content_delivery_events"]
+  end
+  subgraph domain11["Brands and sponsorship"]
+    brands["brands"]
+    sponsorship_requests["sponsorship_requests"]
+  end
+  subgraph domain12["Administration and moderation"]
+    admin_accounts["admin_accounts"]
+    admin_sessions["admin_sessions"]
+    webauthn_credentials["webauthn_credentials"]
+    webauthn_challenges["webauthn_challenges"]
+    admin_dashboard_layouts["admin_dashboard_layouts"]
+    impersonation_sessions["impersonation_sessions"]
+    audit_log["audit_log"]
+    reports["reports"]
+    platform_settings["platform_settings"]
+  end
+  subgraph domain13["Public acquisition and anonymous research"]
+    contact_submissions["contact_submissions"]
+    anonymous_surveys["anonymous_surveys"]
+    anonymous_survey_questions["anonymous_survey_questions"]
+    anonymous_survey_responses["anonymous_survey_responses"]
+    onboarding_sessions["onboarding_sessions"]
+    demo_events["demo_events"]
+  end
+  subgraph domain14["Analytics and runtime support"]
+    learner_ratings["learner_ratings"]
+    learner_topic_mastery["learner_topic_mastery"]
+    recommendation_bandit_stats["recommendation_bandit_stats"]
+    quiz_read_stats["quiz_read_stats"]
+    attempt_daily_metrics["attempt_daily_metrics"]
+    internal_search_versions["internal_search_versions"]
+    background_jobs["background_jobs"]
+    distributed_rate_limits["distributed_rate_limits"]
+  end
+  subgraph comingsoon["Separate coming-soon MongoDB entities"]
+    mongo_Waitlist["Waitlist"]
+    mongo_Contact["Contact"]
+  end
+  academic_years -->|"institution_id"| institutions
+  action_item_owners -->|"institution_id"| institutions
+  action_item_owners -->|"owner_id"| users
+  activities -->|"current_version_id"| activity_versions
+  activities -->|"institution_id"| institutions
+  activities -->|"created_by"| users
+  activity_audience_groups -->|"activity_id"| activities
+  activity_audience_groups -->|"group_id"| groups
+  activity_audit_events -->|"activity_id"| activities
+  activity_audit_events -->|"actor_id"| users
+  activity_response_history -->|"response_id"| activity_responses
+  activity_responses -->|"activity_id"| activities
+  activity_responses -->|"version_id"| activity_versions
+  activity_responses -->|"student_id"| users
+  activity_versions -->|"activity_id"| activities
+  admin_accounts -->|"created_by"| admin_accounts
+  admin_dashboard_layouts -->|"admin_id"| admin_accounts
+  admin_sessions -->|"admin_id"| admin_accounts
+  admin_sessions -->|"revoked_by"| admin_accounts
+  announcement_institutions -->|"announcement_id"| announcements
+  announcement_institutions -->|"institution_id"| institutions
+  announcements -->|"approved_by"| admin_accounts
+  announcements -->|"created_by"| admin_accounts
+  announcements -->|"institution_id"| institutions
+  anonymous_survey_questions -->|"survey_id"| anonymous_surveys
+  anonymous_survey_responses -->|"survey_id"| anonymous_surveys
+  anonymous_surveys -->|"created_by"| admin_accounts
+  attempt_behavior_events -->|"question_id"| questions
+  attempt_behavior_events -->|"attempt_id"| quiz_attempts
+  attempt_behavior_events -->|"user_id"| users
+  attempt_daily_metrics -->|"quiz_id"| quizzes
+  attempt_daily_metrics -->|"user_id"| users
+  audit_log -->|"institution_id"| institutions
+  badges -->|"user_id"| users
+  brands -->|"approved_by"| admin_accounts
+  brands -->|"created_by"| admin_accounts
+  class_curricula -->|"academic_year_id, institution_id"| academic_years
+  class_curricula -->|"version_id, curriculum_id, institution_id"| curriculum_versions
+  class_curricula -->|"group_id, institution_id"| groups
+  clue_reveals -->|"question_id"| questions
+  clue_reveals -->|"attempt_id"| quiz_attempts
+  contact_submissions -->|"assignee_id"| admin_accounts
+  contact_submissions -->|"resolved_by"| admin_accounts
+  content_delivery_events -->|"user_id"| users
+  curricula -->|"institution_id"| institutions
+  curriculum_chapters -->|"version_id"| curriculum_versions
+  curriculum_concepts -->|"chapter_id"| curriculum_chapters
+  curriculum_version_revisions -->|"version_id"| curriculum_versions
+  curriculum_version_revisions -->|"actor_id"| users
+  curriculum_versions -->|"curriculum_id, institution_id"| curricula
+  curriculum_versions -->|"copied_from_version_id"| curriculum_versions
+  demo_events -->|"quiz_id"| quizzes
+  departments -->|"institution_id"| institutions
+  device_tokens -->|"user_id"| users
+  enrollments -->|"institution_id"| institutions
+  enrollments -->|"user_id"| users
+  featured_quizzes -->|"quiz_id"| quizzes
+  group_student_history -->|"group_id"| groups
+  group_student_history -->|"user_id"| users
+  group_students -->|"group_id"| groups
+  group_students -->|"user_id"| users
+  group_teachers -->|"group_id"| groups
+  group_teachers -->|"user_id"| users
+  groups -->|"source_concept_id"| curriculum_concepts
+  groups -->|"department_id, institution_id"| departments
+  groups -->|"source_group_id"| groups
+  groups -->|"institution_id"| institutions
+  groups -->|"created_by"| users
+  impersonation_sessions -->|"admin_id"| admin_accounts
+  impersonation_sessions -->|"user_id"| users
+  institution_domains -->|"verified_by"| admin_accounts
+  institution_domains -->|"institution_id"| institutions
+  institution_multiplier_history -->|"changed_by"| admin_accounts
+  institution_multiplier_history -->|"institution_id"| institutions
+  institutions -->|"verified_by"| admin_accounts
+  leaderboard_scores -->|"user_id"| users
+  leaderboard_snapshots -->|"institution_id"| institutions
+  learner_ratings -->|"user_id"| users
+  learner_topic_mastery -->|"user_id"| users
+  learning_assignment_recipients -->|"assignment_id"| learning_assignments
+  learning_assignment_recipients -->|"attempt_id"| quiz_attempts
+  learning_assignment_recipients -->|"student_id"| users
+  learning_assignments -->|"source_concept_id"| curriculum_concepts
+  learning_assignments -->|"group_id, institution_id"| groups
+  learning_assignments -->|"institution_id"| institutions
+  learning_assignments -->|"quiz_id"| quizzes
+  learning_assignments -->|"created_by"| users
+  learning_assignments -->|"follow_up_reviewed_by"| users
+  learning_evidence -->|"concept_id"| curriculum_concepts
+  learning_evidence -->|"institution_id"| institutions
+  learning_evidence -->|"misconception_id"| misconceptions
+  learning_evidence -->|"option_id"| question_options
+  learning_evidence -->|"response_id"| question_responses
+  learning_evidence -->|"question_version_id"| question_versions
+  learning_evidence -->|"question_id"| questions
+  learning_evidence -->|"attempt_id"| quiz_attempts
+  learning_evidence -->|"user_id"| users
+  learning_evidence_misconceptions -->|"evidence_id"| learning_evidence
+  learning_evidence_misconceptions -->|"misconception_id"| misconceptions
+  misconception_reviews -->|"institution_id"| institutions
+  misconception_reviews -->|"misconception_id"| misconceptions
+  misconception_reviews -->|"reviewed_by"| users
+  misconception_reviews -->|"student_id"| users
+  misconceptions -->|"concept_id"| curriculum_concepts
+  misconceptions -->|"institution_id"| institutions
+  misconceptions -->|"created_by"| users
+  notice_audience -->|"department_id"| departments
+  notice_audience -->|"group_id"| groups
+  notice_audience -->|"notice_id"| notices
+  notices -->|"institution_id"| institutions
+  notices -->|"created_by"| users
+  notification_preferences -->|"user_id"| users
+  offline_answer_exposures -->|"quiz_id"| quizzes
+  offline_answer_exposures -->|"user_id"| users
+  onboarding_sessions -->|"quiz_id"| quizzes
+  onboarding_sessions -->|"claimed_by"| users
+  parent_student_links -->|"parent_id"| users
+  parent_student_links -->|"student_id"| users
+  parent_summaries -->|"institution_id"| institutions
+  parent_summaries -->|"student_id"| users
+  parent_summaries -->|"teacher_id"| users
+  platform_settings -->|"updated_by"| admin_accounts
+  point_economy_config -->|"updated_by"| admin_accounts
+  points_ledger -->|"user_id"| users
+  practice_sessions -->|"quiz_id"| quizzes
+  practice_sessions -->|"user_id"| users
+  profile_views -->|"viewed_id"| users
+  profile_views -->|"viewer_id"| users
+  promo_institutions -->|"institution_id"| institutions
+  promo_institutions -->|"promo_id"| promotional_content
+  promotional_content -->|"approved_by"| admin_accounts
+  promotional_content -->|"created_by"| admin_accounts
+  promotional_content -->|"institution_id"| institutions
+  question_concepts -->|"concept_id"| curriculum_concepts
+  question_concepts -->|"question_id"| questions
+  question_concepts -->|"mapped_by"| users
+  question_lsh_buckets -->|"question_id"| questions
+  question_misconception_options -->|"misconception_id"| misconceptions
+  question_misconception_options -->|"option_id"| question_options
+  question_misconception_options -->|"question_id"| questions
+  question_misconception_options -->|"reviewed_by"| users
+  question_misconception_suggestions -->|"question_id"| questions
+  question_misconception_suggestions -->|"created_by"| users
+  question_options -->|"question_id"| questions
+  question_responses -->|"option_id"| question_options
+  question_responses -->|"question_id"| questions
+  question_responses -->|"attempt_id"| quiz_attempts
+  question_versions -->|"question_id"| questions
+  questions -->|"quiz_id"| quizzes
+  quiz_attempt_questions -->|"question_version_id"| question_versions
+  quiz_attempt_questions -->|"question_id"| questions
+  quiz_attempt_questions -->|"attempt_id"| quiz_attempts
+  quiz_attempts -->|"quiz_id"| quizzes
+  quiz_attempts -->|"user_id"| users
+  quiz_curriculum_units -->|"unit_id"| curriculum_chapters
+  quiz_curriculum_units -->|"quiz_id"| quizzes
+  quiz_read_stats -->|"quiz_id"| quizzes
+  quizzes -->|"approved_by"| admin_accounts
+  quizzes -->|"curriculum_concept_id"| curriculum_concepts
+  quizzes -->|"domain"| domains
+  quizzes -->|"group_id"| groups
+  quizzes -->|"institution_id"| institutions
+  quizzes -->|"subdomain"| subdomains
+  quizzes -->|"created_by"| users
+  recommendation_bandit_stats -->|"quiz_id"| quizzes
+  recommendation_bandit_stats -->|"user_id"| users
+  recruiter_audit_events -->|"organisation_id"| recruiter_organisations
+  recruiter_audit_events -->|"actor_id"| users
+  recruiter_candidate_states -->|"organisation_id"| recruiter_organisations
+  recruiter_candidate_states -->|"role_id"| recruiter_roles
+  recruiter_candidate_states -->|"candidate_id"| users
+  recruiter_candidate_states -->|"updated_by"| users
+  recruiter_memberships -->|"organisation_id"| recruiter_organisations
+  recruiter_memberships -->|"user_id"| users
+  recruiter_roles -->|"organisation_id"| recruiter_organisations
+  recruiter_roles -->|"created_by"| users
+  referral_code_reset_requests -->|"institution_id"| institutions
+  referral_code_reset_requests -->|"requested_by"| users
+  referral_code_reset_requests -->|"resolved_by"| users
+  reports -->|"reviewed_by"| admin_accounts
+  reports -->|"question_id"| questions
+  reports -->|"quiz_id"| quizzes
+  reports -->|"reporter_id"| users
+  saved_quizzes -->|"quiz_id"| quizzes
+  saved_quizzes -->|"user_id"| users
+  scorecard_share_days -->|"user_id"| users
+  sponsorship_requests -->|"reviewed_by"| admin_accounts
+  sponsorship_requests -->|"brand_id"| brands
+  sponsorship_requests -->|"quiz_id"| quizzes
+  staff_role_assignments -->|"department_id, institution_id"| departments
+  staff_role_assignments -->|"institution_id"| institutions
+  staff_role_assignments -->|"granted_by"| users
+  staff_role_assignments -->|"revoked_by"| users
+  staff_role_assignments -->|"user_id"| users
+  streaks -->|"user_id"| users
+  student_invites -->|"group_id"| groups
+  student_invites -->|"institution_id"| institutions
+  student_invites -->|"accepted_by"| users
+  student_invites -->|"invited_by"| users
+  study_group_members -->|"group_id"| study_groups
+  study_group_members -->|"user_id"| users
+  study_groups -->|"owner_id"| users
+  subdomains -->|"domain_slug"| domains
+  teacher_feature_onboarding -->|"institution_id"| institutions
+  teacher_feature_onboarding -->|"teacher_id"| users
+  teacher_invites -->|"institution_id"| institutions
+  teacher_invites -->|"invited_by"| users
+  teacher_notification_preferences -->|"user_id"| users
+  teacher_quiz_favorites -->|"quiz_id"| quizzes
+  teacher_quiz_favorites -->|"user_id"| users
+  teacher_student_support -->|"institution_id"| institutions
+  teacher_student_support -->|"student_id"| users
+  teacher_student_support -->|"teacher_id"| users
+  topic_requests -->|"institution_id"| institutions
+  topic_requests -->|"resolved_quiz_id"| quizzes
+  topic_requests -->|"assigned_to"| users
+  topic_requests -->|"student_id"| users
+  user_dashboard_layouts -->|"user_id"| users
+  user_education -->|"user_id"| users
+  user_emails -->|"user_id"| users
+  user_follows -->|"followee_id"| users
+  user_follows -->|"follower_id"| users
+  user_notifications -->|"user_id"| users
+  user_preferences -->|"user_id"| users
+  user_profile_entries -->|"user_id"| users
+  user_profile_entry_reviews -->|"institution_id"| institutions
+  user_profile_entry_reviews -->|"revision_id"| user_profile_entry_revisions
+  user_profile_entry_reviews -->|"reviewer_id"| users
+  user_profile_entry_revisions -->|"institution_id"| institutions
+  user_profile_entry_revisions -->|"entry_id"| user_profile_entries
+  user_sign_ins -->|"user_id"| users
+  user_skills -->|"user_id"| users
+  users -->|"institution_id"| institutions
+  webauthn_credentials -->|"admin_id"| admin_accounts
+  webauthn_user_credentials -->|"user_id"| users

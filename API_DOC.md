@@ -1191,6 +1191,21 @@ Removes a quiz from the user's saved list.
 
 ---
 
+## GET `/quizzes/{quizId}/leaderboard`
+Play & win quizzes only (`400` otherwise; `404` when the caller cannot view the quiz). Ranks each active student's best completed attempt: higher `score_pct` first, then shorter `duration_seconds` (completed − started); learners tied on both share a `rank`. Returns the top 50 plus the caller's own row as `me` (null when they have not finished it). Not cached. Rate limited to 60/min per user. Teachers can read their own quizzes' board; it is not filtered by class.
+
+```json
+{
+  "entries": [
+    { "rank": 1, "user_id": "uuid", "display_name": "Asha", "institution_name": "Delhi Public School",
+      "score_pct": 90, "total_correct": 9, "total_questions": 10, "duration_seconds": 65,
+      "avatar_persona": null, "avatar_tier": 1 }
+  ],
+  "me": { "rank": 57, "user_id": "uuid", "display_name": "Me", "score_pct": 40, "total_correct": 4, "total_questions": 10, "duration_seconds": 30, "avatar_persona": null, "avatar_tier": 1 },
+  "total": 80
+}
+```
+
 ## GET `/quizzes/{quizId}/share`
 **Auth required:** Yes
 
@@ -1709,12 +1724,15 @@ Domain → subdomain tree for the quiz authoring dropdowns.
   "subdomain":   "quant_percentages",
   "curriculum_unit_ids": ["chapter-uuid-1", "chapter-uuid-2"],
   "curriculum_question_mapping_enabled": true,
+  "question_limit": 10,
+  "starts_at":   "2024-05-20T09:00:00Z",
+  "ends_at":     "2024-06-01T00:00:00Z",
   "time_limit":  30,
   "expires_at":  "2024-06-01T00:00:00Z"
 }
 ```
 
-`title` is required. `visibility` defaults to `institution`. `domain`/`subdomain` are optional but validated against `/teacher/quizzes/taxonomy` — a subdomain must belong to its domain, else `400`. `curriculum_unit_ids` contains published curriculum chapter IDs assigned to the selected class. When `curriculum_question_mapping_enabled` is true, the teacher can optionally map individual questions to topics from those units.
+`title` is required. `visibility` defaults to `institution`. `domain`/`subdomain` are optional but validated against `/teacher/quizzes/taxonomy` — a subdomain must belong to its domain, else `400`. `curriculum_unit_ids` contains published curriculum chapter IDs assigned to the selected class. When `curriculum_question_mapping_enabled` is true, the teacher can optionally map individual questions to topics from those units. `question_limit` (optional, ≥ 1) serves that many questions per attempt, drawn at random from the quiz's bank; `null` or absent serves every question. `starts_at`/`ends_at` (optional) set when learners can open the quiz: it stays hidden from feeds and cannot be started outside the window; `ends_at` must be after `starts_at` (`400`), and publishing is refused once `ends_at` has passed. PATCH replaces all three, so send the current values on every update.
 
 ### Response `201`
 Quiz object.

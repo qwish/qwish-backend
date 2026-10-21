@@ -263,6 +263,14 @@ func (h *Handler) TeacherCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Title = strings.TrimSpace(req.Title)
+	if req.QuestionLimit != nil && *req.QuestionLimit < 1 {
+		middleware.BadRequest(w, "question_limit must be at least 1")
+		return
+	}
+	if req.StartsAt != nil && req.EndsAt != nil && !req.EndsAt.After(*req.StartsAt) {
+		middleware.BadRequest(w, "ends_at must be after starts_at")
+		return
+	}
 	if req.Visibility == "" {
 		req.Visibility = "institution"
 	}
@@ -409,6 +417,14 @@ func (h *Handler) TeacherUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Title = strings.TrimSpace(req.Title)
+	if req.QuestionLimit != nil && *req.QuestionLimit < 1 {
+		middleware.BadRequest(w, "question_limit must be at least 1")
+		return
+	}
+	if req.StartsAt != nil && req.EndsAt != nil && !req.EndsAt.After(*req.StartsAt) {
+		middleware.BadRequest(w, "ends_at must be after starts_at")
+		return
+	}
 	if req.Visibility == "public" && (req.GroupID != nil || req.ConceptID != nil || len(req.CurriculumUnitIDs) > 0 || req.CurriculumQuestionMappingEnabled) {
 		middleware.BadRequest(w, "public quizzes cannot target a class or institution curriculum")
 		return

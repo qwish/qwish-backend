@@ -3,8 +3,10 @@ package quiz
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -66,6 +68,66 @@ type Question struct {
 	CorrectAnswer    json.RawMessage `json:"correct_answer"`
 	TimeLimitSeconds int             `json:"time_limit_seconds"`
 	Clues            json.RawMessage `json:"clues,omitempty"`
+	Difficulty       float64         `json:"difficulty"`
+	QuestionMeta
+}
+
+// QuestionMeta is optional authoring metadata. It never changes how an answer
+// is scored or the question's revision. On update a nil field keeps the stored
+// value and an empty string clears it.
+type QuestionMeta struct {
+	BloomLevel          *string `json:"bloom_level,omitempty"`
+	AnswerExplanation   *string `json:"answer_explanation,omitempty"`
+	WhyNotOthers        *string `json:"why_not_others,omitempty"`
+	KeyConcepts         *string `json:"key_concepts,omitempty"`
+	DifficultyRationale *string `json:"difficulty_rationale,omitempty"`
+}
+
+// questionCols / scanTargets keep every full-question read in one column order.
+const questionCols = `id, quiz_id, position, type, prompt, media_url, options, correct_answer, time_limit_seconds, clues,
+	difficulty::float8, bloom_level, answer_explanation, why_not_others, key_concepts, difficulty_rationale`
+
+func (q *Question) scanTargets() []any {
+	return []any{&q.ID, &q.QuizID, &q.Position, &q.Type, &q.Prompt, &q.MediaURL, &q.Options, &q.CorrectAnswer,
+		&q.TimeLimitSeconds, &q.Clues, &q.Difficulty, &q.BloomLevel, &q.AnswerExplanation, &q.WhyNotOthers,
+		&q.KeyConcepts, &q.DifficultyRationale}
+}
+
+var bloomLevels = map[string]bool{"remember": true, "understand": true, "apply": true, "analyse": true, "evaluate": true, "create": true}
+
+const maxMetaChars = 4000
+
+var ErrInvalidQuestion = errors.New("invalid question")
+
+// validateQuestionMeta checks the optional fields; absent ones always pass.
+func validateQuestionMeta(req AddQuestionReq) error {
+	if d := req.Difficulty; d != nil && !(*d >= 0.40 && *d <= 1.00) { // also rejects NaN
+		return fmt.Errorf("%w: difficulty must be between 0.40 and 1.00", ErrInvalidQuestion)
+	}
+	if b := req.BloomLevel; b != nil && *b != "" && !bloomLevels[*b] {
+		return fmt.Errorf("%w: bloom_level must be remember, understand, apply, analyse, evaluate or create", ErrInvalidQuestion)
+	}
+	for name, v := range map[string]*string{"answer_explanation": req.AnswerExplanation, "why_not_others": req.WhyNotOthers,
+		"key_concepts": req.KeyConcepts, "difficulty_rationale": req.DifficultyRationale} {
+		if v != nil && utf8.RuneCountInString(*v) > maxMetaChars {
+			return fmt.Errorf("%w: %s must be at most %d characters", ErrInvalidQuestion, name, maxMetaChars)
+		}
+	}
+	return nil
+}
+
+// metaArgs are the optional fields in the order of metaInsertCols.
+func (req AddQuestionReq) metaArgs() []any {
+	return []any{req.Difficulty, req.BloomLevel, req.AnswerExplanation, req.WhyNotOthers, req.KeyConcepts, req.DifficultyRationale}
+}
+
+const metaInsertCols = `difficulty, bloom_level, answer_explanation, why_not_others, key_concepts, difficulty_rationale`
+
+// metaInsertVals renders the placeholders for metaArgs starting at $first.
+// An absent difficulty falls back to the column default (0.60, migration 020).
+func metaInsertVals(first int) string {
+	return fmt.Sprintf(`COALESCE($%d::numeric, 0.60), NULLIF($%d::text,''), NULLIF($%d::text,''), NULLIF($%d::text,''), NULLIF($%d::text,''), NULLIF($%d::text,'')`,
+		first, first+1, first+2, first+3, first+4, first+5)
 }
 
 type CreateQuizReq struct {
@@ -98,6 +160,9 @@ type AddQuestionReq struct {
 	// R11 — AI-suggested misconception per wrong option. Stored unreviewed;
 	// never feeds learning signals until a teacher accepts it.
 	OptionMisconceptions []OptionMisconception `json:"option_misconceptions,omitempty"`
+	// Optional authored difficulty (0.40–1.00); nil keeps the stored value.
+	Difficulty *float64 `json:"difficulty,omitempty"`
+	QuestionMeta
 }
 
 type OptionMisconception struct {
@@ -640,15 +705,14 @@ func (s *Service) Duplicate(ctx context.Context, sourceID, teacherID string, req
 		}
 	}
 
-	rows, err := tx.Query(ctx, `SELECT id,position,type,prompt,media_url,options,correct_answer,time_limit_seconds,clues
-		FROM questions WHERE quiz_id=$1 ORDER BY position`, sourceID)
+	rows, err := tx.Query(ctx, `SELECT `+questionCols+` FROM questions WHERE quiz_id=$1 ORDER BY position`, sourceID)
 	if err != nil {
 		return nil, err
 	}
 	var questions []Question
 	for rows.Next() {
 		var q Question
-		if err = rows.Scan(&q.ID, &q.Position, &q.Type, &q.Prompt, &q.MediaURL, &q.Options, &q.CorrectAnswer, &q.TimeLimitSeconds, &q.Clues); err != nil {
+		if err = rows.Scan(q.scanTargets()...); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -662,11 +726,13 @@ func (s *Service) Duplicate(ctx context.Context, sourceID, teacherID string, req
 
 	for _, sourceQuestion := range questions {
 		var newID string
+		m := sourceQuestion.QuestionMeta
 		if err = tx.QueryRow(ctx, `INSERT INTO questions
-			(quiz_id,position,type,prompt,media_url,options,correct_answer,time_limit_seconds,clues)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, duplicateID, sourceQuestion.Position,
+			(quiz_id,position,type,prompt,media_url,options,correct_answer,time_limit_seconds,clues,`+metaInsertCols+`)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`, duplicateID, sourceQuestion.Position,
 			sourceQuestion.Type, sourceQuestion.Prompt, sourceQuestion.MediaURL, sourceQuestion.Options,
-			sourceQuestion.CorrectAnswer, sourceQuestion.TimeLimitSeconds, sourceQuestion.Clues).Scan(&newID); err != nil {
+			sourceQuestion.CorrectAnswer, sourceQuestion.TimeLimitSeconds, sourceQuestion.Clues,
+			sourceQuestion.Difficulty, m.BloomLevel, m.AnswerExplanation, m.WhyNotOthers, m.KeyConcepts, m.DifficultyRationale).Scan(&newID); err != nil {
 			return nil, err
 		}
 		if _, err = tx.Exec(ctx, `INSERT INTO question_concepts(question_id,concept_id,weight,mapped_by)
@@ -760,6 +826,9 @@ func (s *Service) validateAdminQuiz(ctx context.Context, req AdminCreateQuizReq)
 		if question.TimeLimitSeconds < 0 || question.TimeLimitSeconds > 600 {
 			return fmt.Errorf("question %d has an invalid time limit", i+1)
 		}
+		if err := validateQuestionMeta(question); err != nil {
+			return fmt.Errorf("question %d: %w", i+1, err)
+		}
 	}
 	// Bulk saves replace the whole question bank, so duplicates can only hide
 	// inside the batch itself.
@@ -824,9 +893,10 @@ func insertAdminQuestions(ctx context.Context, tx pgx.Tx, quizID string, questio
 			options = json.RawMessage("[]")
 		}
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO questions (quiz_id, position, type, prompt, media_url, options, correct_answer, time_limit_seconds, clues)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			quizID, i+1, question.Type, question.Prompt, question.MediaURL, options, question.CorrectAnswer, question.TimeLimitSeconds, question.Clues); err != nil {
+			`INSERT INTO questions (quiz_id, position, type, prompt, media_url, options, correct_answer, time_limit_seconds, clues, `+metaInsertCols+`)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, `+metaInsertVals(10)+`)`,
+			append([]any{quizID, i + 1, question.Type, question.Prompt, question.MediaURL, options, question.CorrectAnswer, question.TimeLimitSeconds, question.Clues},
+				question.metaArgs()...)...); err != nil {
 			return err
 		}
 	}
@@ -1022,6 +1092,9 @@ func (s *Service) AddQuestion(ctx context.Context, quizID, ownerID string, req A
 	if req.TimeLimitSeconds < 0 || req.TimeLimitSeconds > 600 {
 		return nil, fmt.Errorf("time limit must be from 0 to 600 seconds")
 	}
+	if err := validateQuestionMeta(req); err != nil {
+		return nil, err
+	}
 	// Verify ownership
 	var check int
 	s.db.QueryRow(ctx, `SELECT 1 FROM quizzes WHERE id=$1 AND created_by=$2 AND deleted_at IS NULL`, quizID, ownerID).Scan(&check)
@@ -1040,12 +1113,13 @@ func (s *Service) AddQuestion(ctx context.Context, quizID, ownerID string, req A
 
 	q := &Question{}
 	err := s.db.QueryRow(ctx,
-		`INSERT INTO questions (quiz_id, position, type, prompt, media_url, options, correct_answer, time_limit_seconds, clues)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-		 RETURNING id, quiz_id, position, type, prompt, media_url, options, correct_answer, time_limit_seconds, clues`,
-		quizID, req.Position, req.Type, req.Prompt, req.MediaURL, req.Options, req.CorrectAnswer, req.TimeLimitSeconds, req.Clues,
-	).Scan(&q.ID, &q.QuizID, &q.Position, &q.Type, &q.Prompt, &q.MediaURL,
-		&q.Options, &q.CorrectAnswer, &q.TimeLimitSeconds, &q.Clues)
+		`INSERT INTO questions (quiz_id, position, type, prompt, media_url, options, correct_answer, time_limit_seconds, clues,
+		   `+metaInsertCols+`)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,`+metaInsertVals(10)+`)
+		 RETURNING `+questionCols,
+		append([]any{quizID, req.Position, req.Type, req.Prompt, req.MediaURL, req.Options, req.CorrectAnswer, req.TimeLimitSeconds, req.Clues},
+			req.metaArgs()...)...,
+	).Scan(q.scanTargets()...)
 	if err != nil {
 		return nil, err
 	}
@@ -1070,6 +1144,9 @@ func (s *Service) UpdateQuestion(ctx context.Context, quizID, questionID, ownerI
 	if req.TimeLimitSeconds < 0 || req.TimeLimitSeconds > 600 {
 		return fmt.Errorf("time limit must be from 0 to 600 seconds")
 	}
+	if err := validateQuestionMeta(req); err != nil {
+		return err
+	}
 	var check int
 	s.db.QueryRow(ctx, `SELECT 1 FROM quizzes WHERE id=$1 AND created_by=$2`, quizID, ownerID).Scan(&check)
 	if check == 0 {
@@ -1080,10 +1157,18 @@ func (s *Service) UpdateQuestion(ctx context.Context, quizID, questionID, ownerI
 	} else if duplicate {
 		return ErrDuplicateQuestion
 	}
+	// Metadata: NULL param keeps the stored value, '' clears it.
 	_, err := s.db.Exec(ctx,
-		`UPDATE questions SET position=$1, type=$2, prompt=$3, media_url=$4, options=$5, correct_answer=$6, time_limit_seconds=$7, clues=$8
+		`UPDATE questions SET position=$1, type=$2, prompt=$3, media_url=$4, options=$5, correct_answer=$6, time_limit_seconds=$7, clues=$8,
+		   difficulty=COALESCE($11::numeric, difficulty),
+		   bloom_level=CASE WHEN $12::text IS NULL THEN bloom_level ELSE NULLIF($12,'') END,
+		   answer_explanation=CASE WHEN $13::text IS NULL THEN answer_explanation ELSE NULLIF($13,'') END,
+		   why_not_others=CASE WHEN $14::text IS NULL THEN why_not_others ELSE NULLIF($14,'') END,
+		   key_concepts=CASE WHEN $15::text IS NULL THEN key_concepts ELSE NULLIF($15,'') END,
+		   difficulty_rationale=CASE WHEN $16::text IS NULL THEN difficulty_rationale ELSE NULLIF($16,'') END
 		 WHERE id=$9 AND quiz_id=$10`,
-		req.Position, req.Type, req.Prompt, req.MediaURL, req.Options, req.CorrectAnswer, req.TimeLimitSeconds, req.Clues, questionID, quizID)
+		append([]any{req.Position, req.Type, req.Prompt, req.MediaURL, req.Options, req.CorrectAnswer, req.TimeLimitSeconds, req.Clues, questionID, quizID},
+			req.metaArgs()...)...)
 	return err
 }
 
@@ -1210,8 +1295,7 @@ func (s *Service) UnsaveQuiz(ctx context.Context, userID, quizID string) error {
 
 func (s *Service) GetQuestions(ctx context.Context, quizID string) ([]Question, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT id, quiz_id, position, type, prompt, media_url, options, correct_answer, time_limit_seconds, clues
-		 FROM questions WHERE quiz_id=$1 ORDER BY position`, quizID)
+		`SELECT `+questionCols+` FROM questions WHERE quiz_id=$1 ORDER BY position`, quizID)
 	if err != nil {
 		return nil, err
 	}
@@ -1219,8 +1303,9 @@ func (s *Service) GetQuestions(ctx context.Context, quizID string) ([]Question, 
 	var questions []Question
 	for rows.Next() {
 		var q Question
-		rows.Scan(&q.ID, &q.QuizID, &q.Position, &q.Type, &q.Prompt, &q.MediaURL,
-			&q.Options, &q.CorrectAnswer, &q.TimeLimitSeconds, &q.Clues)
+		if err := rows.Scan(q.scanTargets()...); err != nil {
+			return nil, err
+		}
 		questions = append(questions, q)
 	}
 	if questions == nil {

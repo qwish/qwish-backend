@@ -1742,12 +1742,26 @@ Updated quiz object.
   "options":        ["Nucleus", "Mitochondria", "Ribosome", "Golgi body"],
   "correct_answer": "Mitochondria",
   "position":       1,
-  "points":         10,
-  "time_limit":     20
+  "time_limit_seconds": 20,
+
+  "difficulty":           0.55,
+  "bloom_level":          "remember",
+  "answer_explanation":   "Mitochondria produce most of the cell's ATP through respiration.",
+  "why_not_others":       "Nucleus: stores DNA. Ribosome: makes proteins. Golgi body: packages proteins.",
+  "key_concepts":         "Organelle functions; cellular respiration happens in mitochondria.",
+  "difficulty_rationale": "Easy: single-fact recall."
 }
 ```
 
-`prompt` and `type` are required.
+`prompt` and `type` are required. The last six fields are optional authoring metadata (migration 110):
+
+| Field | Rules |
+|---|---|
+| `difficulty` | 0.40–1.00. Seeds the learner rating for the question's first answers (`scoring.SeedDifficulty`); refined nightly from responses. Omitted on create → 0.60. |
+| `bloom_level` | `remember` · `understand` · `apply` · `analyse` · `evaluate` · `create` |
+| `answer_explanation`, `why_not_others`, `key_concepts`, `difficulty_rationale` | free text, ≤ 4000 characters each |
+
+On PATCH an omitted field keeps its stored value and `""` clears it (`difficulty` can only be set, not cleared). Invalid metadata returns `400`. These fields do not change the question's `revision`. They are returned on the teacher question list (`GET /teacher/quizzes/{quizId}/questions`) and question bank, and never on student endpoints.
 
 ### Response `201`
 Question object.

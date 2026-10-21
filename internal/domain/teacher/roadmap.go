@@ -232,6 +232,7 @@ func (h *Handler) QuestionBank(w http.ResponseWriter, r *http.Request) {
 		   WHERE qc.question_id IN (SELECT id FROM mine) ORDER BY qc.question_id, qc.weight DESC
 		)
 		SELECT m.id, m.quiz_id, m.position, m.type, m.prompt, m.media_url, m.options, m.correct_answer, m.time_limit_seconds, m.clues,
+		       m.bloom_level, m.answer_explanation, m.why_not_others, m.key_concepts, m.difficulty_rationale,
 		       m.quiz_title, c.concept_id::text, c.code, s.acc::float8, COALESCE(s.responses,0), COALESCE(s.wrong,false),
 		       (SELECT COUNT(DISTINCT o.quiz_id) FROM mine o WHERE o.type=m.type AND lower(o.prompt)=lower(m.prompt))
 		  FROM mine m LEFT JOIN stats s ON s.question_id=m.id LEFT JOIN concept c ON c.question_id=m.id
@@ -254,10 +255,11 @@ func (h *Handler) QuestionBank(w http.ResponseWriter, r *http.Request) {
 		var id, quizID, qtype, prompt, quizTitle string
 		var pos, tl, responses, usedIn int
 		var media, conceptID, code *string
+		var bloom, explanation, whyNot, keyConcepts, rationale *string
 		var options, correct, clues json.RawMessage
 		var acc *float64
 		var wrong bool
-		if err := rows.Scan(&id, &quizID, &pos, &qtype, &prompt, &media, &options, &correct, &tl, &clues, &quizTitle, &conceptID, &code, &acc, &responses, &wrong, &usedIn); err != nil {
+		if err := rows.Scan(&id, &quizID, &pos, &qtype, &prompt, &media, &options, &correct, &tl, &clues, &bloom, &explanation, &whyNot, &keyConcepts, &rationale, &quizTitle, &conceptID, &code, &acc, &responses, &wrong, &usedIn); err != nil {
 			middleware.InternalError(w)
 			return
 		}
@@ -268,7 +270,8 @@ func (h *Handler) QuestionBank(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, map[string]any{
 			"question": map[string]any{"id": id, "quiz_id": quizID, "position": pos, "type": qtype, "prompt": prompt, "media_url": media,
-				"options": options, "correct_answer": correct, "time_limit_seconds": tl, "clues": clueList},
+				"options": options, "correct_answer": correct, "time_limit_seconds": tl, "clues": clueList,
+				"bloom_level": bloom, "answer_explanation": explanation, "why_not_others": whyNot, "key_concepts": keyConcepts, "difficulty_rationale": rationale},
 			"quiz_title": quizTitle, "concept_id": conceptID, "concept_code": code, "accuracy_pct": acc,
 			"responses": responses, "used_in": usedIn, "has_distractor_data": wrong,
 		})

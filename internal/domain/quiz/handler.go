@@ -458,6 +458,10 @@ func (h *Handler) TeacherAddQuestion(w http.ResponseWriter, r *http.Request) {
 			middleware.Error(w, http.StatusConflict, "DUPLICATE_QUESTION", err.Error())
 			return
 		}
+		if errors.Is(err, ErrInvalidQuestion) {
+			middleware.BadRequest(w, err.Error())
+			return
+		}
 		middleware.Error(w, http.StatusForbidden, "FORBIDDEN", err.Error())
 		return
 	}
@@ -497,6 +501,10 @@ func (h *Handler) TeacherUpdateQuestion(w http.ResponseWriter, r *http.Request) 
 		chi.URLParam(r, "quizId"), chi.URLParam(r, "questionId"), middleware.GetUserID(r), req); err != nil {
 		if errors.Is(err, ErrDuplicateQuestion) {
 			middleware.Error(w, http.StatusConflict, "DUPLICATE_QUESTION", err.Error())
+			return
+		}
+		if errors.Is(err, ErrInvalidQuestion) {
+			middleware.BadRequest(w, err.Error())
 			return
 		}
 		middleware.Error(w, http.StatusForbidden, "FORBIDDEN", err.Error())
